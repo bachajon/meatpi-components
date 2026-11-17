@@ -342,6 +342,24 @@ counters and traffic after recovery).
   - `can_manager_transceiver(active)` moves the transceiver's standby pin
     alone, for a script that drives the TX pin by hand after stop();
     start() sets the pin itself.
+- `can_manager_send()` does not wait for room: the driver holds 16 frames
+  in flight (`CAN_DRV_TX_SLOTS`) and one more is refused at once with
+  `ESP_FAIL`, whatever the 100 ms it gives the link. A sender with a burst
+  asks `can_manager_tx_room()` (2026-11-18) and waits between frames; the
+  bridges' `can` jack does, in a task of its own behind a queue
+  (bridge_endpoints); the ISO-TP provider answers its stack "not now"
+  while there is no room, so consecutive frames an ECU wants without a gap
+  leave at the bus's pace (can_isotp_esp: until then a request above 118
+  bytes to an ECU answering `30 00 00` stopped at the 17th frame); a J2534
+  raw CAN write waits up to 100 ms (j2534_server). J1939, TP 2.0 and a
+  script's `can_tx` hand over few frames at a time and keep the refusal.
+- A frame that is sent again (lost arbitration, no acknowledge) goes AHEAD
+  of the frames handed over after it (2026-11-18): the retry is given to
+  the node driver with `tx_queue_priority` 1, and its queue takes the
+  higher priority first. At the queue's own priority the retry went out
+  behind up to 15 later frames: of a burst of 2000 frames on a bus
+  carrying 2000 frames a second of other traffic, 349 left out of place
+  (bench, the slcan stage, B13 and B14 assert the order since).
 - The ESP TWAI transceiver and the MIC3624 are two nodes on the SAME
   vehicle CAN: legal; traffic policy between autopid-via-MIC and
   native-CAN consumers is the user's call in v1.

@@ -332,6 +332,11 @@ bool can_manager_tx_ready(void)
     return s_running && s_bus.tx_open;
 }
 
+bool can_manager_tx_room(void)
+{
+    return s_running && s_bus.tx_open && can_core_tx_room(&s_bus);
+}
+
 esp_err_t can_manager_adopt_baud(uint32_t baud_kbps)
 {
     if (!s_running)

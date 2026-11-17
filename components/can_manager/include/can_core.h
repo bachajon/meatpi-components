@@ -447,6 +447,14 @@ elm327_err_t can_core_transmit(can_core_handle_t *handle,
                                    uint32_t timeout_ms);
 
 /**
+ * @brief True when can_core_transmit() would find room for a frame now.
+ *
+ * The driver holds a fixed number of frames in flight and refuses one more
+ * at once, whatever the timeout. A sender with a burst waits on this.
+ */
+bool can_core_tx_room(const can_core_handle_t *handle);
+
+/**
  * @brief Read the current CAN bus statistics.
  *
  * @param handle  CAN handle.

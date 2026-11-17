@@ -474,6 +474,20 @@ elm327_err_t can_core_transmit(can_core_handle_t *handle,
     return ELM327_OK;
 }
 
+bool can_core_tx_room(const can_core_handle_t *handle)
+{
+    if (!handle || !handle->initialised)
+    {
+        return false;
+    }
+
+#ifdef ESP_PLATFORM
+    return can_drv_tx_room();
+#else
+    return true;
+#endif
+}
+
 /* -------------------------------------------------------------------------
  * can_core_get_stats
  * ------------------------------------------------------------------------- */

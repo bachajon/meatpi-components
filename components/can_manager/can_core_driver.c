@@ -250,6 +250,15 @@ static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
         {
             slot->arb_at = s_isr.arb_lost;
 
+            /* ahead of the frames handed over after it: the node driver's
+               queue takes the higher priority first, and a frame sent
+               again at the queue's own priority went out BEHIND up to 15
+               later ones (bench 2026-11-18: of a burst of 2000 frames on
+               a bus with 2000 frames a second of other traffic 349 left
+               out of place). One frame is on the wire at a time, so at
+               most one waits at this priority. */
+            slot->f.tx_queue_priority = 1;
+
             if (twai_node_transmit(node, &slot->f, 0) == ESP_OK)
             {
                 slot->tries++;
@@ -441,6 +450,20 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
     }
 
     return ELM327_OK;
+}
+
+bool can_drv_tx_room(void)
+{
+    /* plain reads of bytes the interrupt clears and can_drv_transmit sets */
+    for (int i = 0; i < CAN_DRV_TX_SLOTS; i++)
+    {
+        if (s_tx[i].tries == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void can_drv_rx_reset(void)

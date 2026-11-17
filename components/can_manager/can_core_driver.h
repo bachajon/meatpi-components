@@ -142,6 +142,12 @@ void can_drv_tx_recessive(int tx_gpio);
 elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
                               uint32_t timeout_ms);
 
+/** True while fewer than CAN_DRV_TX_SLOTS frames are in flight, so the next
+ *  can_drv_transmit() finds a slot. A peek for a sender that would rather
+ *  wait than be refused (the refusal is at once: the slot search does not
+ *  wait); another task may take the slot in between. */
+bool can_drv_tx_room(void);
+
 #define CAN_DRV_TX_SLOTS       16 /* frames in flight (internal RAM, the ISR
                                      and the HAL read them)               */
 #define CAN_DRV_TX_RETRIES     3  /* attempts after the first, on an error  */

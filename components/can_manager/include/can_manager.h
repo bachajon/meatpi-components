@@ -110,6 +110,12 @@ esp_err_t can_manager_send(uint32_t id, bool ext, bool rtr,
  *  has another path (UDS over the OBD chip) asks this, not "is CAN up". */
 bool can_manager_tx_ready(void);
 
+/** True when can_manager_send() would also find ROOM now: tx_ready, and
+ *  fewer frames in flight than the driver holds (16). One frame more is
+ *  refused at once (ESP_FAIL), so a sender with a burst (a bridge whose
+ *  client writes a whole ISO-TP block) waits on this between frames. */
+bool can_manager_tx_room(void);
+
 /**
  * @brief A tester states the bus bitrate (a J2534 CONNECT's baud, an slcan
  *        client's `S` command).
