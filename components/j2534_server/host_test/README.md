@@ -9,7 +9,8 @@ indications, J1850 request/response helpers, the TP 2.0 helpers, and the
 settings migration.
 
 The lists of an ISO15765 channel (`j2534_iso_cfg.c`, `test_iso_cfg.c`, five
-cases): `ISO15765_STMIN` in its two codings and the reserved values, a
+cases): the values a channel opens with (0 and 0), `ISO15765_STMIN` in
+its two codings and the reserved values, a
 `SET_CONFIG` list taken whole (one value alone, the list udsoncan sends, a
 parameter the channel passes over) or refused whole (a value out of range,
 a good pair in front of it, a count without its pairs, too many pairs),

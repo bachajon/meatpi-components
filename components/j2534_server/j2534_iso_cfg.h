@@ -41,21 +41,25 @@ extern "C" {
 #define J2534_ISO_CFG_MAX 24
 
 /*
- * What a channel sends until the tool sets it: BS 8 / STmin 1 ms, what every
- * firmware before 2026-11-17 sent whatever the tool set, so a tool that
- * sets nothing sees no change. SAE J2534-1 names 0 and 0. GET_CONFIG
- * reports the values in force, and a tool that wants the speed sets 0 / 0.
+ * What a channel sends until the tool sets it: BS 0 / STmin 0, the defaults
+ * SAE J2534-1 names (2026-11-17). Every firmware before sent BS 8 / STmin
+ * 1 ms whatever the tool set, so this changes what a tool that sets nothing
+ * gets: an ECU's long answer in one go, not eight frames at a time one
+ * frame a millisecond (on the bench a 4095-byte answer in 0.16 s, 0.72 s
+ * before). GET_CONFIG reports the values in force, and a tool that wants
+ * the old pace sets 8 and 1.
  *
  * What BS 0 asks of the unit: an ECU may then send a whole message without
  * a pause, and a write to the unit's flash holds the CAN receive task about
  * 23 ms. With the node's receive queue at 64 frames that cost 28 and 30
  * frames and the 4095-byte answer that was arriving (2026-11-17, the
- * configuration backup written during it). The queue holds 256 since that
- * day and the same rate with the flash written on purpose loses nothing
- * (the firmware repo's stage j2534fc, leg W).
+ * configuration backup written during it), which is why the default was
+ * kept at 8 / 1 at first. The queue holds 256 since that day and the same
+ * rate with the flash written on purpose loses nothing (the firmware
+ * repo's stage j2534fc, leg W); the default followed.
  */
-#define J2534_ISO_DEFAULT_BS     8u
-#define J2534_ISO_DEFAULT_ST_US  1000u
+#define J2534_ISO_DEFAULT_BS     0u
+#define J2534_ISO_DEFAULT_ST_US  0u
 
 /** The flow control one channel sends as a receiver. */
 typedef struct

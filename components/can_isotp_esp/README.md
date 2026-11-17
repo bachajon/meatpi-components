@@ -111,7 +111,8 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
   no longer reach a session of this provider. Until that day they were
   what every session sent (8 and 1000) and the two fields were ignored.
   The consumers state theirs: `uds_manager` 8 / 1 ms as before, a J2534
-  channel 8 / 1 ms until its tool sets `ISO15765_BS` / `ISO15765_STMIN`.
+  channel 0 / 0 (SAE J2534-1's defaults) until its tool sets
+  `ISO15765_BS` / `ISO15765_STMIN`.
 - BS 0 at the line rate and a flash write on the unit: an erase holds
   every task about 23 ms, and the frames of that time wait in the CAN
   node's receive queue. At 64 frames it lost 28 and 30 of them

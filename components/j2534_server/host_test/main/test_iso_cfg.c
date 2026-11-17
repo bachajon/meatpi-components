@@ -103,7 +103,15 @@ static void test_iso_cfg_set_takes_the_list(void)
     j2534_iso_flow_t flow = { J2534_ISO_DEFAULT_BS, J2534_ISO_DEFAULT_ST_US };
     bool changed = false;
 
-    /* what a channel opens with */
+    /* what a channel opens with: SAE J2534-1's 0 and 0 */
+    TEST_ASSERT_EQUAL_UINT8(0, flow.bs);
+    TEST_ASSERT_EQUAL_UINT32(0, flow.st_us);
+
+    /* the old pace, as a tool asks for it */
+    const pair_t old_pace[] = { { BS, 8 }, { STMIN, 1 } };
+
+    TEST_ASSERT_EQUAL(OK, set(2, old_pace, &flow, &changed));
+    TEST_ASSERT_TRUE(changed);
     TEST_ASSERT_EQUAL_UINT8(8, flow.bs);
     TEST_ASSERT_EQUAL_UINT32(1000, flow.st_us);
 

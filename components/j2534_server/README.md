@@ -47,8 +47,9 @@ version are Elias Kotlyar's, pull request 3). `SET_CONFIG` takes
 the ones opened after, and `GET_CONFIG` answers with the values in force
 (`j2534_iso_cfg.c`: SAE J2534-1's ranges, a refused list changes
 nothing). Until then the device sent BS 8 / STmin 1 ms whatever a tool
-set, and a channel still opens with those two instead of the standard's
-0 and 0, so a tool that sets nothing sees no change. With BS 0 an ECU
+set. A channel opens with BS 0 / STmin 0 now, the defaults SAE J2534-1
+names, so a tool that sets nothing gets an ECU's long answer in one go
+as well; a tool that wants the old pace sets 8 and 1. With BS 0 an ECU
 sends a whole message without a pause; a write to the unit's own flash
 during it cost frames while the CAN receive queue held 64, and costs none
 since it holds 256 (`J2534_WIRE_PROTOCOL.md` section 12 has the

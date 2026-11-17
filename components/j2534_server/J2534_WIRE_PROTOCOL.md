@@ -278,8 +278,8 @@ Data conventions:
   its session 5 s after its last request, so a filter for that ECU
   inside those 5 s fails (`ERR_FAILED`). Retry. The flow control the
   device sends as a receiver is the channel's `ISO15765_BS` and
-  `ISO15765_STMIN` (section 12): BS 8 / STmin 1 ms until the tester sets
-  them, and always that before 2026-11-17. N_Bs and N_Cr are
+  `ISO15765_STMIN` (section 12): BS 0 / STmin 0 until the tester sets
+  them (BS 8 / STmin 1 ms always, before 2026-11-17). N_Bs and N_Cr are
   1 s (ISO 15765-2). A multi-frame write waits for its last frame
   before the `ACK` (about 10 ms per frame at the ECU's STmin, capped at
   5.5 s).
@@ -420,10 +420,12 @@ count and the pairs); on an ISO15765 channel it is answered
 
 2026-11-17, still version 1: an ISO15765 channel takes `ISO15765_BS` and
 `ISO15765_STMIN` and answers `GET_CONFIG` for them (section 12). Both
-IOCTLs as their id alone mean what they meant, and a channel nobody sets
-sends the flow control it always sent. A client finds out whether a
+IOCTLs as their id alone mean what they meant. One thing changes for a
+client that sets nothing: its channel opens with BS 0 / STmin 0, the
+defaults of SAE J2534-1, where the device sent BS 8 / STmin 1 ms before,
+so an ECU's long answer arrives in one go. A client finds out whether a
 device holds the two by asking: one that does answers `GET_CONFIG` with
-pairs, one that does not answers with its status alone.
+pairs, one that does not answers with its status alone and sends 8 / 1.
 
 ## 11. TP2.0 (`TP2_0_PS`, protocol 0x800E)
 
@@ -562,8 +564,8 @@ are Elias Kotlyar's (pull request 3).
 
 | Id | Name | Values | A channel opens with |
 |---|---|---|---|
-| `0x1E` | `ISO15765_BS` | 0..0xFF consecutive frames per block; 0 = the rest of the message after the one flow control | 8 |
-| `0x1F` | `ISO15765_STMIN` | 0x00..0x7F = milliseconds, 0xF1..0xF9 = 100..900 microseconds | 1 |
+| `0x1E` | `ISO15765_BS` | 0..0xFF consecutive frames per block; 0 = the rest of the message after the one flow control | 0 |
+| `0x1F` | `ISO15765_STMIN` | 0x00..0x7F = milliseconds, 0xF1..0xF9 = 100..900 microseconds | 0 |
 
 - `ERR_INVALID_IOCTL_VALUE`: `ISO15765_BS` over 0xFF, a reserved
   `ISO15765_STMIN` (0x80..0xF0, 0xFA and up), a count over 24, a body
@@ -576,11 +578,15 @@ are Elias Kotlyar's (pull request 3).
 - On a raw CAN or a J1850 channel both stay a `NOERROR` without effect,
   whatever the body.
 
-**A channel opens with BS 8 / STmin 1 ms, not with the 0 and 0 SAE
-J2534-1 names.** Those are the values every firmware before sent, so a
-tool that sets nothing sees no change. A tool that sets 0 / 0 gets the
-speed: on the bench a 4095-byte answer is in hand 0.16 s after the
-request instead of 0.72 s.
+**A channel opens with BS 0 / STmin 0, the defaults SAE J2534-1
+names.** Every firmware before 2026-11-17 sent BS 8 / STmin 1 ms
+whatever was set, so this is a change for a tool that sets nothing: the
+ECU's long answer comes in one go instead of eight frames at a time, one
+frame a millisecond. On the bench a 4095-byte answer is in hand 0.16 s
+after the request instead of 0.72 s. A tool that wants the old pace sets
+8 and 1. The first version of this change kept 8 / 1 as the opening
+values because of the lost answer described next; the default followed
+once the receive queue was deepened.
 
 **BS 0 and the unit's own flash.** With BS 0 an ECU may send a whole
 message without a pause, about 4000 frames a second at 500 kbit/s. A
