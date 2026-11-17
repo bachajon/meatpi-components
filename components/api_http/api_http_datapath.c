@@ -178,6 +178,10 @@ static esp_err_t sockets_handler(httpd_req_t *req)
     cJSON *arr  = cJSON_AddArrayToObject(resp, "servers");
     const cJSON *entry = NULL;
 
+    /* what one client that is behind may have waiting */
+    cJSON_AddNumberToObject(resp, "client_buffer_bytes",
+                            socket_manager_client_buffer_bytes());
+
     cJSON_ArrayForEach(entry, cfg)
     {
         cJSON *item = copy_keys(entry, KEYS,

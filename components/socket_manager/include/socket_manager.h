@@ -111,6 +111,10 @@ esp_err_t socket_manager_send(const char *server, const uint8_t *data,
 /** Per-server counters snapshot. ESP_ERR_NOT_FOUND for unknown names. */
 esp_err_t socket_manager_stats(const char *server, socket_stats_t *out);
 
+/** What one TCP client that is behind may have waiting, in bytes (a
+ *  build-time size; the status route and the bench read it from here). */
+uint32_t socket_manager_client_buffer_bytes(void);
+
 /** Configured server name for slot @p idx; NULL past the configured
  *  count. Valid after the settings boot pass (bridge_endpoints registers
  *  a jack per configured server, whatever its name); the pointer stays

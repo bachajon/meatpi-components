@@ -53,11 +53,15 @@
 
 static const char *TAG = "socket_manager";
 
-/* What one client that is behind may have waiting: about 1.3 s of a
- * 1,100 frames/s CAN bus as slcan text. A buffer is lent when a client
- * first falls behind and goes back when it has caught up, so the pool is
- * the number of clients that may be behind at the same time. */
-#define SM_BACKLOG_BYTES 32768
+/* What one client that is behind may have waiting: 64 KB, about 2.6 s of a
+ * 1,100 frames/s CAN bus as slcan text (32 KB until 2026-11-18: the unit's
+ * own search for its home network held a client on its access point for up
+ * to 1.5 s on the bench, and 32 KB ran over in 4 of 28 searches). Not a
+ * setting: it is external RAM, which is cheap, so it is sized with room
+ * instead (Ali, 2026-11-18). A buffer is lent when a client first falls
+ * behind and goes back when it has caught up, so the pool is the number of
+ * clients that may be behind at the same time. */
+#define SM_BACKLOG_BYTES 65536
 #define SM_BACKLOG_POOL  4
 
 /* A client that moved no byte for this long is gone (a phone that left the
@@ -66,6 +70,11 @@ static const char *TAG = "socket_manager";
 
 static uint8_t s_pool[SM_BACKLOG_POOL][SM_BACKLOG_BYTES] EXT_RAM_BSS_ATTR;
 static bool s_pool_used[SM_BACKLOG_POOL] EXT_RAM_BSS_ATTR;
+
+uint32_t sm_tx_buffer_bytes(void)
+{
+    return SM_BACKLOG_BYTES;
+}
 
 static void pool_lend(smp_backlog_t *b)
 {

@@ -121,6 +121,9 @@ bool smp_backlog_expired(const smp_backlog_t *b, int64_t now_us,
 /* ---- one TCP client's send side (socket_manager_tx.c) ----------------------
  * Callers hold the net lock: the pool and the sockets are shared. */
 
+/** What one client that is behind may have waiting, in bytes. */
+uint32_t sm_tx_buffer_bytes(void);
+
 /** A client's slot starts or ends: an empty backlog, its buffer returned. */
 void sm_tx_reset(smp_backlog_t *b);
 

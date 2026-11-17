@@ -32,7 +32,7 @@ nothing about what flows through it: protocol logic is translator territory.
   the excess client sees an immediate close instead of a hang.
 - **A client that is behind keeps its connection** (2026-11-17, see "A
   client that stalls" below): TX never blocks, what a client's socket does
-  not take waits in a 32 KB backlog and leaves in order, a chunk that finds
+  not take waits in a 64 KB backlog and leaves in order, a chunk that finds
   the backlog full is dropped whole and counted (`tx_drops`). Only a client
   that took no byte for 10 s is closed, and a hard socket error closes THAT
   client only; the server and the other clients keep running. An idle dead
@@ -48,6 +48,12 @@ nothing about what flows through it: protocol logic is translator territory.
   backoff 1→2→4→8 s (cap), never busy-spinning; recreations counted in
   `reconnects`.
 - **RX never blocks**: subscriber queue full → chunk dropped + `rx_drops`.
+  Since 2026-11-18 a TCP server does not get that far: while its
+  subscriber's queue has no room for a chunk per client it does not read,
+  and the client's own TCP holds its sender back. A bridge to something
+  slower than the network (a CAN bus that takes a client's burst frame by
+  frame) then loses nothing; the loop looks again every 2 ms meanwhile. UDP
+  cannot hold a sender back and drops as before.
 - Plaintext only, listeners bind `INADDR_ANY` (v1 scope per meatpi
   2026-07-03).
 
@@ -80,6 +86,11 @@ found live by the system_bench degraded leg).
 Defaults (meatpi 2026-07-03): `obd0` tcp:35000 **enabled**; `slcan0`
 tcp:3333, `gvret0` tcp:23, `udp0` udp:17 parked (disabled).
 
+What one client that is behind may have waiting (see "A client that
+stalls") is NOT a setting: a fixed 64 KB of external RAM
+(`SM_BACKLOG_BYTES`), because external RAM is cheap and is sized with room
+instead (Ali, 2026-11-18).
+
 ## Dependencies
 
 `lwip`, `settings_manager`, `log_manager`, `esp_timer`: all private;
@@ -94,7 +105,7 @@ glue/main wraps servers as endpoints.
 | Where | What | ~Size |
 |---|---|---|
 | PSRAM `.bss` | server table (fds, client tables, stats) + config + net-task stack (6 KB) | ~7 KB |
-| PSRAM `.bss` | the backlog pool: 4 buffers of 32 KB, lent to the clients that are behind (`socket_manager_tx.c`) | 128 KB |
+| PSRAM `.bss` | the backlog pool: 4 buffers of 64 KB (32 KB until 2026-11-18), lent to the clients that are behind (`socket_manager_tx.c`) | 256 KB |
 | Internal `.bss` | mutex + TCB + queue control blocks | ~1 KB |
 | Internal heap | lwIP sockets/PCBs (lwIP's own pools) | lwIP-owned |
 
@@ -105,7 +116,7 @@ glue/main wraps servers as endpoints.
   names/ports, disabled-port parking, max_clients bounds; since 2026-11-17
   the backlog (order kept around the end of the storage, many laps without
   a byte lost or repeated, a chunk taken whole or not at all, the stall
-  clock). **Green on rpi001 2026-11-17.**
+  clock). **Green on rpi001 2026-11-18.**
 - **Bench (`.\test.ps1 slcan`, leg S)**: the stalls on the real WiFi path
   with 1,100 CAN frames a second, see "A client that stalls".
 - **Target (`test_apps/`)**: lwIP-loopback suite (TCP RX/TX, 2-client
@@ -122,6 +133,9 @@ stays transport-free): configured entries from this component's settings
 + live counters from `socket_manager_stats()`; `up:false` = configured but not
 running. `bridge` (2026-10-16, the glue cross-references bridge_manager's
 settings): the enabled bridge that uses the server, or `null`.
+`client_buffer_bytes` (2026-11-18, top level): what one client that is
+behind may have waiting (`socket_manager_client_buffer_bytes()`, a
+build-time size: the slcan stage sizes its long stalls from it).
 
 ## A server nobody bridged (2026-10-16)
 
@@ -157,9 +171,12 @@ What the send path does now (`socket_manager_tx.c`, the pure part in
 `socket_manager_policy.c`):
 
 - The sockets stay non-blocking. What a client's socket does not take
-  waits in a backlog, a ring of 32 KB lent from a pool of four for as long
-  as that client is behind (about 1.3 s of the bus above). It leaves in
-  order, before anything newer.
+  waits in a backlog, a ring of 64 KB (32 KB until 2026-11-18: the unit's
+  own search for its home network held a client on its access point for up
+  to 1.5 s on the bench and 4 of 28 searches ran over 32 KB, 869 frames
+  dropped and counted) lent from a pool of four for as long as that client
+  is behind, about 2.6 s of the bus above. It leaves in order, before
+  anything newer.
 - A chunk that finds the backlog full, or the pool empty, is dropped whole
   and counted in `tx_drops`; a text protocol's line is never cut. The log
   says it once per stall: `W <name>: a client is behind (N bytes waiting),
@@ -177,6 +194,5 @@ Pull request 2 (Elias Kotlyar) had gone at the same code first: it kept the
 client and one unsent tail of up to 1 KB, with the blocking send moved out
 of the mutex. On the bench that ended the closes, and lost every frame
 past the first 110 ms of a stall without a counter (the bridge's queue
-overflowed while its pump waited in `send()`); it also let the net task
-close a socket another task was sending on. This version is what stands on
-top of his commits.
+overflowed while its pump waited in `send()`). This version is what stands
+on top of that pull request's commits.

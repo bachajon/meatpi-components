@@ -150,6 +150,11 @@ esp_err_t socket_manager_stats(const char *server, socket_stats_t *out)
     return (idx < 0) ? ESP_ERR_NOT_FOUND : sm_net_stats(idx, out);
 }
 
+uint32_t socket_manager_client_buffer_bytes(void)
+{
+    return sm_tx_buffer_bytes();
+}
+
 const char *socket_manager_server_name(int idx)
 {
     const smp_server_cfg_t *cfg = sm_core_config(idx);

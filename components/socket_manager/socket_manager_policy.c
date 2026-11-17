@@ -65,7 +65,7 @@ void smp_backlog_clear(smp_backlog_t *b)
 /* A ring: the waiting bytes run from off, around the end of the storage.
  * Nothing is ever moved. A first cut closed the gap in front with a memmove
  * of the whole backlog, which a client that stays behind paid on every
- * chunk, under the net lock: up to 32 KB of PSRAM, 1,100 times a second. */
+ * chunk, under the net lock: up to 64 KB of PSRAM, 1,100 times a second. */
 bool smp_backlog_put(smp_backlog_t *b, const uint8_t *data, size_t len)
 {
     if (b->buf == NULL || len > (size_t)(b->cap - b->len))
