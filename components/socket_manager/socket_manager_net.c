@@ -29,10 +29,15 @@
  * Robustness (spec §2): listener creation failures retry with bounded
  * backoff (pure smp_backoff_next_ms progression, never busy-spins); a client
  * is closed on a hard send error (reset, broken pipe) without disturbing
- * the server. A short or timed-out send keeps the client and the unsent
- * tail. At max_clients the newest connection is accept-then-closed (counted
- * as refused). A subscriber's full queue drops that chunk and counts it:
- * RX never blocks.
+ * the server. At max_clients the newest connection is accept-then-closed
+ * (counted as refused). A subscriber's full queue drops that chunk and
+ * counts it: RX never blocks.
+ *
+ * TX never blocks either (2026-11-17, socket_manager_tx.c): a client whose
+ * socket takes no more keeps its connection, what it has not taken waits
+ * in a backlog and leaves in order, pushed from here on the socket's
+ * writable event so it leaves on a quiet bus too. Only a client that took
+ * nothing at all for 10 s is closed, from this task's tick.
  */
 #include <errno.h>
 #include <string.h>
@@ -51,18 +56,12 @@
 static const char *TAG = "socket_manager";
 
 #define SM_SELECT_TICK_MS 200
-#define SM_SEND_TIMEOUT_MS 100
-/* One coalesced bridge send (bridge_manager BM_COALESCE_MAX). A short
- * write keeps at most this many bytes and tries them again next time. */
-#define SM_PENDING_MAX 1024
 
 typedef struct
 {
     int    fd;                 /* listener (TCP) or bound socket (UDP); -1 */
     int    clients[SOCKET_MANAGER_MAX_CLIENTS];
-    uint8_t  pend[SOCKET_MANAGER_MAX_CLIENTS][SM_PENDING_MAX];
-    uint16_t pend_len[SOCKET_MANAGER_MAX_CLIENTS];
-    uint32_t generation[SOCKET_MANAGER_MAX_CLIENTS];
+    smp_backlog_t backlog[SOCKET_MANAGER_MAX_CLIENTS];
     struct sockaddr_in last_peer;
     bool   has_peer;
     QueueHandle_t sub;
@@ -107,11 +106,6 @@ static void set_keepalive(int fd, uint16_t idle_s)
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-
-    struct timeval tv = { .tv_sec = 0,
-                          .tv_usec = SM_SEND_TIMEOUT_MS * 1000 };
-
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 /** Create + bind (+listen) one server socket. Plaintext, INADDR_ANY (v1). */
@@ -155,8 +149,8 @@ static void close_client(sm_server_t *srv, int slot)
         srv->clients[slot] = -1;
         srv->stats.clients--;
     }
-    srv->pend_len[slot] = 0;
-    srv->generation[slot]++;
+
+    sm_tx_reset(&srv->backlog[slot]);
 }
 
 static int client_count(const sm_server_t *srv)
@@ -229,7 +223,7 @@ static void handle_tcp_accept(sm_server_t *srv, const smp_server_cfg_t *cfg)
         if (srv->clients[i] < 0)
         {
             srv->clients[i] = fd;
-            srv->pend_len[i] = 0;
+            sm_tx_reset(&srv->backlog[i]);
             srv->stats.clients++;
             ESP_LOGI(TAG, "%s: client connected (%d total)", cfg->name,
                      client_count(srv));
@@ -258,6 +252,11 @@ static void handle_tcp_rx(sm_server_t *srv, const smp_server_cfg_t *cfg,
     /* internal scratch is fine on our PSRAM stack: recv copies via lwIP */
     uint8_t buf[SOCKET_MANAGER_CHUNK_SIZE];
     int n = recv(srv->clients[slot], buf, sizeof(buf), 0);
+
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        return; /* nothing to read after all: not a close */
+    }
 
     if (n <= 0)
     {
@@ -297,6 +296,33 @@ static void handle_udp_rx(sm_server_t *srv, const smp_server_cfg_t *cfg)
     deliver(srv, buf, n);
 }
 
+/* ---- TX side of one client (net task and senders, under s_lock) ------------- */
+
+/** Push what waits for client @p c, then @p data. A hard socket error
+ *  closes that client only. */
+static void client_push(sm_server_t *srv, const smp_server_cfg_t *cfg, int c,
+                        const uint8_t *data, size_t len)
+{
+    if (!sm_tx_push(srv->clients[c], &srv->backlog[c], data, len, cfg->name,
+                    &srv->stats.bytes_out, &srv->stats.tx_drops))
+    {
+        ESP_LOGW(TAG, "%s: client dropped (send error)", cfg->name);
+        close_client(srv, c);
+    }
+}
+
+/** Close the clients that took nothing for the stall limit. */
+static void reap_stalled(sm_server_t *srv, const smp_server_cfg_t *cfg)
+{
+    for (int c = 0; c < SOCKET_MANAGER_MAX_CLIENTS; c++)
+    {
+        if (srv->clients[c] >= 0 && sm_tx_gone(&srv->backlog[c], cfg->name))
+        {
+            close_client(srv, c);
+        }
+    }
+}
+
 /* ---- the net task ------------------------------------------------------------ */
 
 static void net_task(void *arg)
@@ -307,9 +333,11 @@ static void net_task(void *arg)
     while (s_running)
     {
         fd_set rfds;
+        fd_set wfds;
         int max_fd = -1;
 
         FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
         xSemaphoreTake(s_lock, portMAX_DELAY);
 
         for (int i = 0; sm_core_config(i) != NULL; i++)
@@ -358,15 +386,23 @@ static void net_task(void *arg)
                     FD_SET(srv->clients[c], &rfds);
                     max_fd = (srv->clients[c] > max_fd) ? srv->clients[c]
                                                         : max_fd;
+
+                    if (srv->backlog[c].len > 0)
+                    {
+                        /* behind: wake when its socket takes data again */
+                        FD_SET(srv->clients[c], &wfds);
+                    }
                 }
             }
+
+            reap_stalled(srv, cfg);
         }
 
         xSemaphoreGive(s_lock);
 
         struct timeval tv = { .tv_sec = 0,
                               .tv_usec = SM_SELECT_TICK_MS * 1000 };
-        int ready = select(max_fd + 1, &rfds, NULL, NULL, &tv);
+        int ready = select(max_fd + 1, &rfds, &wfds, NULL, &tv);
 
         if (ready <= 0)
         {
@@ -404,6 +440,12 @@ static void net_task(void *arg)
                 {
                     handle_tcp_rx(srv, cfg, c);
                 }
+
+                if (srv->clients[c] >= 0 &&
+                    FD_ISSET(srv->clients[c], &wfds))
+                {
+                    client_push(srv, cfg, c, NULL, 0);
+                }
             }
         }
 
@@ -430,6 +472,7 @@ esp_err_t sm_net_start(void)
         for (int c = 0; c < SOCKET_MANAGER_MAX_CLIENTS; c++)
         {
             s_srv[i].clients[c] = -1;
+            sm_tx_reset(&s_srv[i].backlog[c]);
         }
     }
 
@@ -506,62 +549,6 @@ esp_err_t sm_net_unsubscribe(int idx, void *queue_handle)
     return err;
 }
 
-static bool send_fatal(int n)
-{
-    if (n >= 0)
-    {
-        return false;
-    }
-
-    switch (errno)
-    {
-    case EPIPE:
-    case ECONNRESET:
-    case ENOTCONN:
-    case EBADF:
-    case ECONNABORTED:
-    case ENETDOWN:
-    case ENETRESET:
-        return true;
-    default:
-        return false; /* EAGAIN / EWOULDBLOCK / ETIMEDOUT: keep the client */
-    }
-}
-
-/** Blocking send outside s_lock. >=0 is bytes written (0 = timed out).
- *  -1 is a hard error; the caller closes the client. */
-static int write_some(int fd, const uint8_t *buf, size_t len)
-{
-    int fl = fcntl(fd, F_GETFL, 0);
-    int n;
-
-    fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-    n = send(fd, buf, len, 0);
-    fcntl(fd, F_SETFL, fl);
-
-    if (n < 0)
-    {
-        return send_fatal(n) ? -1 : 0;
-    }
-
-    return n;
-}
-
-static void store_tail(sm_server_t *srv, int slot, const uint8_t *buf,
-                       size_t len, int wrote)
-{
-    size_t left = len - (size_t)wrote;
-
-    if (left > SM_PENDING_MAX)
-    {
-        left = SM_PENDING_MAX;
-        srv->stats.tx_drops++;
-    }
-
-    memcpy(srv->pend[slot], buf + wrote, left);
-    srv->pend_len[slot] = (uint16_t)left;
-}
-
 esp_err_t sm_net_send(int idx, const uint8_t *data, size_t len)
 {
     const smp_server_cfg_t *cfg = sm_core_config(idx);
@@ -597,87 +584,14 @@ esp_err_t sm_net_send(int idx, const uint8_t *data, size_t len)
         return err;
     }
 
-    /* Fan-out. The lock is dropped around send() so the net task can still
-     * accept and read. A short write keeps the tail; only a hard error
-     * closes that client. */
+    /* fan-out to every client. Nothing here waits: a client that is behind
+       keeps its bytes in its backlog, the others and the caller (a bridge
+       pump) carry on */
     for (int c = 0; c < SOCKET_MANAGER_MAX_CLIENTS; c++)
     {
-        int fd;
-        uint32_t gen;
-        uint8_t pending_copy[SM_PENDING_MAX];
-        uint16_t pending_n;
-        int n;
-
-        if (srv->clients[c] < 0)
+        if (srv->clients[c] >= 0)
         {
-            continue;
-        }
-
-        fd = srv->clients[c];
-        gen = srv->generation[c];
-        pending_n = srv->pend_len[c];
-
-        if (pending_n > 0)
-        {
-            memcpy(pending_copy, srv->pend[c], pending_n);
-        }
-
-        xSemaphoreGive(s_lock);
-        n = (pending_n > 0) ? write_some(fd, pending_copy, pending_n) : 0;
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-
-        if (srv->clients[c] != fd || srv->generation[c] != gen)
-        {
-            continue; /* closed or replaced while we were in send() */
-        }
-
-        if (pending_n > 0)
-        {
-            if (n < 0)
-            {
-                close_client(srv, c);
-                ESP_LOGW(TAG, "%s: client dropped (send error)", cfg->name);
-                continue;
-            }
-
-            if ((size_t)n < pending_n)
-            {
-                store_tail(srv, c, pending_copy, pending_n, n);
-                srv->stats.bytes_out += (uint32_t)n;
-                srv->stats.tx_drops++; /* this call's new bytes are not queued */
-                continue;
-            }
-
-            srv->pend_len[c] = 0;
-            srv->stats.bytes_out += (uint32_t)n;
-        }
-
-        if (len == 0)
-        {
-            continue;
-        }
-
-        xSemaphoreGive(s_lock);
-        n = write_some(fd, data, len);
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-
-        if (srv->clients[c] != fd || srv->generation[c] != gen)
-        {
-            continue;
-        }
-
-        if (n < 0)
-        {
-            close_client(srv, c);
-            ESP_LOGW(TAG, "%s: client dropped (send error)", cfg->name);
-            continue;
-        }
-
-        srv->stats.bytes_out += (uint32_t)n;
-
-        if ((size_t)n < len)
-        {
-            store_tail(srv, c, data, len, n);
+            client_push(srv, cfg, c, data, len);
         }
     }
 

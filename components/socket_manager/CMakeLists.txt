@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "socket_manager.c"
          "socket_manager_settings.c"
          "socket_manager_net.c"
+         "socket_manager_tx.c"
          "socket_manager_policy.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."

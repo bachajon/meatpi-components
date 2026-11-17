@@ -77,6 +77,64 @@ typedef struct
  *  keys: max_clients=2, keepalive_s=30, enabled=false). Pure. */
 esp_err_t smp_parse_server(const cJSON *item, smp_server_cfg_t *out);
 
+/* ---- a client's backlog (socket_manager_policy.c: host-tested) ------------ */
+
+/** What one TCP client has not taken yet, and since when it takes nothing.
+ *  The storage is lent (buf NULL = none held). Bytes go in whole or not at
+ *  all, so a dropped chunk never cuts a text protocol's line. */
+typedef struct
+{
+    uint8_t *buf;         /* lent storage; NULL while the client keeps up   */
+    uint32_t cap;
+    uint32_t off;         /* first byte still to send                       */
+    uint32_t len;         /* bytes waiting, from off around the end (ring)  */
+    bool     stalled;     /* the last send attempts moved no byte           */
+    int64_t  stalled_us;  /* when that began                                */
+    uint32_t dropped;     /* chunks refused since the backlog was last empty */
+} smp_backlog_t;
+
+/** Empty it and stop the stall clock. Leaves buf and cap alone. */
+void smp_backlog_clear(smp_backlog_t *b);
+
+/** Queue @p len bytes behind what waits. false (nothing stored) when no
+ *  storage is held or they do not all fit. */
+bool smp_backlog_put(smp_backlog_t *b, const uint8_t *data, size_t len);
+
+/** The first run of waiting bytes (up to the end of the storage): its
+ *  length, *out at its first byte. What wraps is the next peek's, after
+ *  smp_backlog_took(). 0 and NULL when nothing waits. */
+size_t smp_backlog_peek(const smp_backlog_t *b, const uint8_t **out);
+
+/** The socket took the first @p n waiting bytes. */
+void smp_backlog_took(smp_backlog_t *b, size_t n);
+
+/** One send attempt's result. @p moved: at least one byte left. @p refused:
+ *  the socket would not take everything. Nothing moved and refused starts
+ *  the stall clock; anything else stops it. */
+void smp_backlog_attempt(smp_backlog_t *b, bool moved, bool refused,
+                         int64_t now_us);
+
+/** The client moved no byte for @p limit_ms: it is gone. */
+bool smp_backlog_expired(const smp_backlog_t *b, int64_t now_us,
+                         uint32_t limit_ms);
+
+/* ---- one TCP client's send side (socket_manager_tx.c) ----------------------
+ * Callers hold the net lock: the pool and the sockets are shared. */
+
+/** A client's slot starts or ends: an empty backlog, its buffer returned. */
+void sm_tx_reset(smp_backlog_t *b);
+
+/** Send what waits, then @p data (may be NULL / 0: only what waits). Never
+ *  blocks: what the socket does not take waits in the backlog, a chunk the
+ *  backlog cannot hold is dropped and counted in @p tx_drops. Sent bytes add
+ *  to @p bytes_out. false: a hard socket error, the caller closes the
+ *  client. @p name is the server's, for the log. */
+bool sm_tx_push(int fd, smp_backlog_t *b, const uint8_t *data, size_t len,
+                const char *name, uint32_t *bytes_out, uint32_t *tx_drops);
+
+/** The client has taken nothing for the stall limit (logs why). */
+bool sm_tx_gone(const smp_backlog_t *b, const char *name);
+
 /* ---- net layer (socket_manager_net.c): indexed like the config array ------ */
 
 esp_err_t sm_net_start(void);

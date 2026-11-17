@@ -30,9 +30,13 @@ nothing about what flows through it: protocol logic is translator territory.
   standard gateway trick for UDP "connections").
 - **max_clients** reached → **accept-then-close** (counted in `refused`) so
   the excess client sees an immediate close instead of a hang.
-- **Stalled/dead clients**: TCP keepalive (idle=`keepalive_s`, intvl 5 s,
-  cnt 3) + bounded send (`SO_SNDTIMEO` 100 ms); a failed send closes THAT
-  client only (`tx_drops`), the server keeps running.
+- **A client that is behind keeps its connection** (2026-11-17, see "A
+  client that stalls" below): TX never blocks, what a client's socket does
+  not take waits in a 32 KB backlog and leaves in order, a chunk that finds
+  the backlog full is dropped whole and counted (`tx_drops`). Only a client
+  that took no byte for 10 s is closed, and a hard socket error closes THAT
+  client only; the server and the other clients keep running. An idle dead
+  client goes by TCP keepalive (idle=`keepalive_s`, intvl 5 s, cnt 3).
 - **`TCP_NODELAY` on every accepted client** (2026-09-08): the streams
   these servers carry are interactive request/response (ELM327 apps on
   35000, slcan, GVRET) and a chip response often leaves as two small
@@ -53,7 +57,13 @@ ONE shared net task multiplexing every server via lwIP `select()`:
 1 × 6 KB PSRAM stack instead of 4 × 4 KB per-server tasks (the loop performs
 no flash writes and no cache-off work, so a PSRAM stack is safe per §2).
 Accept/recv/reap all happen in this task; `send()` runs in the caller under
-the same mutex that guards the client tables.
+the same mutex that guards the client tables. Every socket is non-blocking
+and nothing under that mutex waits: a caller (a bridge pump) is back at
+once whatever a client's link does, and a socket is never closed while
+another task is inside a call on it. The net task also watches the sockets
+of the clients that are behind for writability and pushes their backlog, so
+it leaves on a quiet bus too, and it closes a client that took nothing for
+10 s on its 200 ms tick.
 
 ## Settings (`"socket_manager"`, version 1)
 
@@ -84,15 +94,20 @@ glue/main wraps servers as endpoints.
 | Where | What | ~Size |
 |---|---|---|
 | PSRAM `.bss` | server table (fds, client tables, stats) + config + net-task stack (6 KB) | ~7 KB |
+| PSRAM `.bss` | the backlog pool: 4 buffers of 32 KB, lent to the clients that are behind (`socket_manager_tx.c`) | 128 KB |
 | Internal `.bss` | mutex + TCB + queue control blocks | ~1 KB |
 | Internal heap | lwIP sockets/PCBs (lwIP's own pools) | lwIP-owned |
 
 ## Tests
 
-- **Host (`host_test/`, 9 tests)**: pure policy, backoff progression + cap,
+- **Host (`host_test/`, 14 tests)**: pure policy, backoff progression + cap,
   accept/reject at max_clients, config parse defaults, name charset, unique
-  names/ports, disabled-port parking, max_clients bounds. **Green on rpi001
-  2026-07-03.**
+  names/ports, disabled-port parking, max_clients bounds; since 2026-11-17
+  the backlog (order kept around the end of the storage, many laps without
+  a byte lost or repeated, a chunk taken whole or not at all, the stall
+  clock). **Green on rpi001 2026-11-17.**
+- **Bench (`.\test.ps1 slcan`, leg S)**: the stalls on the real WiFi path
+  with 1,100 CAN frames a second, see "A client that stalls".
 - **Target (`test_apps/`)**: lwIP-loopback suite (TCP RX/TX, 2-client
   fan-out + merge, accept-then-close at max, abrupt-close reap, UDP
   last-peer + no-peer refusal), see its README. Builds clean; on-target run
@@ -121,3 +136,47 @@ log to say why. The net task now logs, right after `client connected`
 loop prints it at the loop's cadence like the INFO line. The gate
 `.\test.ps1 slcan` provokes it on purpose (its first leg) and then proves
 the bridged path.
+
+## A client that stalls (2026-11-17)
+
+A field report on 6.0.0-beta.11: slcan on TCP 3333 beside ELM327 on 35000,
+a 500 kbit/s bus at about 1,100 frames a second. A laptop on a strong link
+held the connection; an Android phone lost it in bursts, about once a
+minute while driving, always as a clean close, and could reconnect at once.
+
+Reproduced on the bench with that firmware: a client whose ACKs came
+166 ms late was closed every time (127 ms late: never). The cause was the
+send path of this component. `send()` was blocking with a 100 ms limit and
+a send that did not finish closed the client. The slcan bridge writes one
+small chunk per CAN frame with `TCP_NODELAY`, and lwIP counts pbufs, not
+bytes: `TCP_SND_QUEUELEN` is 57 unacknowledged writes, 52 ms of that bus.
+So 52 + 100 ms without an ACK ended the session, and a phone's radio is
+away that long many times an hour (a scan, power save, a weak link).
+
+What the send path does now (`socket_manager_tx.c`, the pure part in
+`socket_manager_policy.c`):
+
+- The sockets stay non-blocking. What a client's socket does not take
+  waits in a backlog, a ring of 32 KB lent from a pool of four for as long
+  as that client is behind (about 1.3 s of the bus above). It leaves in
+  order, before anything newer.
+- A chunk that finds the backlog full, or the pool empty, is dropped whole
+  and counted in `tx_drops`; a text protocol's line is never cut. The log
+  says it once per stall: `W <name>: a client is behind (N bytes waiting),
+  what does not fit is dropped`, then `W <name>: the client caught up, N
+  chunk(s) were dropped meanwhile`.
+- A client that moved no byte for 10 s is closed: `W <name>: client dropped
+  (took no data for 10 s, ...)`. A slow client that still takes data is
+  not a dead one and stays.
+- One client's stall costs the others nothing: no send waits.
+
+`tx_drops` therefore changed its meaning: it was "a client was closed on a
+stalled send" and is "a chunk was dropped for a client that was behind".
+
+Pull request 2 (Elias Kotlyar) had gone at the same code first: it kept the
+client and one unsent tail of up to 1 KB, with the blocking send moved out
+of the mutex. On the bench that ended the closes, and lost every frame
+past the first 110 ms of a stall without a counter (the bridge's queue
+overflowed while its pump waited in `send()`); it also let the net task
+close a socket another task was sending on. This version is what stands on
+top of his commits.
