@@ -374,6 +374,8 @@ bool j2534_channel_active(int slot)
 
 /* ---- write ------------------------------------------------------------ */
 
+#define J2534_CAN_ROOM_WAIT_MS 100 /* a raw frame's wait for driver room */
+
 static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
 {
     if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
@@ -400,6 +402,17 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
             const uint8_t *payload = msg->data + 4;
+
+            /* 16 frames in flight is the driver's limit: of 100 frames in
+               one PassThruWriteMsgs 17 reached the bus (bench 2026-11-18).
+               Wait for room; a node that may not talk is refused below. */
+            for (int ms = 0; ms < J2534_CAN_ROOM_WAIT_MS &&
+                             can_manager_tx_ready() && !can_manager_tx_room();
+                 ms++)
+            {
+                vTaskDelay(pdMS_TO_TICKS(1) > 0 ? pdMS_TO_TICKS(1) : 1);
+            }
+
             esp_err_t err = can_manager_send(id, ext, false, payload, dlc);
 
             if (err != ESP_OK)

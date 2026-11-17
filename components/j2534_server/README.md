@@ -196,6 +196,10 @@ J1850; the memory-transfer services it sees are counted on `/api/j2534`
 refused ordinary frames of a VW TP 2.0 flasher (field report 2026-10-27),
 and on ISO15765 it blocked memory reads (0x35/0x36 upload) while missing
 every other write service. The owner's consent is `enabled` + `allow_lan`.
+A raw CAN frame waits for room in the CAN driver, up to 100 ms
+(2026-11-18): the driver holds 16 frames in flight, and of 40 or 100
+frames in one `PassThruWriteMsgs` 17 reached the bus before the call ended
+`ERR_FAILED` (bench: `j2534_flow_control_bench.py` leg K, 121 frames now).
 
 ## Memory footprint (estimated; PSRAM unless noted)
 
