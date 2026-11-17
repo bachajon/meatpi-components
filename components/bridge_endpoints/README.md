@@ -9,7 +9,7 @@ component that may depend on bridge_manager AND the providers
 | Jack | Wraps | Registered |
 |---|---|---|
 | `obd` | `obd_chip` (MIC3624; **multi_consumer**: the chip's RX fan-out copies every chunk to every subscriber, TX serialized, so obd may sit in several enabled bridges: TCP+USB+WS defaults) | init (fixed) |
-| `can` | `can_manager`: frame⇄chunk pump task, owned here (**multi_consumer** since 2026-07-26: up to 4 bridges at once, slcan + mqtt_can together; RX chunks fan out to every subscriber, TX serializes via `can_manager_send`; ONE jack-wide ingress filter `bep_can_set_filter`, per-consumer filters out of scope) | init (fixed) |
+| `can` | `can_manager`: frame⇄chunk pump task, owned here (**multi_consumer** since 2026-07-26: up to 4 bridges at once, slcan + mqtt_can together; RX chunks fan out to every subscriber, TX serializes via `can_manager_send`; ONE jack-wide ingress filter `bep_can_set_filter`, per-consumer filters out of scope. Since 2026-11-17 (pull request 2, Elias Kotlyar): one `send()` may carry several wire frames, each is transmitted, and the first one the controller refuses ends that `send()`; and the jack joins the bus again by itself when it comes back after a stop (`can_manager_on_bus_up`: a script's `can_stop()` / `can_start()`), so its bridges keep receiving) | init (fixed) |
 | `ble` | `ble_manager` GATT pipe | init (fixed) |
 | `cli` | `cmdline_manager` | init (fixed) |
 | `usb_obd` | USB port-B UART (UART2 TX17/RX18 @2 Mbaud), owned here | init (fixed) |

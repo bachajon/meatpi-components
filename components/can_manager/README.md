@@ -325,6 +325,23 @@ counters and traffic after recovery).
 
 - stop() parks TWAI and drives the transceiver into standby; main's
   sleep-prepare calls it (after ext_manager_stop, before storage).
+- Since 2026-11-17 (pull request 2, Elias Kotlyar) a script may stop and
+  start the bus while the device runs (`can_stop()` / `can_start()`), so
+  stop() is no longer followed by a restart of the device every time:
+  - stop() wakes the receive task with an event and waits for its exit on
+    a semaphore; it no longer waits out a 100 ms receive slice, and the
+    20 ms the task's static control block needs before it is reused are
+    spent at the next start, only as far as they are still owed (on the
+    bench a script's `can_stop()`, ten 2 ms pulses and `can_start()` are
+    answered over HTTP 80 ms after the request).
+  - `can_core_deinit` forgets every queue subscriber. A consumer that
+    keeps its queue across stop / start registers ONE hook,
+    `can_manager_on_bus_up(fn)`, called at the end of a start that
+    installed the driver, and subscribes again there (bridge_endpoints'
+    `can` jack does).
+  - `can_manager_transceiver(active)` moves the transceiver's standby pin
+    alone, for a script that drives the TX pin by hand after stop();
+    start() sets the pin itself.
 - The ESP TWAI transceiver and the MIC3624 are two nodes on the SAME
   vehicle CAN: legal; traffic policy between autopid-via-MIC and
   native-CAN consumers is the user's call in v1.
