@@ -46,6 +46,28 @@ extern "C" {
                            stack-audit lesson), which needs ~4 KB. Slots
                            are PSRAM (2 x 6 bridges x 4 KB = 48 KB). */
 
+/* ---- a translated bridge's batch (bridge_manager_batch.c: host-tested) ----- */
+
+/** The output of the codec calls of one pump pass, sent as one endpoint
+ *  send(). @p send is the destination endpoint's; a refusal counts in
+ *  *@p send_errors and the bytes are gone, as for an unbatched send. */
+typedef struct
+{
+    esp_err_t (*send)(const uint8_t *data, size_t len);
+    uint32_t *send_errors;
+    uint8_t  *buf;
+    size_t    len;
+    size_t    cap;
+} bm_batch_t;
+
+/** Send what the batch holds (nothing when it is empty). */
+void bm_batch_flush(bm_batch_t *b);
+
+/** A bridge_sink_fn_t with a bm_batch_t as its argument: the output joins
+ *  the batch, behind a flush when it would not fit. Always ESP_OK: a
+ *  codec call is never to be repeated. */
+esp_err_t bm_batch_sink(void *arg, const uint8_t *out, size_t out_len);
+
 /* ---- pure config layer (bridge_manager_config.c: host-tested) ------------- */
 
 typedef struct

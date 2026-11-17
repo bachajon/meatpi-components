@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "bridge_manager.c"
          "bridge_manager_settings.c"
          "bridge_manager_pump.c"
+         "bridge_manager_batch.c"
          "bridge_manager_config.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."

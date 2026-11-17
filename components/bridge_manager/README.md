@@ -36,7 +36,17 @@ one translator component. No combinatorial code.
   obd_chip RX emits one ~29-byte chunk per CAN frame, and one socket send
   per chunk capped the TCP bridge around 1000 frames/s (bench: at 2500
   frames/s the fan-out dropped 6052 chunks while every other counter was
-  clean). Translators still see chunks one at a time. **Queue-set rule:**
+  clean). Translators still see chunks one at a time; since 2026-11-17
+  (pull request 2, Elias Kotlyar) their OUTPUT is gathered the same way:
+  the chunk in hand and every chunk already waiting are run through the
+  codec one by one and what it emits goes out as one endpoint `send()` of
+  up to 1 KB. The batch is sent from inside the sink when the next output
+  does not fit, so the bytes of one sink call stay together (an slcan line
+  is never split) and no codec call is ever run a second time (a stream
+  codec has moved its state on, and its earlier output would reach the
+  destination twice). A destination that takes records must therefore
+  take several per `send()`: the `can` jack walks the batch frame by
+  frame. **Queue-set rule:**
   every extra chunk is claimed through `xQueueSelectFromSet(set, 0)`, a
   direct `xQueueReceive` on a member queue leaves the set's container
   holding stale notifications until it overflows (`assert
