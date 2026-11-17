@@ -575,9 +575,55 @@ static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
         case J2534_IOCTL_GET_CONFIG:
         case J2534_IOCTL_SET_CONFIG:
             /* CAN and ISO15765 keep the old best-effort ack. The bus rate
-             * comes from can_manager, not from this ioctl. */
+             * comes from can_manager, not from this ioctl. ISO15765 still
+             * applies block size and STmin to the open session. */
             if (!j2534_channel_is_tp20(slot))
             {
+                if (ioctl_id == J2534_IOCTL_SET_CONFIG &&
+                    body != NULL && body_len >= 4)
+                {
+                    uint32_t count = rd_u32(body);
+                    uint8_t bs = 0;
+                    uint32_t stmin = 0;
+                    bool have_bs = false;
+                    bool have_st = false;
+
+                    if (count > 16)
+                    {
+                        count = 16;
+                    }
+
+                    for (uint32_t i = 0; i < count; i++)
+                    {
+                        uint32_t off = 4u + i * 8u;
+
+                        if (off + 8u > body_len)
+                        {
+                            break;
+                        }
+
+                        uint32_t param = rd_u32(body + off);
+                        uint32_t value = rd_u32(body + off + 4);
+
+                        if (param == J2534_CFG_ISO15765_BS)
+                        {
+                            bs = (uint8_t)value;
+                            have_bs = true;
+                        }
+                        else if (param == J2534_CFG_ISO15765_STMIN)
+                        {
+                            stmin = value;
+                            have_st = true;
+                        }
+                    }
+
+                    if (have_bs || have_st)
+                    {
+                        j2534_channel_set_isotp(slot, have_bs, bs,
+                                                have_st, stmin);
+                    }
+                }
+
                 break;
             }
             /* fall through */
