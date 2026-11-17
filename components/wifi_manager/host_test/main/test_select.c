@@ -407,27 +407,65 @@ void test_ap_client_pause_policy(void)
 
 void test_backoff_curve(void)
 {
+    int cap = wm_backoff_max_skip(WM_SEARCH_INTERVAL_S);
+
+    /* the default search interval is the 30 s cadence of before */
+    TEST_ASSERT_EQUAL_INT(WM_BACKOFF_MAX_SKIP_LOOPS, cap);
+
     /* first two attempts stay on the 5 s cadence (candidate walk) */
-    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(1));
-    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(2));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(1, cap));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(2, cap));
 
     /* then double: 10 / 20 s ... */
-    TEST_ASSERT_EQUAL_INT(1, wm_backoff_skip_loops(3));
-    TEST_ASSERT_EQUAL_INT(3, wm_backoff_skip_loops(4));
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_skip_loops(3, cap));
+    TEST_ASSERT_EQUAL_INT(3, wm_backoff_skip_loops(4, cap));
 
     /* ... capped at the 30 s cadence forever after */
-    TEST_ASSERT_EQUAL_INT(WM_BACKOFF_MAX_SKIP_LOOPS,
-                          wm_backoff_skip_loops(5));
-    TEST_ASSERT_EQUAL_INT(WM_BACKOFF_MAX_SKIP_LOOPS,
-                          wm_backoff_skip_loops(6));
-    TEST_ASSERT_EQUAL_INT(WM_BACKOFF_MAX_SKIP_LOOPS,
-                          wm_backoff_skip_loops(7));
-    TEST_ASSERT_EQUAL_INT(WM_BACKOFF_MAX_SKIP_LOOPS,
-                          wm_backoff_skip_loops(1000));
+    TEST_ASSERT_EQUAL_INT(cap, wm_backoff_skip_loops(5, cap));
+    TEST_ASSERT_EQUAL_INT(cap, wm_backoff_skip_loops(6, cap));
+    TEST_ASSERT_EQUAL_INT(cap, wm_backoff_skip_loops(7, cap));
+    TEST_ASSERT_EQUAL_INT(cap, wm_backoff_skip_loops(1000, cap));
 
     /* degenerate inputs never go negative */
-    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(0));
-    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(-5));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(0, cap));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(-5, cap));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(9, 0));
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(9, -3));
+}
+
+/* the search interval setting is the cap of the curve (2026-11-18) */
+void test_backoff_search_interval(void)
+{
+    /* seconds to loops of 5 s, never faster than a 10 s cadence */
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_max_skip(0));
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_max_skip(10));
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_max_skip(14));
+    TEST_ASSERT_EQUAL_INT(11, wm_backoff_max_skip(60));
+    TEST_ASSERT_EQUAL_INT(59, wm_backoff_max_skip(300));
+    TEST_ASSERT_EQUAL_INT(719, wm_backoff_max_skip(3600));
+
+    /* 300 s: 5, 5, 10, 20, 40, 80, 160 s, then 300 s for good */
+    int cap = wm_backoff_max_skip(300);
+
+    TEST_ASSERT_EQUAL_INT(0, wm_backoff_skip_loops(2, cap));
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_skip_loops(3, cap));
+    TEST_ASSERT_EQUAL_INT(3, wm_backoff_skip_loops(4, cap));
+    TEST_ASSERT_EQUAL_INT(7, wm_backoff_skip_loops(5, cap));
+    TEST_ASSERT_EQUAL_INT(15, wm_backoff_skip_loops(6, cap));
+    TEST_ASSERT_EQUAL_INT(31, wm_backoff_skip_loops(7, cap));
+    TEST_ASSERT_EQUAL_INT(59, wm_backoff_skip_loops(8, cap));
+    TEST_ASSERT_EQUAL_INT(59, wm_backoff_skip_loops(100000, cap));
+
+    /* the longest interval is reached too, and a huge count cannot wrap */
+    cap = wm_backoff_max_skip(3600);
+    TEST_ASSERT_EQUAL_INT(511, wm_backoff_skip_loops(11, cap));
+    TEST_ASSERT_EQUAL_INT(719, wm_backoff_skip_loops(12, cap));
+    TEST_ASSERT_EQUAL_INT(719, wm_backoff_skip_loops(INT32_MAX, cap));
+
+    /* 10 s: the doubling stops at once */
+    cap = wm_backoff_max_skip(10);
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_skip_loops(3, cap));
+    TEST_ASSERT_EQUAL_INT(1, wm_backoff_skip_loops(50, cap));
 }
 
 void test_vpn_pause_applies(void)

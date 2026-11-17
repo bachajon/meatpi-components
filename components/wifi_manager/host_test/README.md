@@ -26,6 +26,7 @@ IDF `linux` target. Run via `.\test.ps1 host` or manually per
 | duplicate SSID entries independent | same name, two passwords: strikes on one never block the other |
 | roam never to same SSID | the same name as the working connection is the same AP: stay |
 | parse / netmask / backoff / AP-client pause | unchanged helpers |
+| the search interval (2026-11-18) | `sta_search_interval_s` as the cap of the backoff: seconds to loops, the curve up to 300 s and to 3600 s, a 10 s interval, a huge retry count |
 | trial (10 cases, `test_trial.c`) | the connection trial's pure machine (2026-10-06): the address verdict, a wrong password by reason, not found / refused, the address and total budgets, a busy station lets go first, a letting-go that never comes, bad credentials and a second run refused, foreign events, the clock wrap |
 | trial channel hint kept and bounded | the scan row's channel rides the trial (2026-10-08); 14 or 0 means all channels; a busy station still lets go first |
 

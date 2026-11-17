@@ -76,6 +76,10 @@ static const settings_field_t WM_FIELDS[] =
     SETTINGS_STR ("hostname",           32, ""),
     SETTINGS_BOOL("sta_auto_reconnect", true),
     SETTINGS_INT ("sta_max_retry",      -1, 1000, -1),
+    /* 2026-11-18: the slowest cadence of the tries for a network that is
+       out of reach (the cap of the backoff, a fixed 30 s until then). A
+       new key with a default: no version bump. */
+    SETTINGS_INT ("sta_search_interval_s", 10, 3600, 30),
     /* v6: PER-NETWORK STA addressing, DHCP (default) or static; each
        network (primary + every fallback) carries its own choice since
        they live on different LANs. sta_dns = GLOBAL DNS override for
@@ -169,6 +173,9 @@ static const settings_field_t WM_FIELDS[] =
     SETTINGS_BOOL("cli",                true),
 };
 /* clang-format on */
+
+_Static_assert(WM_SEARCH_INTERVAL_S == 30,
+               "the sta_search_interval_s row carries the default as a literal");
 
 static wm_config_t s_config EXT_RAM_BSS_ATTR; /* boot-applied; PSRAM (§2) */
 static bool        s_configured;
@@ -391,6 +398,8 @@ static esp_err_t wm_on_apply(const cJSON *settings)
     copy_str(c->hostname, WM_HOSTNAME_LEN, settings, "hostname");
     c->sta_auto_reconnect = get_bool(settings, "sta_auto_reconnect", true);
     c->sta_max_retry = get_int(settings, "sta_max_retry", -1);
+    c->sta_search_interval_s = (uint32_t)get_int(
+        settings, "sta_search_interval_s", WM_SEARCH_INTERVAL_S);
 
     /* v6: global DNS override (validated in on_validate) */
     char ipbuf[16];

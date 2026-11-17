@@ -21,9 +21,10 @@ a fallback, periodically re-scan and migrate to a higher-priority network:
 several APs (WIFI_ALL_CHANNEL_SCAN + WIFI_CONNECT_AP_BY_SIGNAL), a supervised
 reconnect task that pauses while AP clients are attached (escalating
 retry backoff since 2026-07-10: the first two attempts keep the 5 s
-cadence for a fast candidate walk, then 10/20 s doubling to a 30 s cap
-so a parked device doesn't scan every 5 s forever: resets on got-ip;
-pure `wm_backoff_skip_loops`, host-tested), AP with static IP `192.168.0.10/24` + DHCP server (the legacy WiCAN address per legacy wifi_mgr.c/safemode.c and the classic ELM327-WiFi-adapter convention `192.168.0.10:35000`, so OBD apps work out of the box, restored 2026-07-18, superseding a brief 192.168.80.1 period),
+cadence for a fast candidate walk, then 10/20/40 s doubling up to the
+`sta_search_interval_s` setting (30 s by default, which was the fixed cap
+until 2026-11-18) so a parked device doesn't scan every 5 s forever: resets
+on got-ip; pure `wm_backoff_skip_loops` + `wm_backoff_max_skip`, host-tested), AP with static IP `192.168.0.10/24` + DHCP server (the legacy WiCAN address per legacy wifi_mgr.c/safemode.c and the classic ELM327-WiFi-adapter convention `192.168.0.10:35000`, so OBD apps work out of the box, restored 2026-07-18, superseding a brief 192.168.80.1 period),
 APSTA with AP-auto-disable and AP-channel-follows-STA, subnet-overlap warning,
 backup-DNS fallback to 1.1.1.1, but **all configuration is a settings_manager
 descriptor and applies only at boot** (reboot-to-apply, §4.2). The legacy runtime
@@ -94,6 +95,7 @@ by the future button/input manager).
 | `hostname` | string ≤32 | `""` | DHCP/DNS host name of the STA netif. Empty → `wican_<12-hex device id>` (the name `mdns_manager` advertises as `.local`), pushed with `esp_netif_set_hostname` before the DHCP client starts, so a router's client list shows it instead of lwIP's default `espressif` (2026-09-08; pure builder `wm_default_hostname`, host-tested) |
 | `sta_auto_reconnect` | bool | `true` | |
 | `sta_max_retry` | int −1..1000 | `-1` | −1 = infinite; limit hits trigger a 1-min cooldown |
+| `sta_search_interval_s` | int 10..3600 | `30` | 2026-11-18: the slowest cadence of the tries for a network that is out of reach (the cap of the backoff: 5, 5, 10, 20, 40 s ... up to this). Every try is a scan of all channels, and with the access point up the one radio leaves the access point's clients for that time: on the bench three silences of about 365 ms a try, now and then one of 1.2 to 1.5 s. A unit in `apsta` mode whose home network is out of reach (a drive) did that every 30 s; a longer interval means fewer pauses and a later reconnect once the network is back (the first tries after a loss stay fast whatever the value). With a client on the access point and a station session earlier in this boot, the AP-client pause (60 s) adds to it. `/api/wifi/status` `sta_attempt.search_interval_s` is the value in force and `sta_attempt.tries` counts the tries since boot. Measured on the bench 2026-11-18 (the home network switched off, the unit restarted cold, a client on its access point reading `tries` once a second): with 120 the tries came 80 s and then 120.0 s apart, four times in a row; with 30 every 30 s, ten in five minutes. A new key with a default: no version bump |
 | `sta_ip_mode` / `fallback1..5_ip_mode` | enum `dhcp/static` | `dhcp` | v6: PER-NETWORK STA addressing, each network (primary + every fallback) carries its own choice, since they live on different LANs. Applied per CONNECT ATTEMPT (`apply_sta_network`): DHCP client stopped + `esp_netif_set_ip_info` for a static candidate, restarted (stale address cleared) for a DHCP one; got-ip still fires so the reconnect/roam machinery is unchanged. Bench-verified 2026-07-11 (static reachable from the LAN, DHCP restore clean) |
 | `sta_static_ip` / `fallback1..5_static_ip` | string (IPv4) | `""` | v6: REQUIRED when that network is static (validated: dotted quad, host octet 1..254) |
 | `sta_static_netmask` / `fallback1..5_static_netmask` | string (IPv4) | `255.255.255.0` | v6: must be a contiguous mask (`wm_netmask_valid`, host-tested) |

@@ -160,6 +160,9 @@ typedef struct
        automatic: DHCP-provided, or that network's gateway when static). */
     wm_addr_t    sta_addr[WM_MAX_CANDIDATES];
     uint32_t     sta_dns;
+    uint32_t     sta_search_interval_s;  /* 2026-11-18: the slowest cadence
+                                            of the tries for a network that
+                                            is out of reach (10..3600 s) */
 } wm_config_t;
 
 /** Parse a dotted-quad IPv4 into host-order uint32 (any address). */
@@ -272,11 +275,21 @@ bool wm_select_is_deprioritised(const wm_select_state_t *st, int idx,
 /* Escalating reconnect backoff (2026-07-10): how many 5 s reconnect
  * loops to SKIP after real attempt number @p retry_count failed.
  * 0 for the first two attempts (fast candidate walk / short outages),
- * then 1/3/5 (10/20/30 s cadence: cap per meatpi) so a parked device
- * doesn't scan every 5 s forever. Resets with sta_retry_count on
- * got-ip. */
-#define WM_BACKOFF_MAX_SKIP_LOOPS 5 /* x 5 s = 30 s cadence cap */
-int wm_backoff_skip_loops(int32_t retry_count);
+ * then doubling (1, 3, 7, 15 ... loops = a 10, 20, 40, 80 s cadence) up
+ * to @p max_skip, so a parked device doesn't scan every 5 s forever.
+ * Resets with sta_retry_count on got-ip.
+ *
+ * The cap is the `sta_search_interval_s` setting since 2026-11-18 (it was
+ * a fixed 30 s): every try for a network that is out of reach is a scan
+ * of all channels, which takes the one radio away from the clients of
+ * the access point for a few hundred ms, and a field unit in access
+ * point + station mode did that every 30 s for a whole drive.
+ * wm_backoff_max_skip() turns the setting into loops (at least 1). */
+#define WM_RECONNECT_PERIOD_S     5  /* one loop of the reconnect task  */
+#define WM_SEARCH_INTERVAL_S      30 /* the setting's default           */
+#define WM_BACKOFF_MAX_SKIP_LOOPS 5  /* the default as loops: 30 s      */
+int wm_backoff_max_skip(uint32_t search_interval_s);
+int wm_backoff_skip_loops(int32_t retry_count, int max_skip);
 
 /* AP-client pause policy (2026-08-31): while a client sits on our AP a
  * STA (re)connect may hop the radio's channel and knock it off, so the

@@ -352,24 +352,30 @@ bool wm_sta_pause_for_ap_clients(uint16_t ap_clients, bool ever_connected,
     return pauses_so_far < max_pauses;
 }
 
-int wm_backoff_skip_loops(int32_t retry_count)
+int wm_backoff_max_skip(uint32_t search_interval_s)
 {
-    if (retry_count <= 2)
+    int loops = (int)(search_interval_s / WM_RECONNECT_PERIOD_S) - 1;
+
+    return (loops < 1) ? 1 : loops;     /* never faster than 10 s       */
+}
+
+int wm_backoff_skip_loops(int32_t retry_count, int max_skip)
+{
+    if (retry_count <= 2 || max_skip <= 0)
     {
         return 0;                       /* keep the candidate walk fast */
     }
 
     int shift = retry_count - 2;        /* 3rd failure -> 1 loop (10 s) */
 
-    if (shift > 4)
+    if (shift > 12)
     {
-        shift = 4;
+        shift = 12;                     /* 4095 loops: above any cap    */
     }
 
-    int skip = (1 << shift) - 1;        /* 1, 3, 7, 15 loops            */
+    int skip = (1 << shift) - 1;        /* 1, 3, 7, 15, 31 ... loops    */
 
-    return (skip > WM_BACKOFF_MAX_SKIP_LOOPS) ? WM_BACKOFF_MAX_SKIP_LOOPS
-                                              : skip;
+    return (skip > max_skip) ? max_skip : skip;
 }
 
 /* "Pause VPN" per network (issue #976, 2026-10-11): the flag of the

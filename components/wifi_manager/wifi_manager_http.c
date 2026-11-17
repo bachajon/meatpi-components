@@ -126,6 +126,15 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "reason", at.last_reason);
     cJSON_AddNumberToObject(o, "fail_count", at.fail_count);
     cJSON_AddBoolToObject(o, "deprioritised", at.deprioritised);
+    /* how often the station was looked for and the slowest cadence in
+       force (2026-11-18): a bench reads the pace off these two */
+    cJSON_AddNumberToObject(o, "tries", at.tries);
+    {
+        const wm_config_t *wc = wm_settings_config();
+
+        cJSON_AddNumberToObject(o, "search_interval_s",
+                                (wc != NULL) ? wc->sta_search_interval_s : 0);
+    }
     return send_json(req, resp);
 }
 

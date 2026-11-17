@@ -27,6 +27,7 @@ void test_parse_ipv4_plain(void);
 void test_default_hostname(void);
 void test_netmask_valid(void);
 void test_backoff_curve(void);
+void test_backoff_search_interval(void);
 void test_ap_client_pause_policy(void);
 void test_trial_connects_and_reports_address(void);
 void test_trial_wrong_password_by_reason(void);
@@ -68,6 +69,7 @@ void app_main(void)
     RUN_TEST(test_default_hostname);
     RUN_TEST(test_netmask_valid);
     RUN_TEST(test_backoff_curve);
+    RUN_TEST(test_backoff_search_interval);
     RUN_TEST(test_ap_client_pause_policy);
     RUN_TEST(test_trial_connects_and_reports_address);
     RUN_TEST(test_trial_wrong_password_by_reason);

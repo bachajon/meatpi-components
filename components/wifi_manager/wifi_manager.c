@@ -590,6 +590,7 @@ static bool attempt_failed_reason(uint8_t reason)
 /* roam-to-preferred bookkeeping (reconnect task + got-ip handler) */
 static volatile int s_connected_idx = -1; /* config index we're on      */
 static volatile bool s_sta_ever_connected;  /* an association this boot   */
+static volatile uint32_t s_sta_tries;       /* reconnect tries this boot  */
 static uint32_t     s_last_roam_ms;
 
 /* ---- "Pause VPN" per network (issue #976, 2026-10-11) ---------------------
@@ -1157,6 +1158,7 @@ static void reconnect_task(void *arg)
     const wm_config_t *cfg = wm_settings_config();
     int cooldown_loops = 0;
     int backoff_loops = 0;
+    int max_skip = wm_backoff_max_skip(cfg->sta_search_interval_s);
     uint32_t ap_pauses = 0;   /* consecutive AP-client deferrals        */
 
     (void)arg;
@@ -1296,8 +1298,9 @@ static void reconnect_task(void *arg)
             /* count only REAL attempts: deferred cycles (banned/idle)
              * must not burn through a finite sta_max_retry */
             s_status.sta_retry_count++;
+            s_sta_tries++;
             backoff_loops =
-                wm_backoff_skip_loops(s_status.sta_retry_count);
+                wm_backoff_skip_loops(s_status.sta_retry_count, max_skip);
             ESP_LOGD(TAG, "reconnect attempt %ld (next in %d s)",
                      (long)s_status.sta_retry_count,
                      (backoff_loops + 1) *
@@ -1323,6 +1326,7 @@ void wifi_manager_get_sta_attempt(wifi_manager_sta_attempt_t *out)
     strncpy(out->ssid, s_status.last_attempted_ssid, sizeof(out->ssid) - 1);
     xSemaphoreGive(s_lock);
     out->last_reason = s_status.last_reason;
+    out->tries = s_sta_tries;
     out->fail_count = wm_select_fail_count(&s_select,
                                            s_status.last_attempted_idx,
                                            now_ms());

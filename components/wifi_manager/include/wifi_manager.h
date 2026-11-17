@@ -136,6 +136,7 @@ typedef struct
     uint8_t last_reason;   /**< WIFI_REASON_* of the last disconnect, 0 = none */
     uint8_t fail_count;    /**< recent consecutive authentication failures  */
     bool    deprioritised; /**< true = other networks are tried first        */
+    uint32_t tries;        /**< tries of the reconnect loop since boot       */
 } wifi_manager_sta_attempt_t;
 
 void wifi_manager_get_sta_attempt(wifi_manager_sta_attempt_t *out);
