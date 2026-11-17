@@ -9,7 +9,7 @@ component that may depend on bridge_manager AND the providers
 | Jack | Wraps | Registered |
 |---|---|---|
 | `obd` | `obd_chip` (MIC3624; **multi_consumer**: the chip's RX fan-out copies every chunk to every subscriber, TX serialized, so obd may sit in several enabled bridges: TCP+USB+WS defaults) | init (fixed) |
-| `can` | `can_manager`: frame⇄chunk pump task, owned here (**multi_consumer** since 2026-07-26: up to 4 bridges at once, slcan + mqtt_can together; RX chunks fan out to every subscriber, TX serializes via `can_manager_send`; ONE jack-wide ingress filter `bep_can_set_filter`, per-consumer filters out of scope. Since 2026-11-17 (pull request 2, Elias Kotlyar): one `send()` may carry several wire frames, each is transmitted, and the first one the controller refuses ends that `send()`; and the jack joins the bus again by itself when it comes back after a stop (`can_manager_on_bus_up`: a script's `can_stop()` / `can_start()`), so its bridges keep receiving) | init (fixed) |
+| `can` | `can_manager`: frame⇄chunk pump task, owned here (**multi_consumer** since 2026-07-26: up to 4 bridges at once, slcan + mqtt_can together; RX chunks fan out to every subscriber, TX serializes via `can_manager_send`; ONE jack-wide ingress filter `bep_can_set_filter`, per-consumer filters out of scope. Since 2026-11-17 (pull request 2, Elias Kotlyar): one `send()` may carry several wire frames, each is transmitted; since 2026-11-18 `send()` only puts the frames into the jack's TX queue (1024 frames) and a task of the jack (`can_bridge_tx`) hands them to the controller, waiting for room first (`can_manager_tx_room`, up to 100 ms a frame), so a client's burst leaves at the bus's pace where the frame behind the 16 in flight used to be refused at once and lost with the rest of its batch. The jack's `tx_ready` tells the bridge pump when the queue has no room for one more pass from each of its bridges: the pump leaves the client's chunks queued, the client's TCP holds it back, and the pump keeps serving the other direction (a wait for the bus inside `send()` lost the client 162 frames of a bus streaming 1100 frames a second to it, bench 2026-11-18). A line that frees no slot for 100 ms gets the next second's frames without a wait (one W line; the controller refuses them and they are dropped), so a dead bus cannot hold a client for ever; a node that may not talk (listen-only, stopped) refuses in `send()` at once, as before; and the jack joins the bus again by itself when it comes back after a stop (`can_manager_on_bus_up`: a script's `can_stop()` / `can_start()`), so its bridges keep receiving) | init (fixed) |
 | `ble` | `ble_manager` GATT pipe | init (fixed) |
 | `cli` | `cmdline_manager` | init (fixed) |
 | `usb_obd` | USB port-B UART (UART2 TX17/RX18 @2 Mbaud), owned here | init (fixed) |
@@ -50,7 +50,9 @@ the socket/WS jack NAMES come from those components' own settings.
 | Internal `.bss` | USB RX task stack (3 KB, UART driver path §2) + TCBs | ~3.5 KB |
 | Internal heap | UART2 driver rings (4 KB + 4 KB) at start | ~8 KB |
 | PSRAM `.bss` | CAN pump stack (3 KB) + name buffers | ~3.2 KB |
-| Internal heap | CAN RX queue (32 × frame) on first `can` subscribe | ~0.5 KB |
+| PSRAM `.bss` | the `can` jack's TX queue (1024 frames of 20 B) + its task's stack (3 KB) | ~23.5 KB |
+| Internal `.bss` | that queue's and task's control blocks | ~0.5 KB |
+| PSRAM `.bss` | the `can` jack's RX queue (256 frames since 2026-11-18, was 32 on the internal heap: a flash erase of 23 ms on a bus above 1400 frames a second ran it over) | ~5 KB |
 
 ## Tests
 

@@ -57,6 +57,11 @@ static const char *TAG = "socket_manager";
 
 #define SM_SELECT_TICK_MS 200
 
+/* While a server does not read because its subscriber's queue is full, the
+ * loop looks again this often: nothing announces room in a FreeRTOS queue
+ * to select(). */
+#define SM_HELD_TICK_MS 2
+
 typedef struct
 {
     int    fd;                 /* listener (TCP) or bound socket (UDP); -1 */
@@ -166,6 +171,18 @@ static int client_count(const sm_server_t *srv)
 }
 
 /* ---- RX paths (net task context) -------------------------------------------- */
+
+/** The subscriber's queue takes what one pass may read (a chunk per client).
+ *  A TCP server whose bridge is behind does not read: the client's own TCP
+ *  then holds its sender back, where a read would have ended as a dropped
+ *  chunk (rx_drops). A burst written to the slcan server lost frames that
+ *  way once the CAN side took them at the bus's pace (2026-11-18). Without
+ *  a subscriber the bytes are read and discarded as before. */
+static bool rx_has_room(const sm_server_t *srv)
+{
+    return srv->sub == NULL ||
+           uxQueueSpacesAvailable(srv->sub) >= SOCKET_MANAGER_MAX_CLIENTS;
+}
 
 static void deliver(sm_server_t *srv, const uint8_t *data, int len)
 {
@@ -335,6 +352,7 @@ static void net_task(void *arg)
         fd_set rfds;
         fd_set wfds;
         int max_fd = -1;
+        bool held = false;   /* a server is not reading: look again soon */
 
         FD_ZERO(&rfds);
         FD_ZERO(&wfds);
@@ -379,11 +397,21 @@ static void net_task(void *arg)
                 max_fd = (srv->fd > max_fd) ? srv->fd : max_fd;
             }
 
+            bool room = rx_has_room(srv);
+
             for (int c = 0; c < SOCKET_MANAGER_MAX_CLIENTS; c++)
             {
                 if (srv->clients[c] >= 0)
                 {
-                    FD_SET(srv->clients[c], &rfds);
+                    if (room)
+                    {
+                        FD_SET(srv->clients[c], &rfds);
+                    }
+                    else
+                    {
+                        held = true;
+                    }
+
                     max_fd = (srv->clients[c] > max_fd) ? srv->clients[c]
                                                         : max_fd;
 
@@ -401,7 +429,8 @@ static void net_task(void *arg)
         xSemaphoreGive(s_lock);
 
         struct timeval tv = { .tv_sec = 0,
-                              .tv_usec = SM_SELECT_TICK_MS * 1000 };
+                              .tv_usec = (held ? SM_HELD_TICK_MS
+                                               : SM_SELECT_TICK_MS) * 1000 };
         int ready = select(max_fd + 1, &rfds, &wfds, NULL, &tv);
 
         if (ready <= 0)

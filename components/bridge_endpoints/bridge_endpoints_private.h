@@ -23,6 +23,7 @@
 /** Internals shared across the bridge_endpoints .c files. */
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -49,6 +50,13 @@ esp_err_t bep_can_send(const uint8_t *d, size_t l);
 esp_err_t bep_can_subscribe(QueueHandle_t q);
 esp_err_t bep_can_unsubscribe(QueueHandle_t q);
 void bep_can_bind_restart(void);
+
+/** The jack's TX queue and its task (init phase, once). */
+void bep_can_tx_init(void);
+
+/** bridge_endpoint_t.tx_ready of the jack: false while the TX queue has no
+ *  room for one more pass from each bridge. */
+bool bep_can_tx_ready(void);
 
 #ifdef __cplusplus
 }

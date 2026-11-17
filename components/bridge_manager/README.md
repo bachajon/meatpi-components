@@ -52,7 +52,9 @@ one translator component. No combinatorial code.
   holding stale notifications until it overflows (`assert
   prvNotifyQueueSetContainer queue.c:3362`, a panic seen live at 2500
   frames/s on the first cut); when the set hands out the other
-  direction's queue, that chunk is pumped right after the batch.
+  direction, the entry is counted (`owed[]`) and that direction's pass is
+  next. One pass takes at most `BRIDGE_MANAGER_PASS_MAX` (1 KB) from its
+  source.
 - **Translators** run per direction with a per-direction reassembly ctx from
   a static PSRAM pool (`decode` on a→b, `encode` on b→a); the sink callback
   lets one input emit zero/one/many frames (slcan/GVRET reassembly shape),
@@ -62,6 +64,22 @@ one translator component. No combinatorial code.
   was 32) fill and the
   PRODUCING endpoint drops-and-counts (obd fan-out drops, socket rx_drops).
   A bridge can never block its faster side indefinitely.
+- **A destination that is slower than its source (`tx_ready`, 2026-11-18)**:
+  an endpoint may give the optional `bool (*tx_ready)(void)`. While it
+  answers false the pump leaves the chunks meant for it in their queue
+  (it counts the queue-set entries it took in `owed[]` and reads the
+  chunks later), goes on serving the other direction, and asks again
+  every 2 ms. The queue then fills and the SOURCE's own flow control
+  acts: a TCP server stops reading its client while the queue has no room
+  (socket_manager), so nothing is dropped and nothing waits in the pump.
+  The `can` jack is the one endpoint that sets it: a client writes a burst
+  faster than the bus takes it. Why a hook and not a wait in `send()`:
+  bench 2026-11-18, a wait for the bus inside the `can` jack's `send()`
+  delivered a burst of 2000 slcan lines and lost the same client 162
+  frames of a bus streaming 1100 frames a second the other way (1015 at
+  2000, 3938 at 3000), because the pump serves both directions. An
+  endpoint without the hook is always ready and `send()` takes or refuses
+  at once, as before.
 
 ## Settings (`"bridge_manager"`, version 2)
 

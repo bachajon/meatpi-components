@@ -61,7 +61,17 @@ static const char *TAG = "bridge_manager";
  * once), and turns 2500 socket sends/s into a few hundred under a flood -
  * measured: at 2500 frames/s the per-chunk pump dropped 6052 chunks at the
  * fan-out while every other counter was clean. */
-#define BM_COALESCE_MAX 1024
+#define BM_COALESCE_MAX BRIDGE_MANAGER_PASS_MAX
+
+/* A destination without room (bridge_endpoint_t.tx_ready, 2026-11-18): the
+ * chunks meant for it stay in their queue. A queue-set entry once handed
+ * out is gone, so the pump counts the entries it took without reading the
+ * chunk: owed[0] for a->b (qa), owed[1] for b->a (qb). */
+#define BM_DIR(a2b) ((a2b) ? 0 : 1)
+
+/* the pump's sleep between two looks at a destination without room; a
+ * chunk of the other direction wakes it at once */
+#define BM_HELD_TICKS (pdMS_TO_TICKS(2) > 0 ? pdMS_TO_TICKS(2) : 1)
 
 typedef struct
 {
@@ -76,6 +86,7 @@ typedef struct
     QueueSetHandle_t set;
     TaskHandle_t task;
     volatile bool running;
+    uint8_t owed[2];                    /* see BM_DIR                     */
 
     bridge_stats_t stats;
 
@@ -141,61 +152,69 @@ static esp_err_t reply_sink(void *arg, const uint8_t *out, size_t out_len)
     return ep->send(out, out_len);
 }
 
-static void pump_one(bm_bridge_t *br, const bridge_chunk_t *chunk, bool a2b);
+/** May the destination of a direction take a pass now? An endpoint
+ *  without the hook always may. */
+static bool dst_ready(const bm_bridge_t *br, bool a2b)
+{
+    const bridge_endpoint_t *dst = a2b ? br->b : br->a;
 
-/** Raw path: the chunk in hand plus every chunk already queued behind it
- *  (up to BM_COALESCE_MAX bytes) go out as ONE endpoint send.
+    return dst->tx_ready == NULL || dst->tx_ready();
+}
+
+/** One more chunk of a direction for the pass in hand: one already owed,
+ *  or one the set hands out now.
  *
  *  Queue-set discipline (FreeRTOS): a member queue may only be read after
  *  xQueueSelectFromSet handed it out - reading it directly leaves the
  *  set's container holding stale notifications until it overflows
  *  (`assert prvNotifyQueueSetContainer queue.c:3362`, seen live at 2500
- *  frames/s on the first cut of this batching). So every extra chunk is
- *  claimed through the set; when the set hands out the OTHER direction's
- *  queue instead, that chunk is pumped right after this batch. */
-static void pump_raw_batch(bm_bridge_t *br, QueueHandle_t q,
-                           const bridge_chunk_t *first, bool a2b)
+ *  frames/s on the first cut of the batching). So every chunk is claimed
+ *  through the set. When the set hands out the OTHER direction, the entry
+ *  is noted in owed[] and this returns false: that direction's pass is
+ *  next. */
+static bool pump_more(bm_bridge_t *br, bool a2b, bridge_chunk_t *out)
 {
-    const bridge_endpoint_t *dst = a2b ? br->b : br->a;
-    size_t len = first->len;
-    uint32_t chunks = 1;
-    bridge_chunk_t more;
-    bridge_chunk_t other;
-    bool have_other = false;
+    int d = BM_DIR(a2b);
 
-    memcpy(br->batch, first->data, first->len);
-
-    while (len + sizeof(more.data) <= BM_COALESCE_MAX)
+    if (br->owed[d] == 0)
     {
         QueueSetMemberHandle_t m = xQueueSelectFromSet(br->set, 0);
 
         if (m == NULL)
         {
-            break;
+            return false;
         }
 
-        if (m == (QueueSetMemberHandle_t)q)
+        br->owed[BM_DIR(m == (QueueSetMemberHandle_t)br->qa)]++;
+
+        if (br->owed[d] == 0)
         {
-            if (xQueueReceive(q, &more, 0) != pdTRUE)
-            {
-                break;
-            }
-
-            memcpy(br->batch + len, more.data, more.len);
-            len += more.len;
-            chunks++;
+            return false;
         }
-        else
-        {
-            /* the set handed us the other direction: take it (the set
-               entry is consumed) and deliver it after this batch */
-            if (xQueueReceive((QueueHandle_t)m, &other, 0) == pdTRUE)
-            {
-                have_other = true;
-            }
+    }
 
-            break;
-        }
+    br->owed[d]--;
+    return xQueueReceive(a2b ? br->qa : br->qb, out, 0) == pdTRUE;
+}
+
+/** Raw path: the chunk in hand plus every chunk already queued behind it
+ *  (up to BM_COALESCE_MAX bytes) go out as ONE endpoint send. */
+static void pump_raw_batch(bm_bridge_t *br, const bridge_chunk_t *first,
+                           bool a2b)
+{
+    const bridge_endpoint_t *dst = a2b ? br->b : br->a;
+    size_t len = first->len;
+    uint32_t chunks = 1;
+    bridge_chunk_t more;
+
+    memcpy(br->batch, first->data, first->len);
+
+    while (len + sizeof(more.data) <= BM_COALESCE_MAX &&
+           pump_more(br, a2b, &more))
+    {
+        memcpy(br->batch + len, more.data, more.len);
+        len += more.len;
+        chunks++;
     }
 
     if (dst->send(br->batch, len) != ESP_OK)
@@ -212,11 +231,6 @@ static void pump_raw_batch(bm_bridge_t *br, QueueHandle_t q,
     {
         br->stats.b2a_chunks += chunks;
         br->stats.b2a_bytes += len;
-    }
-
-    if (have_other)
-    {
-        pump_one(br, &other, !a2b);
     }
 }
 
@@ -248,10 +262,10 @@ static void tr_feed(bm_bridge_t *br, bm_batch_t *batch,
 
 /** Translated path: gather queued chunks into one send, same cap as the
  *  raw coalescer (the batch itself: bridge_manager_batch.c). SLCAN lines
- *  concatenate. The queue set is drained the
- *  same way as pump_raw_batch so its container does not fill with stale
- *  notifications. */
-static void pump_translated_batch(bm_bridge_t *br, QueueHandle_t q,
+ *  concatenate. One pass takes at most BM_COALESCE_MAX bytes from its
+ *  source, so a destination that said it has room is handed a bounded
+ *  amount. */
+static void pump_translated_batch(bm_bridge_t *br,
                                   const bridge_chunk_t *first, bool a2b)
 {
     bm_batch_t batch =
@@ -263,85 +277,19 @@ static void pump_translated_batch(bm_bridge_t *br, QueueHandle_t q,
         .cap = BM_COALESCE_MAX,
     };
     bridge_chunk_t more;
-    bridge_chunk_t other;
-    bool have_other = false;
+    size_t fed = first->len;
 
     tr_feed(br, &batch, first, a2b);
 
-    while (batch.len + 64 <= batch.cap)
+    while (batch.len + 64 <= batch.cap &&
+           fed + sizeof(more.data) <= BM_COALESCE_MAX &&
+           pump_more(br, a2b, &more))
     {
-        QueueSetMemberHandle_t m = xQueueSelectFromSet(br->set, 0);
-
-        if (m == NULL)
-        {
-            break;
-        }
-
-        if (m == (QueueSetMemberHandle_t)q)
-        {
-            if (xQueueReceive(q, &more, 0) != pdTRUE)
-            {
-                break;
-            }
-
-            tr_feed(br, &batch, &more, a2b);
-        }
-        else
-        {
-            if (xQueueReceive((QueueHandle_t)m, &other, 0) == pdTRUE)
-            {
-                have_other = true;
-            }
-            break;
-        }
+        fed += more.len;
+        tr_feed(br, &batch, &more, a2b);
     }
 
     bm_batch_flush(&batch);
-
-    if (have_other)
-    {
-        pump_one(br, &other, !a2b);
-    }
-}
-
-static void pump_one(bm_bridge_t *br, const bridge_chunk_t *chunk, bool a2b)
-{
-    const bridge_endpoint_t *dst = a2b ? br->b : br->a;
-
-    if (br->tr == NULL)
-    {
-        /* raw: pure move-bytes, the hot path does no parsing */
-        if (dst->send(chunk->data, chunk->len) != ESP_OK)
-        {
-            br->stats.send_errors++;
-        }
-    }
-    else
-    {
-        bm_sink_arg_t sink_arg = { .dst = dst, .br = br };
-        void *ctx = a2b ? br->ctx_a2b : br->ctx_b2a;
-        esp_err_t err = a2b
-            ? br->tr->decode(ctx, chunk->data, chunk->len, pump_sink,
-                             &sink_arg)
-            : br->tr->encode(ctx, chunk->data, chunk->len, pump_sink,
-                             &sink_arg);
-
-        if (err != ESP_OK)
-        {
-            br->stats.codec_errors++;
-        }
-    }
-
-    if (a2b)
-    {
-        br->stats.a2b_chunks++;
-        br->stats.a2b_bytes += chunk->len;
-    }
-    else
-    {
-        br->stats.b2a_chunks++;
-        br->stats.b2a_bytes += chunk->len;
-    }
 }
 
 /* accumulating-codec flush (bridge_manager.h): bounded-latency batch
@@ -376,6 +324,32 @@ static void pump_flush_due(bm_bridge_t *br, int64_t now_ms)
     }
 }
 
+/** How long the pump may sleep on its set: not at all while a direction
+ *  has a chunk and a destination that takes it, a short tick while every
+ *  waiting chunk is held back by its destination, the idle period
+ *  otherwise. */
+static TickType_t pump_wait(const bm_bridge_t *br)
+{
+    bool held = false;
+
+    for (int d = 0; d < 2; d++)
+    {
+        if (br->owed[d] == 0)
+        {
+            continue;
+        }
+
+        if (dst_ready(br, d == 0))
+        {
+            return 0;
+        }
+
+        held = true;
+    }
+
+    return held ? BM_HELD_TICKS : pdMS_TO_TICKS(100);
+}
+
 static void pump_task(void *arg)
 {
     bm_bridge_t *br = arg;
@@ -386,20 +360,38 @@ static void pump_task(void *arg)
     while (br->running)
     {
         QueueSetMemberHandle_t ready =
-            xQueueSelectFromSet(br->set, pdMS_TO_TICKS(100));
+            xQueueSelectFromSet(br->set, pump_wait(br));
 
-        if (ready != NULL &&
-            xQueueReceive((QueueHandle_t)ready, &chunk, 0) == pdTRUE)
+        if (ready != NULL)
         {
-            bool a2b = (ready == (QueueSetMemberHandle_t)br->qa);
+            br->owed[BM_DIR(ready == (QueueSetMemberHandle_t)br->qa)]++;
+        }
+
+        /* one pass per direction and turn: neither waits for the other,
+           and a direction whose destination has no room is left alone */
+        for (int d = 0; d < 2; d++)
+        {
+            bool a2b = (d == 0);
+
+            if (br->owed[d] == 0 || !dst_ready(br, a2b))
+            {
+                continue;
+            }
+
+            br->owed[d]--;
+
+            if (xQueueReceive(a2b ? br->qa : br->qb, &chunk, 0) != pdTRUE)
+            {
+                continue;
+            }
 
             if (br->tr == NULL)
             {
-                pump_raw_batch(br, (QueueHandle_t)ready, &chunk, a2b);
+                pump_raw_batch(br, &chunk, a2b);
             }
             else
             {
-                pump_translated_batch(br, (QueueHandle_t)ready, &chunk, a2b);
+                pump_translated_batch(br, &chunk, a2b);
             }
         }
 
@@ -474,6 +466,8 @@ static esp_err_t build_bridge(int idx, const bm_bridge_cfg_t *cfg)
     bm_bridge_t *br = &s_br[idx];
 
     memset(&br->stats, 0, sizeof(br->stats));
+    br->owed[0] = 0;
+    br->owed[1] = 0;
     br->last_flush_a2b = esp_timer_get_time() / 1000;
     br->last_flush_b2a = br->last_flush_a2b;
     br->cfg = cfg;

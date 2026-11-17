@@ -188,6 +188,7 @@ static const bridge_endpoint_t WS_EPS[WEBSOCKET_MANAGER_MAX_CHANNELS] =
 esp_err_t bridge_endpoints_init(void)
 {
     bep_can_bind_restart();
+    bep_can_tx_init();
 
     static const log_descriptor_t LOG_DESC =
         { "bridge_endpoints", ESP_LOG_INFO };
@@ -204,7 +205,7 @@ esp_err_t bridge_endpoints_init(void)
            TX serializes through can_manager_send. ONE jack-wide ingress
            filter (bep_can_set_filter). */
         { "can", bep_can_send, bep_can_subscribe, bep_can_unsubscribe,
-          .multi_consumer = true },
+          .multi_consumer = true, .tx_ready = bep_can_tx_ready },
         { "cli", cli_send, cli_subscribe, cli_unsubscribe },
         { "usb_obd", bep_usb_send, bep_usb_subscribe, bep_usb_unsubscribe },
     };

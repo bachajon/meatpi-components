@@ -73,6 +73,8 @@ extern "C" {
                                             registry_headroom fault the
                                             2026-07-19 health net latched */
 #define BRIDGE_MANAGER_CHUNK_SIZE      128
+#define BRIDGE_MANAGER_PASS_MAX        1024 /* bytes one pump pass takes from
+                                               a source at most (the batch) */
 
 typedef struct
 {
@@ -93,6 +95,15 @@ typedef struct
      *  enabled bridges at once. Leave false for single-stream providers
      *  (their subscribe() must refuse a second queue). */
     bool multi_consumer;
+    /** OPTIONAL. False while the endpoint has no room for what one pump
+     *  pass may hand it (up to BRIDGE_MANAGER_PASS_MAX bytes taken from
+     *  the other side). The pump then leaves the chunks meant for it in
+     *  their queue, where the source's own flow control sees them (a TCP
+     *  server stops reading its client), keeps serving the other
+     *  direction, and asks again two ticks later. NULL = always ready:
+     *  send() takes or refuses at once (every endpoint but `can`). An
+     *  endpoint that sets it makes room by itself; the pump only asks. */
+    bool (*tx_ready)(void);
 } bridge_endpoint_t;
 
 /**

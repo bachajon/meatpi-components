@@ -56,7 +56,17 @@
 
 static const char *TAG = "bridge_endpoints";
 
+/* The frames can_manager hands the jack. 256 since 2026-11-18, as the CAN
+ * node's own receive queue: a flash erase stops every task for about 23 ms,
+ * the frames of that time then arrive here at once, and 32 places lost an
+ * slcan client 384 frames of a bus at 2000 frames a second while three
+ * files were written (886 at 3000, none at 1100). PSRAM, static. */
+#define BEP_CAN_RXQ_FRAMES 256
+
 static QueueHandle_t s_can_rx_q;        /* can_core_frame_t from can_manager */
+static StaticQueue_t s_can_rx_q_buf;                         /* internal: FreeRTOS */
+static uint8_t s_can_rx_q_store[BEP_CAN_RXQ_FRAMES * sizeof(can_core_frame_t)]
+    EXT_RAM_BSS_ATTR;                                        /* PSRAM: 5 KB        */
 static QueueHandle_t s_can_qs[BEP_CAN_MAX_SUBS]; /* bridge queues (fan-out)   */
 static int s_can_nsubs;
 static portMUX_TYPE s_can_lock = portMUX_INITIALIZER_UNLOCKED; /* internal: spinlock */
@@ -70,6 +80,43 @@ static StackType_t s_can_pump_stack[3072] EXT_RAM_BSS_ATTR;  /* PSRAM: no flash 
 static volatile bool s_can_pump_run;
 static uint32_t s_can_ep_drops;
 
+/* ---- TX: a queue of the jack's own, so no bridge pump waits for the bus ------
+ *
+ * A client's burst (an slcan tool that writes a whole ISO-TP block, a log
+ * replay) reaches this jack faster than the bus takes it. The controller
+ * holds 16 frames in flight and refuses the next one at once, so of 400
+ * lines written in one go 161 reached the bus (2026-11-17, the same on
+ * 6.0.0-beta.11).
+ *
+ * Waiting for room inside send() delivered the burst and cost the other
+ * direction: send() runs in the bridge's pump, which serves both, and 2000
+ * lines written into a bus that streamed 1100 frames a second to the same
+ * client lost that client 162 frames, 3938 at 3000 (2026-11-18). So send()
+ * only queues, a task of this jack feeds the controller at the bus's pace,
+ * and bep_can_tx_ready() tells the pump when the queue is too full for
+ * another pass: the pump leaves the client's chunks where they are, and
+ * the client's own flow control (TCP) holds it back. */
+#define BEP_CAN_TXQ_FRAMES 1024
+
+/* The most frames one pump pass hands over: BRIDGE_MANAGER_PASS_MAX bytes
+ * of the shortest slcan line ("t1230" and a CR, 6 bytes). "Ready" promises
+ * room for one such pass from each bridge on the jack, so pumps that ask
+ * at the same moment all fit. */
+#define BEP_CAN_TX_PASS_FRAMES (BRIDGE_MANAGER_PASS_MAX / 6 + 1)
+#define BEP_CAN_TX_READY_ROOM  (BEP_CAN_TX_PASS_FRAMES * BEP_CAN_MAX_SUBS)
+
+_Static_assert(BEP_CAN_TX_READY_ROOM < BEP_CAN_TXQ_FRAMES,
+               "the can jack's TX queue is smaller than what ready promises");
+
+static QueueHandle_t s_can_txq;
+static StaticQueue_t s_can_txq_buf;                          /* internal: FreeRTOS */
+static uint8_t s_can_txq_store[BEP_CAN_TXQ_FRAMES * sizeof(can_core_frame_t)]
+    EXT_RAM_BSS_ATTR;                                        /* PSRAM: 20 KB       */
+static StaticTask_t s_can_tx_tcb;                            /* internal: FreeRTOS */
+static StackType_t s_can_tx_stack[3072] EXT_RAM_BSS_ATTR;    /* PSRAM: no flash    */
+static uint32_t s_can_tx_drops;         /* frames that found the queue full    */
+static uint32_t s_can_tx_refused;       /* frames the controller did not take  */
+
 void bep_can_set_filter(uint32_t filter, uint32_t mask, bool ext)
 {
     /* pre-bridge-start config (mqtt_can's 1:1 filter mapping, meatpi
@@ -81,6 +128,111 @@ void bep_can_set_filter(uint32_t filter, uint32_t mask, bool ext)
     s_can_filter_ext = ext;
 }
 
+/* The TX task waits for room in the controller, up to this long per frame:
+ * at 500 kbit/s a frame leaves every quarter of a millisecond. */
+#define BEP_CAN_TX_WAIT_MS 100
+
+/* A line that never goes idle (held dominant) frees no slot. A bus without
+ * another node is not that case: the driver gives a frame nobody
+ * acknowledges up after three more tries and its slot comes back. After a
+ * wait that ran out, frames are handed over without a wait for this long:
+ * the controller refuses them at once and the queue runs empty, so the
+ * clients are not held back for ever by a bus that is gone. */
+#define BEP_CAN_TX_GIVE_UP_MS 1000
+
+static volatile TickType_t s_can_tx_no_wait_until;
+static volatile bool s_can_tx_no_wait;
+
+/** Room for one frame, waited for when the controller is full. Returns at
+ *  once when there is room, when the node may not talk (a state no wait
+ *  changes) and during the give-up time. */
+static void can_tx_wait_room(void)
+{
+    if (can_manager_tx_room() || !can_manager_tx_ready())
+    {
+        return;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+
+    if (s_can_tx_no_wait)
+    {
+        if ((int32_t)(now - s_can_tx_no_wait_until) < 0)
+        {
+            return;
+        }
+
+        s_can_tx_no_wait = false;
+    }
+
+    TickType_t step = pdMS_TO_TICKS(1) > 0 ? pdMS_TO_TICKS(1) : 1;
+
+    while (!can_manager_tx_room())
+    {
+        if (xTaskGetTickCount() - now >= pdMS_TO_TICKS(BEP_CAN_TX_WAIT_MS))
+        {
+            s_can_tx_no_wait_until = xTaskGetTickCount() +
+                                     pdMS_TO_TICKS(BEP_CAN_TX_GIVE_UP_MS);
+            s_can_tx_no_wait = true;
+            ESP_LOGW(TAG, "can: the bus took no frame for %d ms, a client's "
+                     "frames are dropped (%lu refused so far, %lu found the "
+                     "queue full)", BEP_CAN_TX_WAIT_MS,
+                     (unsigned long)s_can_tx_refused,
+                     (unsigned long)s_can_tx_drops);
+            return;
+        }
+
+        vTaskDelay(step);
+    }
+}
+
+static void can_tx_task(void *arg)
+{
+    can_core_frame_t f;
+
+    (void)arg;
+
+    while (true)
+    {
+        if (xQueueReceive(s_can_txq, &f, portMAX_DELAY) != pdTRUE)
+        {
+            continue;
+        }
+
+        can_tx_wait_room();
+
+        if (can_manager_send(f.id, f.ext, f.rtr, f.data, f.dlc) != ESP_OK)
+        {
+            s_can_tx_refused++;
+        }
+    }
+}
+
+void bep_can_tx_init(void)
+{
+    if (s_can_txq != NULL)
+    {
+        return;
+    }
+
+    s_can_txq = xQueueCreateStatic(BEP_CAN_TXQ_FRAMES, sizeof(can_core_frame_t),
+                                   s_can_txq_store, &s_can_txq_buf);
+
+    if (s_can_txq == NULL ||
+        xTaskCreateStatic(can_tx_task, "can_bridge_tx",
+                          sizeof(s_can_tx_stack) / sizeof(s_can_tx_stack[0]),
+                          NULL, 10, s_can_tx_stack, &s_can_tx_tcb) == NULL)
+    {
+        ESP_LOGE(TAG, "can: no TX task, the jack sends nothing");
+    }
+}
+
+bool bep_can_tx_ready(void)
+{
+    return s_can_txq == NULL ||
+           uxQueueSpacesAvailable(s_can_txq) >= BEP_CAN_TX_READY_ROOM;
+}
+
 esp_err_t bep_can_send(const uint8_t *d, size_t l)
 {
     can_core_frame_t f;
@@ -89,11 +241,22 @@ esp_err_t bep_can_send(const uint8_t *d, size_t l)
 
     while ((n = can_wire_decode_next(d + off, l - off, &f)) > 0)
     {
-        esp_err_t err = can_manager_send(f.id, f.ext, f.rtr, f.data, f.dlc);
-
-        if (err != ESP_OK)
+        if (s_can_txq == NULL || !can_manager_tx_ready())
         {
-            return err;
+            /* the node may not talk (listen-only, stopped, no bitrate): a
+               state no wait changes. Refused at once, counted and said by
+               can_manager, and the bridge counts a send error as before */
+            esp_err_t err = can_manager_send(f.id, f.ext, f.rtr, f.data, f.dlc);
+
+            if (err != ESP_OK)
+            {
+                return err;
+            }
+        }
+        else if (xQueueSend(s_can_txq, &f, 0) != pdTRUE)
+        {
+            s_can_tx_drops++;
+            return ESP_ERR_NO_MEM;
         }
 
         off += n;
@@ -217,7 +380,9 @@ esp_err_t bep_can_subscribe(QueueHandle_t q)
 
     if (s_can_rx_q == NULL)
     {
-        s_can_rx_q = xQueueCreate(32, sizeof(can_core_frame_t));
+        s_can_rx_q = xQueueCreateStatic(BEP_CAN_RXQ_FRAMES,
+                                        sizeof(can_core_frame_t),
+                                        s_can_rx_q_store, &s_can_rx_q_buf);
 
         if (s_can_rx_q == NULL)
         {
