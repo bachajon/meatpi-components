@@ -43,7 +43,13 @@
 
 typedef struct j2534_tp20_state j2534_tp20_state_t;
 
-#define J2534_CH_CAN_QLEN 32
+/* A channel's bus queue takes what the CAN node's receive queue can release
+ * at once: after a flash write on the unit the frames of that time arrive
+ * in one go (can_core_driver.c, CAN_CORE_RXQ_DEPTH). At 32 a run at the
+ * line rate with the flash written meanwhile dropped 201 frames here
+ * (dispatch_drops, bench 2026-11-17) that the node itself had kept. PSRAM,
+ * 16 bytes a frame, one queue per channel. */
+#define J2534_CH_CAN_QLEN 256
 #define J2534_CH_MAX_IND  4   /* pending TxDone / START_OF_MESSAGE indications */
 
 typedef struct

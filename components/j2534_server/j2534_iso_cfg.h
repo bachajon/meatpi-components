@@ -42,15 +42,17 @@ extern "C" {
 
 /*
  * What a channel sends until the tool sets it: BS 8 / STmin 1 ms, what every
- * firmware before 2026-11-17 sent whatever the tool set. SAE J2534-1 names 0
- * and 0. The device keeps its old values because BS 0 lets an ECU send a
- * whole message without a pause, and the CAN node's receive queue holds 64
- * frames: a write to the unit's flash holds the receive task longer than
- * that lasts at the 500 kbit/s line rate (measured 2026-11-17: 28 and 30
- * frames lost beyond the queue, and with them one 4095-byte answer, when
- * the configuration backup was written during it; nothing lost in the 238
- * answers after it, nor in 100 with the flash at rest). GET_CONFIG reports
- * the values in force, and a tool that wants the speed sets 0 / 0.
+ * firmware before 2026-11-17 sent whatever the tool set, so a tool that
+ * sets nothing sees no change. SAE J2534-1 names 0 and 0. GET_CONFIG
+ * reports the values in force, and a tool that wants the speed sets 0 / 0.
+ *
+ * What BS 0 asks of the unit: an ECU may then send a whole message without
+ * a pause, and a write to the unit's flash holds the CAN receive task about
+ * 23 ms. With the node's receive queue at 64 frames that cost 28 and 30
+ * frames and the 4095-byte answer that was arriving (2026-11-17, the
+ * configuration backup written during it). The queue holds 256 since that
+ * day and the same rate with the flash written on purpose loses nothing
+ * (the firmware repo's stage j2534fc, leg W).
  */
 #define J2534_ISO_DEFAULT_BS     8u
 #define J2534_ISO_DEFAULT_ST_US  1000u

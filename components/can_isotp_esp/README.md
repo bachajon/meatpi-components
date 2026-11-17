@@ -33,7 +33,7 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
 ## Memory footprint
 
 - Static: task stack 4096 B PSRAM (`EXT_RAM_BSS_ATTR`; measured high-water
-  3296 B free after a J2534 reflash leg), frame queue 2048 B PSRAM (static
+  3296 B free after a J2534 reflash leg), frame queue 4096 B PSRAM (256 frames since 2026-11-17, static
   storage), TCB + queue control ~250 B internal, table/stats ~100 B internal.
 - Per session (heap, freed on close): esp_isotp tx+rx buffers 2 x 4128 B PSRAM
   + its handle ~200 B internal + TX frame pool 16 x ~40 B internal, mailbox
@@ -78,7 +78,7 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
   `ESP_ERR_NO_MEM` and has CONSUMED the PDU: the `can_isotp.h` contract the
   UDS transport drains stale traffic on.
 - **Memory:** nothing until the first `open()`: then the task (4 KB PSRAM
-  stack, static) and the frame queue (2 KB PSRAM, static); per session
+  stack, static) and the frame queue (4 KB PSRAM, static); per session
   ~8.3 KB (esp_isotp tx/rx buffers, PSRAM) + 16.5 KB mailbox (PSRAM) + a
   few hundred bytes internal for the semaphores.
 - **Registration:** `can_isotp_esp_init()` is called by main right
@@ -112,12 +112,17 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
   what every session sent (8 and 1000) and the two fields were ignored.
   The consumers state theirs: `uds_manager` 8 / 1 ms as before, a J2534
   channel 8 / 1 ms until its tool sets `ISO15765_BS` / `ISO15765_STMIN`.
-- BS 0 at the line rate needs the unit's flash at rest: the CAN node's
-  receive queue holds 64 frames (16 ms at 500 kbit/s) and a flash write
-  holds the receive task longer. Measured 2026-11-17: 28 and 30 frames
-  (`rx_missed`) and one 4095-byte PDU lost while the configuration backup
-  was written; nothing lost in 100 PDUs of 4095 bytes in a row otherwise
-  (`.\test.ps1 j2534fc`, leg N).
+- BS 0 at the line rate and a flash write on the unit: an erase holds
+  every task about 23 ms, and the frames of that time wait in the CAN
+  node's receive queue. At 64 frames it lost 28 and 30 of them
+  (`rx_missed`) and with them the 4095-byte PDU that was arriving
+  (2026-11-17, the configuration backup written during it). The queue
+  holds 256 since that day, and so does this provider's frame queue, which
+  takes what the node releases at once: 4095-byte PDUs in a row with
+  three 32 KB files written to the flash meanwhile arrive whole
+  (`.\test.ps1 j2534fc`, leg W; leg N is the same with the flash at
+  rest). An erase longer than the queue lasts (64 ms at 500 kbit/s) would
+  still cost a PDU.
 - N_Bs / N_Cr = `CONFIG_ISO_TP_DEFAULT_RESPONSE_TIMEOUT_US` (1000 ms since
   2026-10-19, ISO 15765-2's value; 100 ms before). The task polls a session
   at tick cadence for 1.2 s after any activity so the stack's timeout is

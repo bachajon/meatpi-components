@@ -254,6 +254,42 @@ So a frame that was on the wire is in exactly one place: `rx`, or one of
 conservation bench holds the listener to that
 (`tools/testbench/can/j1939_conservation_test.py` in the firmware repo).
 
+## The receive queue and a flash write (`rx_missed`, 2026-11-17)
+
+Between the receive interrupt and the RX task sits one static queue
+(`CAN_CORE_RXQ_DEPTH` in `can_core_driver.c`), 256 frames since
+2026-11-17, 64 before. Its depth is set by the unit's own flash: an erase
+stops every task for its length and leaves the receive interrupt running
+(it is cache-safe), so the frames of that time can only wait in this
+queue, and when it is full the interrupt counts `rx_missed`. Measured on
+the bench, one erase holds the RX task about 23 ms, about 90 frames at
+the 500 kbit/s line rate:
+
+| Queue | The line rate with three 32 KB files written to `/data` meanwhile (27 to 30 erases) |
+|---|---|
+| 64 frames | 553 of 40,000 frames lost (`rx_missed`) |
+| 256 frames | none lost in seven runs of 40,000 to 85,585 frames |
+
+256 frames are 64 ms at 500 kbit/s and 32 ms at 1 Mbit/s. An erase that
+takes longer than that still costs frames, and they are still counted.
+The queue is internal RAM, 20 bytes a frame, 5120 bytes (3840 more than
+at 64): the interrupt writes it with the cache off, where PSRAM cannot be
+reached, so the frames of a flash write have nowhere else to go. Without
+a flash write the 64 were enough at every load (the three tiers of the
+conservation bench).
+
+What the queue releases after such a hold arrives at the subscribers in
+one go, so a subscriber's own queue has to take it or counts
+`dispatch_drops`: the J2534 channel's (32 frames until that day) dropped
+201 in a run where the node had kept every frame, and is 256 now, like
+the ISO-TP provider's. The bridge's CAN queue (`bridge_endpoints`, 32
+frames) is unchanged and not measured: by the same arithmetic it drops
+after a flash write on a bus above about 1400 frames a second.
+
+Bench: the flash tier of `tools/testbench/can/can_conservation_test.py`
+in the firmware repo (`.\test.ps1 conserve`), and leg W of
+`.\test.ps1 j2534fc` for the same under ISO-TP.
+
 ## Bus-off recovery (2026-07-10)
 
 A transmit-error cascade (shorted bus, baud-mismatch collisions) drives
@@ -282,7 +318,8 @@ counters and traffic after recovery).
   bus contradicts); the node's status read from four threads while the link
   policy bounces it (`n13`).
 - `tools/testbench/can/can_conservation_test.py` → `CAN CONSERVATION PASS`
-  (exactly-N at three load tiers).
+  (exactly-N at three load tiers, and at the line rate with the flash
+  written meanwhile).
 
 ## Notes
 
@@ -291,8 +328,11 @@ counters and traffic after recovery).
 - The ESP TWAI transceiver and the MIC3624 are two nodes on the SAME
   vehicle CAN: legal; traffic policy between autopid-via-MIC and
   native-CAN consumers is the user's call in v1.
-- Memory: the can_core RX task (internal 4 KB) exists only while
-  `enabled` (or while a probe / watch listens); statics negligible.
+- Memory: the can_core RX task (a 4 KB stack in PSRAM, its control block
+  internal) exists only while `enabled` (or while a probe / watch
+  listens). Static, internal: the receive queue, 5120 bytes (256 frames
+  of 20 bytes, read from the map file; see the section on the flash write
+  above); the rest is negligible.
 - The TWAI interrupt is cache-safe: its callbacks must not touch the handle
   (PSRAM). The ISR counts into internal RAM (`can_core_driver.c`).
 - Single shot: a frame that loses arbitration or meets an error frame is

@@ -48,10 +48,11 @@ the ones opened after, and `GET_CONFIG` answers with the values in force
 (`j2534_iso_cfg.c`: SAE J2534-1's ranges, a refused list changes
 nothing). Until then the device sent BS 8 / STmin 1 ms whatever a tool
 set, and a channel still opens with those two instead of the standard's
-0 and 0: with BS 0 an ECU sends a whole message without a pause, and a
-write to the unit's own flash during it costs frames (the CAN receive
-queue holds 64; `J2534_WIRE_PROTOCOL.md` section 12 has the measurement
-and the layouts). The Windows DLL sends and reads the two since driver
+0 and 0, so a tool that sets nothing sees no change. With BS 0 an ECU
+sends a whole message without a pause; a write to the unit's own flash
+during it cost frames while the CAN receive queue held 64, and costs none
+since it holds 256 (`J2534_WIRE_PROTOCOL.md` section 12 has the
+measurements and the layouts). The Windows DLL sends and reads the two since driver
 1.9; older drivers send the IOCTLs as their id alone, which changes
 nothing.
 
@@ -204,7 +205,7 @@ every other write service. The owner's consent is `enabled` + `allow_lan`.
 | `s_pdu` (the ISO-TP reassembly scratch of the RX pump) | 4128 B |
 | channel records `s_ch` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
 | J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
-| ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (32 frames) | per open session |
+| ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (256 frames since 2026-11-17, 4 KB of PSRAM each: what the CAN node releases at once after a flash write; 32 before) | per open session |
 | a TP 2.0 channel while it is open: its state and, for each of the 4 connections, a reassembly buffer and a delivery buffer of 4092 B; taken from the heap at CONNECT, freed at DISCONNECT (not a PSRAM static yet: an open item against the standard) | ~33 KB heap |
 | tasks `j2534` (TCP listener) + `j2534_rx` (RX pump): 4 KB stacks each | 8 KB (+ 2 TCBs internal) |
 | mutexes (send, session, channels) | internal, ~270 B |
@@ -244,7 +245,8 @@ this component.
   flow control read off the bus; the values a channel opens with, each
   one set and read back, their scope, BS 0 over 585 consecutive frames,
   what is refused, 100 answers of 4095 bytes at the full line rate with
-  every frame counted, the device's own UDS client, and the driver DLL
+  every frame counted, the same rate with three files written to the
+  unit's flash meanwhile, the device's own UDS client, and the driver DLL
   called like an application.
 - TP 2.0: `.\test.ps1 j2534tp20` in the firmware checkout
   (`tools/testbench/usb/j2534_tp20_ps_bench.py` -> `J2534 TP20 PASS`):

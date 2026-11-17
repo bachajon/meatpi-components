@@ -76,7 +76,12 @@ static const char *TAG = "can_isotp_esp";
                                      subscriber slot while open           */
 #define ISOTP_TASK_STACK     4096 /* PSRAM: no flash from this task        */
 #define ISOTP_TASK_PRIO      9    /* just under can_core_rx (10)           */
-#define ISOTP_FRAME_Q_LEN    128  /* can_core_frame_t, 16 B each           */
+#define ISOTP_FRAME_Q_LEN    256  /* can_core_frame_t, 16 B each, PSRAM:
+                                     what the CAN node's receive queue can
+                                     release at once after a flash write
+                                     (CAN_CORE_RXQ_DEPTH; 128 until
+                                     2026-11-17, which the 90 frames of the
+                                     erases measured that day did not fill) */
 #define ISOTP_TX_FRAME_POOL  16
 #define ISOTP_IDLE_WAIT_MS   100  /* wake cadence with nothing in flight   */
 

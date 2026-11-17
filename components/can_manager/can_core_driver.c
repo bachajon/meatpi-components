@@ -57,10 +57,20 @@ static const char *TAG = "can_core";
 /* ---- esp_driver_twai node state (port 2026-07-21) ------------------------
  * RX frames are copied OUT of the driver in the on_rx_done ISR into a
  * STATIC queue that can_core owns and NEVER deletes: a reader blocked
- * on it cannot race a driver teardown -- the class of the 2026-07-21
+ * on it cannot race a driver teardown, so the class of the 2026-07-21
  * sleep-entry panic (twai_receive vs twai_driver_uninstall) is
- * structurally impossible with this shape. */
-#define CAN_CORE_RXQ_DEPTH 64
+ * structurally impossible with this shape.
+ *
+ * The depth is what a flash write needs (2026-11-17, 64 until then). An
+ * erase stops every task for its length and leaves the receive interrupt
+ * running, so the frames of that time have nowhere to go but this queue,
+ * and it has to be internal RAM: the interrupt runs with the cache off,
+ * where PSRAM cannot be reached. Measured on the bench, one erase holds
+ * the RX task about 23 ms, 90 frames at the 500 kbit/s line rate. 256
+ * frames are 64 ms at 500 kbit/s and 32 ms at 1 Mbit/s; 20 bytes a frame,
+ * 5120 bytes in all, 3840 more than at 64. The proof is the flash tier of
+ * the firmware repo's can_conservation_test.py. */
+#define CAN_CORE_RXQ_DEPTH 256
 
 twai_node_handle_t can_drv_node;
 

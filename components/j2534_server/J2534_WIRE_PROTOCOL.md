@@ -285,7 +285,7 @@ Data conventions:
   5.5 s).
 - Limits: 4 channels, 8 filters per channel, 4 periodic messages,
   periodic interval >= 5 ms. Received messages are pushed as soon as the
-  RX pump sees them (no device-side queue beyond the channel's 32-frame
+  RX pump sees them (no device-side queue beyond the channel's 256-frame
   CAN queue): drain promptly.
 - Interface exposure (TCP only): with `allow_lan` off the listener
   accepts connections that landed on loopback, WiCAN's own AP or the USB
@@ -578,21 +578,28 @@ are Elias Kotlyar's (pull request 3).
 
 **A channel opens with BS 8 / STmin 1 ms, not with the 0 and 0 SAE
 J2534-1 names.** Those are the values every firmware before sent, so a
-tool that sets nothing sees no change. With BS 0 an ECU may send a whole
-message without a pause, about 4000 frames a second at 500 kbit/s. The
-CAN node's receive queue holds 64 frames, 16 ms at that rate, and a
-write to the unit's own flash holds the receive task longer. On the
-bench the configuration backup, written about 25 s after a restart that
-changed a setting, cost 28 and 30 frames (`rx_missed` on `/api/can`) and
-with them the one 4095-byte answer that was arriving; the tester gets no
-message for that request, the next ones arrive. With the flash at rest
-nothing was lost: 100 answers of 4095 bytes in a row, every frame
-counted (leg N of the stage below). A tool that sets 0 / 0 gets the
-speed, on the bench a 4095-byte answer in hand 0.16 s after the request
-instead of 0.72 s, and that exposure. With a block size the ECU waits
-for the device's next flow control after every block, so a held receive
-task delays a transfer whose blocks fit the queue instead of costing it
-frames (by design; not run on the bench under a flash write).
+tool that sets nothing sees no change. A tool that sets 0 / 0 gets the
+speed: on the bench a 4095-byte answer is in hand 0.16 s after the
+request instead of 0.72 s.
+
+**BS 0 and the unit's own flash.** With BS 0 an ECU may send a whole
+message without a pause, about 4000 frames a second at 500 kbit/s. A
+flash erase on the unit stops every task for about 23 ms and leaves only
+the receive interrupt, so the frames of that time wait in the CAN node's
+receive queue. That queue held 64 frames when this was first run, 16 ms
+at that rate: the configuration backup, written about 25 s after a
+restart that changed a setting, cost 28 and 30 frames (`rx_missed` on
+`/api/can`) and with them the one 4095-byte answer that was arriving;
+the tester got no message for that request, the next ones arrived. The
+queue holds 256 frames since 2026-11-17 (64 ms), and the channel's own
+queue and the ISO-TP provider's take what it releases at once: with
+three files of 32 KB written to the flash while 4095-byte answers run,
+every answer arrives and no frame is lost (leg W of the stage below; leg
+N is 100 answers with the flash at rest). An erase that takes longer
+than the queue lasts would still cost the answer in flight. With a block
+size the ECU waits for the device's next flow control after every block,
+so a held receive task delays such a transfer instead of costing it
+frames (by design; not run on the bench).
 
 Byte-exact example (seq 9 and 10, channel 1; the two bodies are a
 host-test vector, `host_test/main/test_iso_cfg.c`): `SET_CONFIG` of BS 0
