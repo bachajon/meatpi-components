@@ -22,8 +22,23 @@ void test_gpio_can_alias_needs_stop(void)
     TEST_ASSERT_NULL(se_gpio_check(se_can_tx_gpio(), false));
     TEST_ASSERT_NOT_NULL(se_gpio_check(se_can_tx_gpio(), true));
     TEST_ASSERT_NOT_NULL(se_gpio_check(se_can_rx_gpio(), true));
-    TEST_ASSERT_NULL(se_gpio_check(4, true));
     TEST_ASSERT_NOT_NULL(se_gpio_check(26, false));
+}
+
+void test_gpio_only_can_tx_is_driven(void)
+{
+    /* CAN_RX is the transceiver's output: never, bus stopped or not */
+    TEST_ASSERT_NOT_NULL(se_gpio_check(se_can_rx_gpio(), false));
+
+    /* the board's own lines (battery sense, I2C, the OBD chip's UART, power
+       and reset, the card): refused with the bus running or stopped */
+    static const int BOARD[] = { 4, 5, 6, 7, 9, 10, 15, 16, 21, 41, 47 };
+
+    for (unsigned i = 0; i < sizeof(BOARD) / sizeof(BOARD[0]); i++)
+    {
+        TEST_ASSERT_NOT_NULL(se_gpio_check(BOARD[i], false));
+        TEST_ASSERT_NOT_NULL(se_gpio_check(BOARD[i], true));
+    }
 }
 
 void test_pwm_span(void)

@@ -5,6 +5,10 @@
  *        bitbang: the first thing that drives the pad is the on-level.
  *        An idle write or rmt_new_tx_channel before that edge holds a
  *        constant level through the radar's sample window.
+ *
+ *        On the WiCAN PRO se_gpio_check() lets a script drive CAN_TX only
+ *        (the reason is at the function), so the RMT sender is there for a
+ *        board that has free pins and is not reached on this one.
  */
 #include "script_engine_gpio.h"
 
@@ -68,12 +72,27 @@ bool se_gpio_denied(int pin)
 
 const char *se_gpio_check(int pin, bool bus_running)
 {
-    if (se_gpio_denied(pin))
+    /* CAN_RX is where the transceiver drives its RXD: a second driver on
+     * that net is a short between two outputs, bus stopped or not. */
+    if (pin == se_can_rx_gpio())
+    {
+        return "pin refused: CAN_RX is the transceiver's output";
+    }
+
+    /* The board rule (WiCAN PRO netlist of 2026-11-07): every other GPIO
+     * the module brings out carries a board function (the OBD chip's
+     * reset, power and UART lines, the card, I2C, the USB switches, the
+     * battery sense, the LED) and none goes to a header. Driving one fights
+     * that function, and handing the pad back when the script ends
+     * (gpio_reset_pin) leaves the function dead until a restart. So a
+     * script drives CAN_TX and nothing else. A board with free pins adds
+     * them here. */
+    if (pin != se_can_tx_gpio() || se_gpio_denied(pin))
     {
         return "pin refused";
     }
 
-    if (bus_running && (pin == se_can_tx_gpio() || pin == se_can_rx_gpio()))
+    if (bus_running)
     {
         return "CAN pin in use: call can_stop() first";
     }

@@ -4,6 +4,7 @@ idf_component_register(
          "script_engine_obd.c"
          "script_engine_settings.c"
          "script_engine_bind.c"
+         "script_engine_bind_can.c"
          "script_engine_gpio.c"
          "script_engine_doc.c"
          "script_engine_examples.c"

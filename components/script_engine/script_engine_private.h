@@ -55,6 +55,18 @@ void se_events_register(void);
 /* Cooperative budget/kill check: bindings call it at every I/O point. */
 void se_check_budget(bvm *vm);
 
+/* A CAN id argument: an integer, or a hex string (script_engine_bind.c). */
+uint32_t se_bind_id_arg(bvm *vm, int idx);
+
+/* The bindings of script_engine_bind_can.c, listed in bind.c's table, and
+ * the globals they read and set (can_rx_*, HIGH, LOW, CAN_TX, CAN_RX). */
+int se_b_can_start(bvm *vm);
+int se_b_can_stop(bvm *vm);
+int se_b_can_rx(bvm *vm);
+int se_b_digital_write(bvm *vm);
+int se_b_digital_pwm(bvm *vm);
+void se_bind_can_globals(bvm *vm);
+
 esp_err_t script_engine_register_cli(void);
 
 /* ---- settings (script_engine_settings.c) ------------------------------------ */

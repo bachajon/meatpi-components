@@ -135,9 +135,9 @@ static const se_bind_doc_t BIND_DOCS[] =
       "the end of the run anyway.",
       "can_start()" },
     { "can_stop", "can_stop()", "can", "true when the bus is parked",
-      "Stop the CAN controller and park the transceiver, which frees the CAN TX "
-      "and RX pins for digitalWrite() and digitalPWM(). The bus is started again "
-      "when the script ends.",
+      "Stop the CAN controller and park the transceiver, which frees CAN_TX for "
+      "digitalWrite() and digitalPWM(). The bus is started again when the script "
+      "ends.",
       "can_stop()" },
     { "can_rx", "can_rx(id, timeout_ms[, ext])", "can", "hex string, or nil",
       "Wait up to timeout_ms milliseconds (1000 = 1 s, at most 60 s) for one frame "
@@ -145,20 +145,21 @@ static const se_bind_doc_t BIND_DOCS[] =
       "ext defaults to 1 when id is above 0x7FF.",
       "var f = can_rx(0x7E8, 1000)" },
     { "digitalWrite", "digitalWrite(pin, value)", "gpio", "nil",
-      "Drive a GPIO high or low (HIGH = 1, LOW = 0). pin is a GPIO number or "
-      "CAN_TX / CAN_RX (also the strings 'CAN_TX' and 'CAN_RX'). Flash, PSRAM, USB, "
-      "strapping and the transceiver standby pin are refused. CAN_TX and CAN_RX "
-      "need can_stop() first. Pins return to inputs when the script ends.",
+      "Drive CAN_TX high or low (HIGH = 1, LOW = 0; LOW is the dominant bus level). "
+      "pin is CAN_TX (or the string 'CAN_TX') and needs can_stop() first; the "
+      "transceiver is taken out of standby. Every other pin is refused: on this "
+      "board they all carry a function of the device, and CAN_RX is the "
+      "transceiver's output. The pin goes back when the script ends.",
       "digitalWrite(CAN_TX, HIGH)" },
     { "digitalPWM", "digitalPWM(pin, ontime_ms, offtime_ms[, rounds[, idle]])", "gpio", "nil",
       "Pulse pin: ontime_ms at the opposite of the idle level, offtime_ms at the idle "
-      "level, rounds times (default 1). Idle is LOW, except on CAN_TX where it is "
-      "HIGH (recessive): ontime_ms is then a dominant bit and the transceiver's "
+      "level, rounds times (default 1). On CAN_TX the idle level is HIGH "
+      "(recessive): ontime_ms is then a dominant bit and the transceiver's "
       "dominant timeout never trips. Pass HIGH or LOW as idle to override. The "
-      "RMT peripheral times every edge in hardware (0.1 us steps up to 3.2 ms, "
-      "1 us up to 32 ms), so 1.6 and 0.4 are exact. The call waits until it is "
-      "done; the whole pulse must be 1 s or less (at most 49104 rounds). Same pins "
-      "as digitalWrite(), including CAN_TX and CAN_RX after can_stop().",
+      "first edge is the on-level, and the levels are timed in steps of 1 us by a "
+      "loop that other work of the device can stretch by a few microseconds. The "
+      "call waits until it is done; the whole pulse must be 1 s or less (at most "
+      "49104 rounds). Same pin rule as digitalWrite(): CAN_TX, after can_stop().",
       "digitalPWM(CAN_TX, 1.6, 0.4, 10)" },
 
     { "emit", "emit(source, name, key, value)", "events", "true when queued",
@@ -222,7 +223,8 @@ static const struct
     { "HIGH", "1, for digitalWrite()." },
     { "LOW", "0, for digitalWrite()." },
     { "CAN_TX", "GPIO of the CAN controller TX pin." },
-    { "CAN_RX", "GPIO of the CAN controller RX pin." },
+    { "CAN_RX", "GPIO of the CAN controller RX pin (the transceiver drives it: a "
+                "script cannot)." },
     { "evt_source", "Source of the event that triggered this run ('' when run by hand)." },
     { "evt_name", "Name of that event, e.g. 'bit' for status.bit." },
     { "evt_<field>", "One global per field of the trigger event: evt_bit and evt_set for "
@@ -283,9 +285,10 @@ static const struct
       "calls have parentheses. The line number is in the message." },
     { "bad hex", "Requests are hex bytes like '22 F1 90' (spaces optional, at most 8 for can_tx)." },
     { "pin refused",
-      "That GPIO is flash, PSRAM, USB, a strapping pin, or the CAN standby pin." },
+      "A script drives CAN_TX only. Every other pin carries a function of the "
+      "device, and CAN_RX is the transceiver's output." },
     { "CAN pin in use",
-      "can_stop() before digitalWrite() or digitalPWM() on CAN_TX or CAN_RX." },
+      "can_stop() before digitalWrite() or digitalPWM() on CAN_TX." },
     { "digitalPWM longer than 1 s",
       "rounds * (ontime_ms + offtime_ms) must be 1 s or less." },
     { "no RMT channel",

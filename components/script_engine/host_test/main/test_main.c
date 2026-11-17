@@ -43,6 +43,7 @@ void test_examples_json_lists_without_sources(void);
 
 void test_gpio_denylist(void);
 void test_gpio_can_alias_needs_stop(void);
+void test_gpio_only_can_tx_is_driven(void);
 void test_pwm_span(void);
 void test_gpio_touch_release(void);
 void test_pwm_default_idle(void);
@@ -150,6 +151,7 @@ void app_main(void)
 
     RUN_TEST(test_gpio_denylist);
     RUN_TEST(test_gpio_can_alias_needs_stop);
+    RUN_TEST(test_gpio_only_can_tx_is_driven);
     RUN_TEST(test_pwm_span);
     RUN_TEST(test_gpio_touch_release);
     RUN_TEST(test_pwm_default_idle);

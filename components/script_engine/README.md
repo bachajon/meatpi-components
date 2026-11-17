@@ -71,6 +71,8 @@ short.
 |---|---|
 | `script_engine.c` | VM lifecycle, runner task, run/check/kill, stored-script loader (internal-stack marshal) |
 | `script_engine_bind.c` | the device bindings + the function table |
+| `script_engine_bind_can.c` | the bindings on the CAN controller itself: `can_rx`, `can_start`, `can_stop`, `digitalWrite`, `digitalPWM`, and the epilogue of every run |
+| `script_engine_gpio.c` / `.h` | the pin rule and the pulse sender of `digitalWrite` / `digitalPWM` (the rule and the pulse plan are pure) |
 | `script_engine_doc.c` / `.h` | the reference tables + JSON builders, the engine limits (pure) |
 | `script_engine_examples.c` | the built-in examples (pure) |
 | `script_engine_obd.c` | the claimed-conversation core over an injected port (pure) |
@@ -80,4 +82,42 @@ short.
 | `script_engine_settings.c` / `_cli.c` | settings descriptor, `script run|test|stop` console command |
 
 Host suite: `./test.ps1 host script_engine` (name guard, obd core, reflash
-streamer, reference + examples).
+streamer, reference + examples, the pin rule and the pulse plan).
+
+## Raw CAN receive, bus stop / start, the CAN_TX pulse (2026-11-17)
+
+Pull request 2 (Elias Kotlyar) added five bindings: `can_rx(id,
+timeout_ms[, ext])`, `can_start()`, `can_stop()`, `digitalWrite(pin,
+value)` and `digitalPWM(pin, ontime_ms, offtime_ms[, rounds[, idle]])`;
+the reference (`script_engine_doc.c`) is the description a user reads.
+
+- `can_rx` subscribes a queue to that one id for the length of the call.
+- `can_stop()` is `can_manager_stop()`: the controller uninstalled, the
+  transceiver in standby, the pins free. Whatever the script does next,
+  the runner's epilogue after EVERY run (`se_script_epilogue`, beside
+  `se_obd_autorelease`) drops a `can_rx` subscription, hands the pins back
+  and starts the bus again if the script stopped it. The `can` bridge jack
+  joins the bus again by itself (bridge_endpoints).
+- **The pin rule (`se_gpio_check`): a script drives `CAN_TX` and nothing
+  else**, and only while the bus is stopped. On the WiCAN PRO every other
+  GPIO the module brings out carries a function of the device (the OBD
+  chip's reset, power and UART lines, the card, I2C, the USB switches, the
+  battery sense, the LED), none is on a header, and handing a pad back at
+  the script's end (`gpio_reset_pin`) would leave that function dead until
+  a restart. `CAN_RX` is the transceiver's output: a second driver on it is
+  a short between two outputs. The pull request's own list refused the
+  module's flash, PSRAM, USB, strapping and console pins and left the
+  board's lines open; the board rule sits on top of it. A board with free
+  pins adds them in `se_gpio_check`.
+- `CAN_TX` is bit-banged with a busy loop (the first thing that drives the
+  pad is the on-level; a level is timed in steps of 1 us and other work of
+  the device can stretch it by a few microseconds). The RMT sender in the
+  same file (hardware-timed edges) is for other pins and is not reached on
+  the WiCAN PRO.
+- The pulses are dominant levels on the vehicle bus: they destroy the
+  frames of the other nodes for as long as they last. One `digitalPWM` is
+  capped at 1 s; nothing caps a script that calls it in a loop but the
+  script's run time (`max_runtime_ms`).
+
+Bench: `python tools/testbench/can/script_can_bench.py` (in the firmware
+repository; PCAN as the witness, prints `SCRIPT CAN PASS`).
