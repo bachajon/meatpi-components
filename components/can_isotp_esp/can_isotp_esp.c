@@ -23,17 +23,21 @@
 /**
  * @file can_isotp_esp.c
  * @brief ISO-TP provider: esp_isotp (externally managed) over can_manager.
+ *        This file holds the sessions (the can_isotp_ops_t), the stack's
+ *        callbacks and the registration; the "isotp" task and its frame
+ *        queue are in can_isotp_esp_task.c, what the two share in
+ *        can_isotp_esp_session.h.
  *
  * Threads:
  *   - a consumer's task calls open/close/send/recv (the can_isotp_ops_t);
  *   - can_core's RX task copies every frame matching an open session's
- *     rx id into s_frame_q (ONE queue, one subscription per session);
- *   - the "isotp" task drains s_frame_q, feeds each frame to its
+ *     rx id into can_isotp_esp_frame_q (ONE queue, one subscription per session);
+ *   - the "isotp" task drains can_isotp_esp_frame_q, feeds each frame to its
  *     session's stack, and polls the stacks that are mid-transfer at tick
  *     cadence (consecutive-frame pacing, N_Bs/N_Cr expiry).
  *
  * Locking: esp_isotp has none of its own, so EVERY esp_isotp_* call on a
- * session happens under s->lock; the session table under s_tbl_lock (the
+ * session happens under s->lock; the session table under can_isotp_esp_tbl_lock (the
  * task holds it while feeding, so close() cannot free a session the task
  * is inside). The stack's callbacks run inside those locked calls and only
  * post to semaphores / the mailbox.
@@ -67,81 +71,23 @@
 #include "log_manager.h"
 
 #include "can_isotp_esp_private.h"
+#include "can_isotp_esp_session.h"
 
 static const char *TAG = "can_isotp_esp";
 
-#define ISOTP_MAX_SESSIONS   9    /* 1 uds_manager + 8 J2534 flow-control
-                                     sessions (4 channels x up to 4 each,
-                                     2026-10-19); each takes a can_manager
-                                     subscriber slot while open           */
-#define ISOTP_TASK_STACK     4096 /* PSRAM: no flash from this task        */
-#define ISOTP_TASK_PRIO      9    /* just under can_core_rx (10)           */
-#define ISOTP_FRAME_Q_LEN    256  /* can_core_frame_t, 16 B each, PSRAM:
-                                     what the CAN node's receive queue can
-                                     release at once after a flash write
-                                     (CAN_CORE_RXQ_DEPTH; 128 until
-                                     2026-11-17, which the 90 frames of the
-                                     erases measured that day did not fill) */
 #define ISOTP_TX_FRAME_POOL  16
-#define ISOTP_IDLE_WAIT_MS   100  /* wake cadence with nothing in flight   */
 
-/* after any activity a session is polled at tick cadence for this long:
- * longer than the stack's N_Bs/N_Cr (Kconfig response timeout, 1000 ms
- * since 2026-10-19: ISO 15765-2's value, 100 ms before) so a stalled
- * transfer is always flagged by a poll and the link never stays "in
- * progress" forever */
-#define ISOTP_BUSY_MS        1200
-
-struct can_isotp_session
-{
-    esp_isotp_handle_t  tp;
-    SemaphoreHandle_t   lock;      /* every esp_isotp_* call on tp        */
-    SemaphoreHandle_t   tx_done;   /* binary: tx-complete callback        */
-    SemaphoreHandle_t   rx_sem;    /* counting: one token per mailbox PDU */
-    isotp_mbox_t        mbox;
-    isotp_mbox_slot_t  *slots;     /* PSRAM                               */
-    int                 sub_idx;   /* can_manager queue subscription      */
-    uint32_t            tx_id;
-    uint32_t            rx_id;
-    bool                ext;
-    volatile bool       tx_inflight;    /* multi-frame send not complete  */
-    volatile uint32_t   tx_deadline_ms; /* give up tracking it after this */
-    volatile uint32_t   busy_until_ms;  /* tick-cadence polling until     */
-};
-
-static struct can_isotp_session *s_tbl[ISOTP_MAX_SESSIONS];
-static SemaphoreHandle_t s_tbl_lock;
+struct can_isotp_session *can_isotp_esp_tbl[ISOTP_MAX_SESSIONS];
+SemaphoreHandle_t can_isotp_esp_tbl_lock;
 static StaticSemaphore_t s_tbl_lock_buf;
 
-static QueueHandle_t s_frame_q;
-static StaticQueue_t s_frame_q_buf;
-EXT_RAM_BSS_ATTR static uint8_t
-    s_frame_q_store[ISOTP_FRAME_Q_LEN * sizeof(can_core_frame_t)];
-
-static TaskHandle_t s_task;
-static StaticTask_t s_task_tcb;
-EXT_RAM_BSS_ATTR static StackType_t s_task_stack[ISOTP_TASK_STACK];
-
 static bool s_active;
-static can_isotp_esp_stats_t s_stats;
-static portMUX_TYPE s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+can_isotp_esp_stats_t can_isotp_esp_stats;
+portMUX_TYPE can_isotp_esp_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 
-#define STAT_INC(field)                        \
-    do                                         \
-    {                                          \
-        portENTER_CRITICAL(&s_stats_mux);      \
-        s_stats.field++;                       \
-        portEXIT_CRITICAL(&s_stats_mux);       \
-    } while (0)
-
-static uint32_t now_ms(void)
+uint32_t can_isotp_esp_now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static bool session_busy(const struct can_isotp_session *s, uint32_t now)
-{
-    return s->tx_inflight || (int32_t)(s->busy_until_ms - now) > 0;
 }
 
 /* ---- esp_isotp callbacks (inside a locked esp_isotp_* call) ------------- */
@@ -192,156 +138,6 @@ static esp_err_t on_can_tx(uint32_t id, const uint8_t *data, uint8_t size,
     }
 
     return can_manager_send(id, s->ext, false, data, size);
-}
-
-/* ---- the provider task ----------------------------------------------------- */
-
-static struct can_isotp_session *find_by_rx(uint32_t id, bool ext)
-{
-    for (int i = 0; i < ISOTP_MAX_SESSIONS; i++)
-    {
-        if (s_tbl[i] != NULL && s_tbl[i]->rx_id == id && s_tbl[i]->ext == ext)
-        {
-            return s_tbl[i];
-        }
-    }
-
-    return NULL;
-}
-
-/* s_tbl_lock held */
-static void feed_frame(const can_core_frame_t *fr)
-{
-    if (fr->rtr || fr->dlc > 8)
-    {
-        return;
-    }
-
-    struct can_isotp_session *s = find_by_rx(fr->id, fr->ext);
-
-    if (s == NULL)
-    {
-        STAT_INC(frames_orphan); /* closed between dispatch and here */
-        return;
-    }
-
-    uint8_t payload[8];
-    twai_frame_t tf;
-
-    memset(&tf, 0, sizeof(tf));
-    tf.header.id = fr->id;
-    tf.header.ide = fr->ext;
-    tf.header.dlc = fr->dlc;
-    memcpy(payload, fr->data, fr->dlc);
-    tf.buffer = payload;
-    tf.buffer_len = fr->dlc;
-
-    xSemaphoreTake(s->lock, portMAX_DELAY);
-    (void)esp_isotp_feed_can_frame(s->tp, &tf);
-    (void)esp_isotp_poll(s->tp); /* a flow control just unblocked CFs */
-    xSemaphoreGive(s->lock);
-
-    s->busy_until_ms = now_ms() + ISOTP_BUSY_MS;
-    STAT_INC(frames_fed);
-}
-
-/* s_tbl_lock held; returns whether any session still needs tick polling */
-static bool poll_busy_sessions(void)
-{
-    uint32_t now = now_ms();
-    bool any = false;
-
-    for (int i = 0; i < ISOTP_MAX_SESSIONS; i++)
-    {
-        struct can_isotp_session *s = s_tbl[i];
-
-        if (s == NULL)
-        {
-            continue;
-        }
-
-        if (s->tx_inflight && (int32_t)(now - s->tx_deadline_ms) > 0)
-        {
-            /* the sender gave up on it long ago; the stack has flagged
-               N_Bs by now (busy window > N_Bs): stop tracking */
-            s->tx_inflight = false;
-        }
-
-        if (!session_busy(s, now))
-        {
-            continue;
-        }
-
-        any = true;
-        xSemaphoreTake(s->lock, portMAX_DELAY);
-        (void)esp_isotp_poll(s->tp);
-        xSemaphoreGive(s->lock);
-    }
-
-    return any;
-}
-
-static void isotp_task(void *arg)
-{
-    TickType_t wait = pdMS_TO_TICKS(ISOTP_IDLE_WAIT_MS);
-
-    (void)arg;
-
-    for (;;)
-    {
-        can_core_frame_t fr;
-        bool got = (xQueueReceive(s_frame_q, &fr, wait) == pdTRUE);
-
-        xSemaphoreTake(s_tbl_lock, portMAX_DELAY);
-
-        if (got)
-        {
-            feed_frame(&fr);
-        }
-
-        /* drain a burst before polling: consecutive frames arrive every
-           ~250 us at 500 kbps */
-        while (xQueueReceive(s_frame_q, &fr, 0) == pdTRUE)
-        {
-            feed_frame(&fr);
-        }
-
-        bool busy = poll_busy_sessions();
-
-        xSemaphoreGive(s_tbl_lock);
-
-        wait = busy ? 1 : pdMS_TO_TICKS(ISOTP_IDLE_WAIT_MS);
-    }
-}
-
-/* s_tbl_lock held */
-static esp_err_t ensure_started(void)
-{
-    if (s_frame_q == NULL)
-    {
-        s_frame_q = xQueueCreateStatic(ISOTP_FRAME_Q_LEN,
-                                       sizeof(can_core_frame_t),
-                                       s_frame_q_store, &s_frame_q_buf);
-
-        if (s_frame_q == NULL)
-        {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    if (s_task == NULL)
-    {
-        s_task = xTaskCreateStatic(isotp_task, "isotp", ISOTP_TASK_STACK,
-                                   NULL, ISOTP_TASK_PRIO, s_task_stack,
-                                   &s_task_tcb);
-
-        if (s_task == NULL)
-        {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    return ESP_OK;
 }
 
 /* ---- sessions -------------------------------------------------------------- */
@@ -395,24 +191,24 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
         return ESP_ERR_INVALID_STATE; /* bus down (contract) */
     }
 
-    xSemaphoreTake(s_tbl_lock, portMAX_DELAY);
+    xSemaphoreTake(can_isotp_esp_tbl_lock, portMAX_DELAY);
 
-    esp_err_t err = ensure_started();
+    esp_err_t err = can_isotp_esp_ensure_started();
     int slot = -1;
 
     if (err == ESP_OK)
     {
         for (int i = 0; i < ISOTP_MAX_SESSIONS; i++)
         {
-            if (s_tbl[i] == NULL)
+            if (can_isotp_esp_tbl[i] == NULL)
             {
                 if (slot < 0)
                 {
                     slot = i;
                 }
             }
-            else if (s_tbl[i]->rx_id == cfg->rx_id &&
-                     s_tbl[i]->ext == cfg->ext_id)
+            else if (can_isotp_esp_tbl[i]->rx_id == cfg->rx_id &&
+                     can_isotp_esp_tbl[i]->ext == cfg->ext_id)
             {
                 ESP_LOGW(TAG, "rx %lX already has a session",
                          (unsigned long)cfg->rx_id);
@@ -491,7 +287,7 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
 
     if (err == ESP_OK)
     {
-        err = can_manager_subscribe_queue(s_frame_q, cfg->rx_id,
+        err = can_manager_subscribe_queue(can_isotp_esp_frame_q, cfg->rx_id,
                                           cfg->ext_id ? 0x1FFFFFFFu : 0x7FFu,
                                           cfg->ext_id, false, &s->sub_idx);
 
@@ -510,18 +306,18 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
 
     if (err == ESP_OK)
     {
-        s_tbl[slot] = s;
+        can_isotp_esp_tbl[slot] = s;
 
-        portENTER_CRITICAL(&s_stats_mux);
-        s_stats.opens++;
-        s_stats.sessions_open++;
+        portENTER_CRITICAL(&can_isotp_esp_stats_mux);
+        can_isotp_esp_stats.opens++;
+        can_isotp_esp_stats.sessions_open++;
 
-        if (s_stats.sessions_open > s_stats.sessions_peak)
+        if (can_isotp_esp_stats.sessions_open > can_isotp_esp_stats.sessions_peak)
         {
-            s_stats.sessions_peak = s_stats.sessions_open;
+            can_isotp_esp_stats.sessions_peak = can_isotp_esp_stats.sessions_open;
         }
 
-        portEXIT_CRITICAL(&s_stats_mux);
+        portEXIT_CRITICAL(&can_isotp_esp_stats_mux);
 
         ESP_LOGI(TAG, "session open: tx %lX rx %lX %s pad=%d",
                  (unsigned long)cfg->tx_id, (unsigned long)cfg->rx_id,
@@ -529,7 +325,7 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
         *out = s;
     }
 
-    xSemaphoreGive(s_tbl_lock);
+    xSemaphoreGive(can_isotp_esp_tbl_lock);
 
     if (err != ESP_OK)
     {
@@ -551,13 +347,13 @@ static void isotp_close(can_isotp_session_t s)
         return;
     }
 
-    xSemaphoreTake(s_tbl_lock, portMAX_DELAY);
+    xSemaphoreTake(can_isotp_esp_tbl_lock, portMAX_DELAY);
 
     for (int i = 0; i < ISOTP_MAX_SESSIONS; i++)
     {
-        if (s_tbl[i] == s)
+        if (can_isotp_esp_tbl[i] == s)
         {
-            s_tbl[i] = NULL;
+            can_isotp_esp_tbl[i] = NULL;
         }
     }
 
@@ -567,9 +363,9 @@ static void isotp_close(can_isotp_session_t s)
         s->sub_idx = -1;
     }
 
-    xSemaphoreGive(s_tbl_lock);
+    xSemaphoreGive(can_isotp_esp_tbl_lock);
 
-    /* the task cannot reach s any more (lookups happen under s_tbl_lock,
+    /* the task cannot reach s any more (lookups happen under can_isotp_esp_tbl_lock,
        which it holds while feeding). A consumer must not send/recv on s
        concurrently with close: both consumers serialize their own calls. */
     xSemaphoreTake(s->lock, portMAX_DELAY);
@@ -580,14 +376,14 @@ static void isotp_close(can_isotp_session_t s)
 
     session_destroy(s);
 
-    portENTER_CRITICAL(&s_stats_mux);
+    portENTER_CRITICAL(&can_isotp_esp_stats_mux);
 
-    if (s_stats.sessions_open > 0)
+    if (can_isotp_esp_stats.sessions_open > 0)
     {
-        s_stats.sessions_open--;
+        can_isotp_esp_stats.sessions_open--;
     }
 
-    portEXIT_CRITICAL(&s_stats_mux);
+    portEXIT_CRITICAL(&can_isotp_esp_stats_mux);
 }
 
 static esp_err_t isotp_send(can_isotp_session_t s, const uint8_t *data,
@@ -610,8 +406,8 @@ static esp_err_t isotp_send(can_isotp_session_t s, const uint8_t *data,
 
     xSemaphoreTake(s->lock, portMAX_DELAY);
     (void)xSemaphoreTake(s->tx_done, 0); /* drop a stale completion */
-    s->tx_deadline_ms = now_ms() + timeout_ms + 500;
-    s->busy_until_ms = now_ms() + ISOTP_BUSY_MS;
+    s->tx_deadline_ms = can_isotp_esp_now_ms() + timeout_ms + 500;
+    s->busy_until_ms = can_isotp_esp_now_ms() + ISOTP_BUSY_MS;
     s->tx_inflight = (len > 7); /* a single frame completes inside send */
 
     esp_err_t err = esp_isotp_send(s->tp, data, (uint32_t)len);
@@ -725,9 +521,9 @@ esp_err_t can_isotp_esp_init(void)
     log_manager_register(&LOG_DESC);
     log_manager_register(&STACK_LOG);
 
-    if (s_tbl_lock == NULL)
+    if (can_isotp_esp_tbl_lock == NULL)
     {
-        s_tbl_lock = xSemaphoreCreateMutexStatic(&s_tbl_lock_buf);
+        can_isotp_esp_tbl_lock = xSemaphoreCreateMutexStatic(&s_tbl_lock_buf);
     }
 
     if (s_active)
@@ -767,7 +563,7 @@ void can_isotp_esp_get_stats(can_isotp_esp_stats_t *out)
         return;
     }
 
-    portENTER_CRITICAL(&s_stats_mux);
-    *out = s_stats;
-    portEXIT_CRITICAL(&s_stats_mux);
+    portENTER_CRITICAL(&can_isotp_esp_stats_mux);
+    *out = can_isotp_esp_stats;
+    portEXIT_CRITICAL(&can_isotp_esp_stats_mux);
 }

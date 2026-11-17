@@ -48,7 +48,7 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
 ```
  consumer task            can_core_rx task              "isotp" task (prio 9, PSRAM stack)
  (uds / j2534)                 |                                |
-  open()  ---- subscribe rx_id ->  s_frame_q  <---------------- xQueueReceive
+  open()  ---- subscribe rx_id -> can_isotp_esp_frame_q <------ xQueueReceive
   send()  -> esp_isotp_send ----> FF/SF out via can_manager_send |
              (under s->lock)                                      feed_frame(): esp_isotp_feed_can_frame
   recv()  <- s->rx_sem + mailbox <---------------- on_rx_pdu() <-  + esp_isotp_poll (CFs, FC, N_Bs/N_Cr)
@@ -60,7 +60,7 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
   Every other bus client keeps getting its own copy of every frame: the CAN
   monitor, bridges and autopid (on the MIC chip) do not change while a
   session is open.
-- **The task owns the stack.** `esp_isotp` has no locking, so every
+- **The task owns the stack** (`can_isotp_esp_task.c`). `esp_isotp` has no locking, so every
   `esp_isotp_*` call on a session runs under the session mutex; the task
   feeds + polls under it, the consumer's `send()` takes it for the
   `esp_isotp_send` call only. Sessions are looked up under the table mutex,

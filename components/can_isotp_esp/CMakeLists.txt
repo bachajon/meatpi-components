@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "can_isotp_esp.c"
          "can_isotp_esp_mbox.c"
+         "can_isotp_esp_task.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     # Service: the public build's ISO-TP provider for can_manager's
