@@ -14,6 +14,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 void run_voltage_tests(void);   /* test_voltage.c: its four cases */
+void run_iso_cfg_tests(void);   /* test_iso_cfg.c: its five cases */
 
 static void test_hdr_roundtrip(void)
 {
@@ -780,5 +781,6 @@ void app_main(void)
     RUN_TEST(test_migrate_v1_drops_allow_reflash);
     RUN_TEST(test_migrate_v1_without_key_and_v2_untouched);
     run_voltage_tests();
+    run_iso_cfg_tests();
     UNITY_END();
 }

@@ -11,3 +11,16 @@ via CMake (upstream arrangement) to pin the isotp-c config.
   raised from 100000 to 1000000 (N_Bs / N_Cr per ISO 15765-2; an ECU busy
   with a flash block that answered flow control late aborted the transfer
   at 100 ms). Nothing else beyond the inherited isotp_config.h arrangement.
+- 2026-11-17 (Elias Kotlyar, pull request 3): the flow control a link sends
+  as a receiver is the link's own instead of the two Kconfig values.
+  `isotp-c/isotp.c` and `isotp.h`: `fc_bs` and `fc_st_min_us` in
+  `IsoTpLink`, set by `isotp_set_flow_control()`, used for the flow control
+  after a first frame and at a block end; a block size of 0 no longer
+  lets the block counter wrap (it sent a second flow control after 255
+  consecutive frames). `inc/esp_isotp.h` and `src/esp_isotp.c`:
+  `flow_override`, `flow_block_size` and `flow_st_min_us` in
+  `esp_isotp_config_t`, and `esp_isotp_set_flow_control()` for a transport
+  that is open. `Kconfig`: `ISO_TP_DEFAULT_BLOCK_SIZE` takes 0 (range 0 to
+  32) and defaults to 0, `ISO_TP_DEFAULT_ST_MIN_US` defaults to 0. The
+  firmware's tracked sdkconfig still says 8 and 1000, and no session of
+  `can_isotp_esp` uses the Kconfig values any more (it always overrides).

@@ -21,7 +21,7 @@ This component is the public provider: the vendored `esp_isotp` stack in its
   opens/open_fails, frames_fed/orphan, pdus_tx/rx, tx_timeouts, rx_dropped,
   rx_oversize (surfaced by `GET /api/uds` as `provider_stats`).
 - The provider itself is reached through `can_isotp()` (can_manager's slot):
-  open / close / send / recv per `can_isotp.h`.
+  open / close / send / recv / set_flow per `can_isotp.h`.
 
 ## Dependencies
 
@@ -99,10 +99,25 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
 
 ## Limits (esp_isotp 0.1.1)
 
-- The flow control THIS side sends as a receiver uses the Kconfig defaults
-  (`CONFIG_ISO_TP_DEFAULT_BLOCK_SIZE` 8, `CONFIG_ISO_TP_DEFAULT_ST_MIN_US`
-  1000): `can_isotp_cfg_t.block_size/stmin_ms` are accepted and ignored
-  (logged once). Both consumers pass 0/0 today.
+- The flow control THIS side sends as a receiver is the session's own
+  (2026-11-17, Elias Kotlyar's pull request 3): `can_isotp_cfg_t`
+  `block_size` and `stmin_ms` (or `stmin_us`, which wins when it is not 0:
+  ISO 15765-2 knows 100..900 us), and what `set_flow()` puts in their
+  place on an open session, from the next first frame or block end on.
+  0 and 0 mean BS 0 / STmin 0, the ECU streams the whole message; a BS of
+  0 sends one flow control however long the message is (the block counter
+  no longer wraps at 255 frames). The Kconfig values
+  (`CONFIG_ISO_TP_DEFAULT_BLOCK_SIZE`, `CONFIG_ISO_TP_DEFAULT_ST_MIN_US`)
+  no longer reach a session of this provider. Until that day they were
+  what every session sent (8 and 1000) and the two fields were ignored.
+  The consumers state theirs: `uds_manager` 8 / 1 ms as before, a J2534
+  channel 8 / 1 ms until its tool sets `ISO15765_BS` / `ISO15765_STMIN`.
+- BS 0 at the line rate needs the unit's flash at rest: the CAN node's
+  receive queue holds 64 frames (16 ms at 500 kbit/s) and a flash write
+  holds the receive task longer. Measured 2026-11-17: 28 and 30 frames
+  (`rx_missed`) and one 4095-byte PDU lost while the configuration backup
+  was written; nothing lost in 100 PDUs of 4095 bytes in a row otherwise
+  (`.\test.ps1 j2534fc`, leg N).
 - N_Bs / N_Cr = `CONFIG_ISO_TP_DEFAULT_RESPONSE_TIMEOUT_US` (1000 ms since
   2026-10-19, ISO 15765-2's value; 100 ms before). The task polls a session
   at tick cadence for 1.2 s after any activity so the stack's timeout is

@@ -124,15 +124,6 @@ uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id);
 void j2534_channel_clear_filters(int slot);
 
 /**
- * Receiver flow control for an ISO15765 channel. @p stmin is the J2534
- * ISO15765_STMIN value (0..127 ms, or 0xF1..0xF9 for 100..900 us). Applied
- * to sessions already open and to sessions opened afterwards. @p bs 0 asks
- * the sender to stream the rest of each PDU.
- */
-void j2534_channel_set_isotp(int slot, bool has_bs, uint8_t bs,
-                             bool has_stmin, uint32_t stmin);
-
-/**
  * Poll one channel for a received message (non-blocking-ish; ISO15765
  * uses a short internal timeout). Returns true and fills @p out when a
  * message passed the channel's filters. The server's RX pump calls this
@@ -143,10 +134,18 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out);
 /** True when @p slot is an open TP2.0 channel (protocol 0x800E). */
 bool j2534_channel_is_tp20(int slot);
 
+/** True when @p slot is an open channel that takes SET_CONFIG and answers
+ *  GET_CONFIG itself: TP2.0 (its table) and ISO15765 (ISO15765_BS and
+ *  ISO15765_STMIN). */
+bool j2534_channel_has_config(int slot);
+
 /**
- * Channel ioctl. SET/GET_CONFIG on a CAN or ISO15765 channel stay a
- * best-effort success (the bus rate comes from can_manager). TP2.0
- * applies the body. GET_CONFIG's filled pairs land in @p out.
+ * Channel ioctl. SET/GET_CONFIG on a CAN or J1850 channel stay a
+ * best-effort success (the bus rate comes from can_manager). An ISO15765
+ * channel takes ISO15765_BS and ISO15765_STMIN (the flow control it sends
+ * as a receiver: for the sessions open and the ones opened after) and
+ * passes over the rest; TP2.0 applies its table. GET_CONFIG's filled pairs
+ * land in @p out.
  */
 uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
                              const uint8_t *body, uint32_t body_len,

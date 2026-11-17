@@ -87,7 +87,7 @@ Types 0x01..0x15 are tester to device; 0x80.. are device to tester.
 | `0x12` | `STOP_FILTER` | `filter_id u32` | none |
 | `0x13` | `START_PERIODIC` | `interval_ms u32` (clamped to >= 5), then one MSG | `u32` periodic id |
 | `0x14` | `STOP_PERIODIC` | `periodic_id u32` | none |
-| `0x15` | `IOCTL` | `ioctl_id u32` [, `body_len u32`, then `body_len` bytes] | `READ_VBATT`: millivolts `u32`; `GET_CONFIG` on a TP2.0 channel and `GET_DEVICE_INFO`: a list (section 11); otherwise none |
+| `0x15` | `IOCTL` | `ioctl_id u32` [, `body_len u32`, then `body_len` bytes] | `READ_VBATT`: millivolts `u32`; `GET_CONFIG` on a TP2.0 channel and `GET_DEVICE_INFO`: a list (section 11); `GET_CONFIG` on an ISO15765 channel: a list (section 12); otherwise none |
 | `0x80` | `ACK` | device: `status u32 [, result u32]` (payload 4 or 8 bytes; longer for the two list answers) | |
 | `0x81` | `RX_MSG` | device: one PASSTHRU_MSG; `seq 0`, `hdr.channel` = source channel | |
 | `0x82` | `EVENT` | reserved, never sent in v1 | |
@@ -149,13 +149,15 @@ when the filter or session table is full.
 `IOCTL` v1: `CLEAR_MSG_FILTERS (0x0A)` and `CLEAR_PERIODIC_MSGS (0x09)` act;
 `GET_CONFIG`, `SET_CONFIG`, `CLEAR_TX_BUFFER`, `CLEAR_RX_BUFFER` answer
 `NOERROR` without effect (bus timing comes from the device settings). On a
-TP2.0 channel `GET_CONFIG` and `SET_CONFIG` do act (section 11).
+TP2.0 channel `GET_CONFIG` and `SET_CONFIG` do act (section 11), and on an
+ISO15765 channel they act on `ISO15765_BS` and `ISO15765_STMIN` (section
+12, since 2026-11-17).
 
 `IOCTL` payload: the id alone (4 bytes), or the id, `body_len u32` and
 `body_len` bytes. The id alone is what `READ_VBATT` has always sent and
 what driver 1.7 and earlier send for every IOCTL; it stays valid. An
-IOCTL with parameters (the TP2.0 ones and `GET_DEVICE_INFO`) carries
-them in the body. `body_len 0` (8 bytes) means the same as the id alone;
+IOCTL with parameters (the TP2.0 ones, `GET_DEVICE_INFO` and the lists
+of an ISO15765 channel) carries them in the body. `body_len 0` (8 bytes) means the same as the id alone;
 firmware before 2026-11-17 reads the id and ignores what follows it. A
 payload of 8 bytes or more whose `body_len` is larger than what follows
 it is `ERR_INVALID_MSG`.
@@ -236,7 +238,7 @@ Data conventions:
 | `0x02` | `ERR_INVALID_CHANNEL_ID` | `DISCONNECT`/data op on an unused channel |
 | `0x03` | `ERR_INVALID_PROTOCOL_ID` | |
 | `0x04` | `ERR_NULL_PARAMETER` | |
-| `0x05` | `ERR_INVALID_IOCTL_VALUE` | a TP2.0 IOCTL or `GET_DEVICE_INFO` with a malformed body, a value out of range, a teardown of an id with no connection |
+| `0x05` | `ERR_INVALID_IOCTL_VALUE` | a TP2.0 IOCTL, `GET_DEVICE_INFO` or an ISO15765 channel's `SET_CONFIG` / `GET_CONFIG` with a malformed body, a value out of range, a teardown of an id with no connection |
 | `0x06` | `ERR_INVALID_FLAGS` | |
 | `0x07` | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
 | `0x08` | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
@@ -275,7 +277,9 @@ Data conventions:
   8 across the device, one per rx id; the device's own UDS terminal keeps
   its session 5 s after its last request, so a filter for that ECU
   inside those 5 s fails (`ERR_FAILED`). Retry. The flow control the
-  device sends as a receiver is BS 8 / STmin 1 ms; N_Bs and N_Cr are
+  device sends as a receiver is the channel's `ISO15765_BS` and
+  `ISO15765_STMIN` (section 12): BS 8 / STmin 1 ms until the tester sets
+  them, and always that before 2026-11-17. N_Bs and N_Cr are
   1 s (ISO 15765-2). A multi-frame write waits for its last frame
   before the `ACK` (about 10 ms per frame at the ECU's STmin, capped at
   5.5 s).
@@ -409,8 +413,17 @@ IOCTLs with a body, `GET_DEVICE_INFO`, two `rx_status` bits, one
 `tx_flags` bit and two status codes. Nothing a client of the day before
 sends changed meaning: an IOCTL that is its id alone is read as before.
 The one edge is a client that put parameters straight behind an IOCTL id
-without a length (none is known): its second word is now read as
-`body_len`.
+without a length: its second word is now read as `body_len`. One is
+known, a driver build that was never released (`SET_CONFIG`, then a
+count and the pairs); on an ISO15765 channel it is answered
+`ERR_INVALID_IOCTL_VALUE`.
+
+2026-11-17, still version 1: an ISO15765 channel takes `ISO15765_BS` and
+`ISO15765_STMIN` and answers `GET_CONFIG` for them (section 12). Both
+IOCTLs as their id alone mean what they meant, and a channel nobody sets
+sends the flow control it always sent. A client finds out whether a
+device holds the two by asking: one that does answers `GET_CONFIG` with
+pairs, one that does not answers with its status alone.
 
 ## 11. TP2.0 (`TP2_0_PS`, protocol 0x800E)
 
@@ -526,3 +539,77 @@ Not proven on a bench: the connection an ECU asks the tester for
 client and proof: the stage `j2534tp20` of
 the firmware repo (`tools/testbench/usb/j2534_tp20_ps_bench.py`, ECUs
 that follow SAE J2819 played by a PCAN; `testing/j2534tp20.md`).
+
+## 12. ISO15765 flow control (`ISO15765_BS`, `ISO15765_STMIN`)
+
+When an ECU answers in more than one frame, the device is the receiver
+and sends ISO 15765-2's flow control, `30 BS STmin`: how many consecutive
+frames may follow before the next flow control (`BS`, 0 = all of them),
+and the gap the ECU must leave between them (`STmin`). The two are the
+channel's, SAE J2534-1's parameters `ISO15765_BS` and `ISO15765_STMIN`.
+They hold for every session of the channel: the ones open, from the next
+first frame or block end on, and the ones opened after. Another channel
+has its own. Until 2026-11-17 the device sent BS 8 / STmin 1 ms whatever
+a tester set; the per-session values in the ISO-TP stack and the idea
+are Elias Kotlyar's (pull request 3).
+
+**IOCTLs on an ISO15765 channel** (payload: id, `body_len`, body; section 3):
+
+| IOCTL | Body | Answer |
+|---|---|---|
+| `SET_CONFIG (0x02)` | `count u32`, then `count` pairs `parameter u32, value u32` (at most 24) | status. The list is checked whole before anything is taken: one refused value refuses the list and nothing changes |
+| `GET_CONFIG (0x01)` | the same list, values ignored | `status u32`, then `count u32` and the pairs of the parameters below that the list named, their values filled. Other parameters are left out (the count may be 0) |
+
+| Id | Name | Values | A channel opens with |
+|---|---|---|---|
+| `0x1E` | `ISO15765_BS` | 0..0xFF consecutive frames per block; 0 = the rest of the message after the one flow control | 8 |
+| `0x1F` | `ISO15765_STMIN` | 0x00..0x7F = milliseconds, 0xF1..0xF9 = 100..900 microseconds | 1 |
+
+- `ERR_INVALID_IOCTL_VALUE`: `ISO15765_BS` over 0xFF, a reserved
+  `ISO15765_STMIN` (0x80..0xF0, 0xFA and up), a count over 24, a body
+  whose length is not `4 + 8 * count`.
+- Any other parameter in a list (`DATA_RATE`, `LOOPBACK`, `BS_TX`,
+  `STMIN_TX`, ...) is passed over: acknowledged, without effect, as
+  before. As a sender the device follows the ECU's own flow control.
+- Both IOCTLs as their id alone (every driver up to 1.8) stay `NOERROR`,
+  change nothing and answer nothing.
+- On a raw CAN or a J1850 channel both stay a `NOERROR` without effect,
+  whatever the body.
+
+**A channel opens with BS 8 / STmin 1 ms, not with the 0 and 0 SAE
+J2534-1 names.** Those are the values every firmware before sent, so a
+tool that sets nothing sees no change. With BS 0 an ECU may send a whole
+message without a pause, about 4000 frames a second at 500 kbit/s. The
+CAN node's receive queue holds 64 frames, 16 ms at that rate, and a
+write to the unit's own flash holds the receive task longer. On the
+bench the configuration backup, written about 25 s after a restart that
+changed a setting, cost 28 and 30 frames (`rx_missed` on `/api/can`) and
+with them the one 4095-byte answer that was arriving; the tester gets no
+message for that request, the next ones arrive. With the flash at rest
+nothing was lost: 100 answers of 4095 bytes in a row, every frame
+counted (leg N of the stage below). A tool that sets 0 / 0 gets the
+speed, on the bench a 4095-byte answer in hand 0.16 s after the request
+instead of 0.72 s, and that exposure. With a block size the ECU waits
+for the device's next flow control after every block, so a held receive
+task delays a transfer whose blocks fit the queue instead of costing it
+frames (by design; not run on the bench under a flash write).
+
+Byte-exact example (seq 9 and 10, channel 1; the two bodies are a
+host-test vector, `host_test/main/test_iso_cfg.c`): `SET_CONFIG` of BS 0
+and STMIN 0xF2 (200 us), then the `GET_CONFIG` that reads them back.
+The next first frame of an ECU on that channel is answered `30 00 F2`.
+
+```
+SET request: 35 4a 01 15 09 00 01 00 1c 00 00 00 | 02 00 00 00 | 14 00 00 00 | 02 00 00 00  1e 00 00 00 00 00 00 00  1f 00 00 00 f2 00 00 00
+SET reply:   35 4a 01 80 09 00 01 00 04 00 00 00 | 00 00 00 00
+GET request: 35 4a 01 15 0a 00 01 00 1c 00 00 00 | 01 00 00 00 | 14 00 00 00 | 02 00 00 00  1e 00 00 00 00 00 00 00  1f 00 00 00 00 00 00 00
+GET reply:   35 4a 01 80 0a 00 01 00 18 00 00 00 | 00 00 00 00 | 02 00 00 00  1e 00 00 00 00 00 00 00  1f 00 00 00 f2 00 00 00
+```
+
+Not built: `BS_TX` and `STMIN_TX` (the device as a sender always follows
+the ECU), `ISO15765_WFT_MAX`. Reference client and proof: the stage
+`j2534fc` of the firmware repo
+(`tools/testbench/usb/j2534_flow_control_bench.py`, ECUs that follow ISO
+15765-2 played by a PCAN, every flow control read off the bus;
+`testing/j2534fc.md`). The Windows DLL sends and reads the two since
+driver 1.9.

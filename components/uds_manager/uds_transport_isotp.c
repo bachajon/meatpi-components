@@ -162,8 +162,13 @@ static esp_err_t bind_addr(const uds_addr_t *addr)
         .tx_id       = addr->tx_id,
         .rx_id       = addr->rx_id,
         .ext_id      = addr->ext_id,
-        .block_size  = 0,
-        .stmin_ms    = 0,
+        /* BS 8 / STmin 1 ms: what this client has always sent (they were
+           the stack's fixed values until 2026-11-17, when a session's own
+           became real). 0 / 0 would let an ECU send a whole answer without
+           a pause, and at that rate the receive queue does not cover a
+           write to the unit's flash (see j2534_iso_cfg.h). */
+        .block_size  = 8,
+        .stmin_ms    = 1,
         .padding_byte = 0x00,
         .use_padding = true,
     };

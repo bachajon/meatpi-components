@@ -38,6 +38,7 @@
 #include "can_isotp.h"
 
 #include "j2534_channel.h"
+#include "j2534_iso_cfg.h"
 #include "j2534_proto.h"
 
 typedef struct j2534_tp20_state j2534_tp20_state_t;
@@ -147,6 +148,17 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
 /** One received message or indication, if any (the RX pump's poll). */
 bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out);
+
+/**
+ * SET_CONFIG (@p get false) or GET_CONFIG on an ISO15765 channel: the list
+ * rules are j2534_iso_cfg.h's. A list that names ISO15765_BS or
+ * ISO15765_STMIN changes the flow control of every session the channel has
+ * open (from the next first frame or block end on) and of the ones opened
+ * after. J2534 status; a GET's pairs land in @p out.
+ */
+uint32_t j2534_iso_config(j2534_channel_t *c, bool get,
+                          const uint8_t *body, uint32_t body_len,
+                          uint8_t *out, uint32_t out_cap, uint32_t *out_len);
 
 /* ---- j2534_channel_legacy.c (J1850 VPW over the OBD chip) ------------ */
 

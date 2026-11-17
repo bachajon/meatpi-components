@@ -26,7 +26,7 @@ from 2026-09.
 | `include/uds_dtc.h`, `uds_dtc_codec.c` | PURE. Service 19 / 14 builders and parsers: classic (`19 01 / 02 / 0A`, `14 <group>`), WWH-OBD (`19 42`, `19 55`, `14 FF FF 33`: 5- and 4-byte records, DTC formats 04 = J2012 "P0420-08" and 02 = J1939-73 "SPN3226-4") |
 | `include/uds_transport.h` | The transport vtable (one op: a request to its FINAL response) and the pure AT-hex helpers |
 | `uds_transport_obd.c`, `uds_transport_at.c` | The chip transport: protocol (`ATTP6/7` at 500 kbit/s, `ATTP8/9` at 250, RAM-only), header, receive filter, headers off + auto-formatting so the chip does ISO-TP; the setup is skipped in a steady conversation (the chip's tx byte counter says whether autopid re-addressed it since) |
-| `uds_transport_isotp.c` | The native transport: a raw UDS PDU over the registered ISO-TP provider on `can_manager`'s bus |
+| `uds_transport_isotp.c` | The native transport: a raw UDS PDU over the registered ISO-TP provider on `can_manager`'s bus. Its session sends BS 8 / STmin 1 ms as a receiver, stated in the file since 2026-11-17 (they were the stack's fixed values before) |
 | `uds_manager.c` | The protocol, the claim, the session, the exclusive option (obd_gate's diagnostics hold), status |
 | `uds_manager_settings.c` | Settings descriptor |
 | `uds_manager_http.c` | `GET /api/uds`, `POST /api/uds` (the runtime exclusive switch), `POST /api/uds/request`, `POST /api/uds/session` |

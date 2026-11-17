@@ -40,6 +40,21 @@ update: driver 1.7 does not know the protocol. Layouts, defaults and
 limits: `J2534_WIRE_PROTOCOL.md` section 11. Proven against a model of
 the document and one published real exchange, not yet on a car.
 
+The flow control of an ISO15765 channel is the tool's to set
+(2026-11-17; the per-session values in the ISO-TP stack and the first
+version are Elias Kotlyar's, pull request 3). `SET_CONFIG` takes
+`ISO15765_BS` and `ISO15765_STMIN`, for the channel's open sessions and
+the ones opened after, and `GET_CONFIG` answers with the values in force
+(`j2534_iso_cfg.c`: SAE J2534-1's ranges, a refused list changes
+nothing). Until then the device sent BS 8 / STmin 1 ms whatever a tool
+set, and a channel still opens with those two instead of the standard's
+0 and 0: with BS 0 an ECU sends a whole message without a pause, and a
+write to the unit's own flash during it costs frames (the CAN receive
+queue holds 64; `J2534_WIRE_PROTOCOL.md` section 12 has the measurement
+and the layouts). The Windows DLL sends and reads the two since driver
+1.9; older drivers send the IOCTLs as their id alone, which changes
+nothing.
+
 The RX pump (the `j2534_rx` task) pushes what the channels received as it
 arrives: it blocks on the open channel's bus queue between frames (the
 channel queues are static for the module's life, reset at CONNECT, so a
@@ -129,6 +144,7 @@ Layout (each file under the 700-line cap):
 | `j2534_server_transport.c` | the `j2534_transport_t` seam: session lock, send lock, coalesced frame writes, `j2534_server_serve_transport()`, the TCP listener + `allow_lan` gate, the legacy serial vtable adapter |
 | `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the filter table, the bus-bitrate rule, the `reflash_seen` count (the content gate went 2026-10-27) |
 | `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications |
+| `j2534_iso_cfg.c/.h` | PURE: the `SET_CONFIG` / `GET_CONFIG` lists of an ISO15765 channel (`ISO15765_BS`, `ISO15765_STMIN`): the ranges, a list taken whole or not at all, the answer a GET makes, the values a channel opens with. Host-tested |
 | `j2534_channel_legacy.c` | the J1850 VPW side (2026-10-19): the VPW init, header-cached WRITE through `obd_chip` (short payload as one frame, longer through `VTFullyRequestCk`), reply-line parsing with `7F xx 78` ridden out, a small PSRAM RX ring the pump drains; pure chip-command helpers live in `j2534_proto.c` |
 | `j2534_server_settings.c` / `_http.c` / `_cli.c` | descriptor, `/api/j2534`, the `j2534` command |
 
@@ -206,7 +222,7 @@ this component.
 
 ## Testing
 
-- Host: `host_test/` (36 Unity cases: codec round trips and bounds,
+- Host: `host_test/` (41 Unity cases: codec round trips and bounds,
   filter match, status names, the framer with partial / delayed /
   dropped / malformed / discarded input, the ACK vectors of
   `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate, the
@@ -218,7 +234,18 @@ this component.
   and the byte-exact READ_VBATT request and replies of the wire protocol's
   section 3 as a vector, and the TP 2.0 helpers: the timing byte, the
   broadcast key, where a block is sent again from, the device information
-  table).
+  table, and the ISO15765 channel's lists: the two codings of the
+  separation time, a list taken whole or refused whole, what is passed
+  over, the answer a GET makes, and the byte-exact example of the wire
+  protocol's section 12).
+- ISO 15765 flow control: `.\test.ps1 j2534fc` in the firmware checkout
+  (`tools/testbench/usb/j2534_flow_control_bench.py` -> `J2534 FLOW
+  CONTROL PASS`): ECUs that follow ISO 15765-2, played by a PCAN, every
+  flow control read off the bus; the values a channel opens with, each
+  one set and read back, their scope, BS 0 over 585 consecutive frames,
+  what is refused, 100 answers of 4095 bytes at the full line rate with
+  every frame counted, the device's own UDS client, and the driver DLL
+  called like an application.
 - TP 2.0: `.\test.ps1 j2534tp20` in the firmware checkout
   (`tools/testbench/usb/j2534_tp20_ps_bench.py` -> `J2534 TP20 PASS`):
   ECUs that follow SAE J2819, played by a PCAN, with faults on purpose (a

@@ -69,7 +69,9 @@ typedef struct
     bool     ext_id;       /**< 29-bit ids                            */
     uint8_t  block_size;   /**< flow control BS (0 = no limit)        */
     uint8_t  stmin_ms;     /**< flow control STmin, milliseconds      */
-    uint32_t stmin_us;     /**< STmin in microseconds when not a whole millisecond */
+    uint32_t stmin_us;     /**< STmin in microseconds; when not 0 it is
+                                used and stmin_ms is not (ISO 15765-2
+                                knows 100..900 us beside whole ms)    */
     uint8_t  padding_byte; /**< pad value when use_padding            */
     bool     use_padding;  /**< pad frames to 8 bytes                 */
 } can_isotp_cfg_t;
@@ -82,7 +84,9 @@ typedef struct
                       size_t len, uint32_t timeout_ms);
     esp_err_t (*recv)(can_isotp_session_t s, uint8_t *buf, size_t cap,
                       size_t *len, uint32_t timeout_ms);
-    /** Replace receiver flow control on an open session. NULL if unsupported. */
+    /** Replace the flow control an open session sends as a receiver: it
+     *  holds from the next first frame or block end. NULL when the
+     *  provider cannot (a session then keeps what open() gave it). */
     esp_err_t (*set_flow)(can_isotp_session_t s, uint8_t block_size,
                           uint32_t stmin_us);
 } can_isotp_ops_t;

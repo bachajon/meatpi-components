@@ -39,10 +39,11 @@
  * only when the slot is still empty.
  *
  * Limits (esp_isotp 0.1.1): the flow control THIS side sends as receiver
- * uses can_isotp_cfg_t block_size / stmin (Kconfig only when the caller
- * does not set them); N_Bs/N_Cr are the Kconfig
- * response timeout (100 ms); one PDU is at most CAN_ISOTP_ESP_MAX_PDU
- * bytes (SAE J2534's 4128); at most 5 sessions (1 UDS + 4 J2534 channels).
+ * is the session's own, can_isotp_cfg_t block_size / stmin as given (0 and
+ * 0 mean BS 0 / STmin 0, never the Kconfig values) and what set_flow puts
+ * in their place later; N_Bs/N_Cr are the Kconfig response timeout
+ * (1000 ms); one PDU is at most CAN_ISOTP_ESP_MAX_PDU bytes (SAE J2534's
+ * 4128); at most 9 sessions (1 UDS + 8 of the J2534 channels).
  */
 #pragma once
 

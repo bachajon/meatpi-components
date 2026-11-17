@@ -217,6 +217,50 @@ uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
     return st;
 }
 
+uint32_t j2534_iso_config(j2534_channel_t *c, bool get,
+                          const uint8_t *body, uint32_t body_len,
+                          uint8_t *out, uint32_t out_cap, uint32_t *out_len)
+{
+    j2534_iso_flow_t flow = { .bs = c->iso_bs, .st_us = c->iso_st_us };
+    bool changed = false;
+
+    if (get)
+    {
+        return j2534_iso_cfg_get(body, body_len, &flow, out, out_cap, out_len);
+    }
+
+    uint32_t st = j2534_iso_cfg_set(body, body_len, &flow, &changed);
+
+    if (st != J2534_STATUS_NOERROR || !changed)
+    {
+        return st;
+    }
+
+    c->iso_bs = flow.bs;
+    c->iso_st_us = flow.st_us;
+
+    const can_isotp_ops_t *ops = can_isotp();
+
+    if (ops == NULL || ops->set_flow == NULL)
+    {
+        /* a provider without the call: the sessions opened from here on
+           carry the values, the open ones keep theirs */
+        return J2534_STATUS_NOERROR;
+    }
+
+    for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
+    {
+        if (c->sess[i].in_use && c->sess[i].isotp != NULL)
+        {
+            (void)ops->set_flow(c->sess[i].isotp, flow.bs, flow.st_us);
+        }
+    }
+
+    ESP_LOGD(TAG, "ISO15765 flow control: BS %u, STmin %lu us",
+             (unsigned)flow.bs, (unsigned long)flow.st_us);
+    return J2534_STATUS_NOERROR;
+}
+
 void j2534_iso_unbind(j2534_channel_t *c, int slot)
 {
     if (slot >= 0 && slot < J2534_CH_MAX_SESSIONS)
