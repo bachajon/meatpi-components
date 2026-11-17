@@ -23,10 +23,10 @@
 /**
  * @file j2534_channel.c
  * @brief J2534 channel transports (see j2534_channel.h): lifecycle, the
- *        CAN channel on can_manager (raw frames), the filter table and
- *        the bus-bitrate rule at CONNECT. The ISO15765
- *        side lives in j2534_channel_iso.c, SAE J2534-2 TP2.0 in
- *        j2534_channel_tp20.c. Both share j2534_channel_private.h.
+ *        CAN channel on can_manager (raw frames) and the bus-bitrate rule
+ *        at CONNECT. The filter table lives in j2534_channel_filter.c,
+ *        the ISO15765 side in j2534_channel_iso.c, SAE J2534-2 TP2.0 in
+ *        j2534_channel_tp20.c. All share j2534_channel_private.h.
  *        Raw CAN does not look at TP2.0 opcodes.
  */
 #include "j2534_channel.h"
@@ -51,8 +51,8 @@
 static const char *TAG = "j2534_server";
 
 /* the channel records: PSRAM (no ISR and no flash path touches them) */
-EXT_RAM_BSS_ATTR static j2534_channel_t s_ch[J2534_MAX_CHANNELS];
-static SemaphoreHandle_t s_lock;
+EXT_RAM_BSS_ATTR j2534_channel_t j2534_ch_tbl[J2534_MAX_CHANNELS];
+SemaphoreHandle_t j2534_ch_lock;
 static StaticSemaphore_t s_lock_buf;   /* internal: FreeRTOS object */
 static bool s_refused_said;            /* the refusal line went out this connect */
 
@@ -173,7 +173,7 @@ static void put_id_be(uint8_t *p, uint32_t id)
     p[2] = (uint8_t)(id >> 8);  p[3] = (uint8_t)id;
 }
 
-static uint32_t get_id_be(const uint8_t *p)
+uint32_t j2534_ch_get_id_be(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
@@ -183,9 +183,9 @@ static uint32_t get_id_be(const uint8_t *p)
 
 void j2534_channel_init(void)
 {
-    if (s_lock == NULL)
+    if (j2534_ch_lock == NULL)
     {
-        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+        j2534_ch_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
     }
 
     /* no subscription yet: a zeroed record would name subscriber 0, which
@@ -193,7 +193,7 @@ void j2534_channel_init(void)
        unsubscribe it (latent before 2026-10-19) */
     for (int i = 0; i < J2534_MAX_CHANNELS; i++)
     {
-        s_ch[i].can_sub = -1;
+        j2534_ch_tbl[i].can_sub = -1;
 
         if (s_can_q[i] == NULL)
         {
@@ -213,9 +213,9 @@ QueueHandle_t j2534_channel_wait_queue(void)
        pump costs it one 2 ms timeout at most */
     for (int i = 0; i < J2534_MAX_CHANNELS; i++)
     {
-        if (s_ch[i].in_use && s_ch[i].can_q != NULL)
+        if (j2534_ch_tbl[i].in_use && j2534_ch_tbl[i].can_q != NULL)
         {
-            return s_ch[i].can_q;
+            return j2534_ch_tbl[i].can_q;
         }
     }
 
@@ -238,7 +238,7 @@ static void teardown(j2534_channel_t *c)
         c->can_q = NULL;
     }
     j2534_iso_unbind_all(c);
-    j2534_legacy_drop((int)(c - s_ch)); /* J1850: the slot's buffered replies */
+    j2534_legacy_drop((int)(c - j2534_ch_tbl)); /* J1850: the slot's buffered replies */
     obd_gate_release(c); /* idempotent: only if this channel holds it */
     memset(c, 0, sizeof(*c));
     c->can_sub = -1;
@@ -246,15 +246,15 @@ static void teardown(j2534_channel_t *c)
 
 void j2534_channel_reset_all(void)
 {
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
     for (int i = 0; i < J2534_MAX_CHANNELS; i++)
     {
-        if (s_ch[i].in_use || s_ch[i].can_q != NULL || s_ch[i].can_sub >= 0)
+        if (j2534_ch_tbl[i].in_use || j2534_ch_tbl[i].can_q != NULL || j2534_ch_tbl[i].can_sub >= 0)
         {
-            teardown(&s_ch[i]);
+            teardown(&j2534_ch_tbl[i]);
         }
     }
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(j2534_ch_lock);
 }
 
 /* every frame on the bus into the channel's queue: the traffic itself on
@@ -262,7 +262,7 @@ void j2534_channel_reset_all(void)
    on an ISO15765 one */
 static bool subscribe_bus(j2534_channel_t *c, const char *name)
 {
-    c->can_q = s_can_q[c - s_ch];
+    c->can_q = s_can_q[c - j2534_ch_tbl];
 
     if (c->can_q != NULL)
     {
@@ -290,8 +290,8 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    j2534_channel_t *c = &s_ch[slot];
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+    j2534_channel_t *c = &j2534_ch_tbl[slot];
     teardown(c);
     s_refused_said = false;
     c->in_use = true;
@@ -352,7 +352,7 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
         teardown(c);
     }
 
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(j2534_ch_lock);
     return st;
 }
 
@@ -362,14 +362,14 @@ void j2534_channel_disconnect(int slot)
     {
         return;
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    teardown(&s_ch[slot]);
-    xSemaphoreGive(s_lock);
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+    teardown(&j2534_ch_tbl[slot]);
+    xSemaphoreGive(j2534_ch_lock);
 }
 
 bool j2534_channel_active(int slot)
 {
-    return slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use;
+    return slot >= 0 && slot < J2534_MAX_CHANNELS && j2534_ch_tbl[slot].in_use;
 }
 
 /* ---- write ------------------------------------------------------------ */
@@ -378,15 +378,15 @@ bool j2534_channel_active(int slot)
 
 static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
 {
-    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
+    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !j2534_ch_tbl[slot].in_use)
     {
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    j2534_channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &j2534_ch_tbl[slot];
     uint32_t st = J2534_STATUS_NOERROR;
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
 
     if (c->protocol == J2534_PROT_CAN)
     {
@@ -398,7 +398,7 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
         }
         else
         {
-            uint32_t id = get_id_be(msg->data);
+            uint32_t id = j2534_ch_get_id_be(msg->data);
             bool ext = (msg->tx_flags & J2534_TX_CAN_29BIT_ID) != 0;
             uint8_t dlc = (uint8_t)(msg->data_size - 4);
             const uint8_t *payload = msg->data + 4;
@@ -443,7 +443,7 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
         st = J2534_ERR_MSG_PROTOCOL_ID;
     }
 
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(j2534_ch_lock);
     return st;
 }
 
@@ -455,238 +455,18 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
 uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
                                       uint32_t tick)
 {
-    if (slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
-        s_ch[slot].protocol == J2534_PROT_TP2_0)
+    if (slot >= 0 && slot < J2534_MAX_CHANNELS && j2534_ch_tbl[slot].in_use &&
+        j2534_ch_tbl[slot].protocol == J2534_PROT_TP2_0)
     {
         uint32_t st;
 
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        st = j2534_tp20_write_periodic(&s_ch[slot], msg, tick);
-        xSemaphoreGive(s_lock);
+        xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+        st = j2534_tp20_write_periodic(&j2534_ch_tbl[slot], msg, tick);
+        xSemaphoreGive(j2534_ch_lock);
         return st;
     }
 
     return write_common(slot, msg, false);
-}
-
-/* ---- filters ---------------------------------------------------------- */
-
-static void filter_remove_at(j2534_channel_t *c, int i)
-{
-    c->filters[i] = c->filters[--c->n_filters];
-}
-
-uint32_t j2534_channel_add_filter(int slot, uint32_t type,
-                                  const j2534_msg_t *mask,
-                                  const j2534_msg_t *pattern,
-                                  const j2534_msg_t *flow_control,
-                                  uint32_t *filter_id)
-{
-    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
-    {
-        return J2534_ERR_INVALID_CHANNEL_ID;
-    }
-
-    if (filter_id == NULL)
-    {
-        return J2534_ERR_NULL_PARAMETER;
-    }
-
-    j2534_channel_t *c = &s_ch[slot];
-    uint32_t st = J2534_STATUS_NOERROR;
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-
-    if (type == J2534_FLOW_CONTROL_FILTER)
-    {
-        /* ISO15765: pattern = the ECU's response id, flow-control message =
-           the request id; its TxFlags name 29-bit ids and the padding of
-           the frames this session sends (SAE J2534-1) */
-        if (c->protocol != J2534_PROT_ISO15765 ||
-            pattern == NULL || flow_control == NULL ||
-            pattern->data_size < 4 || flow_control->data_size < 4)
-        {
-            st = J2534_ERR_INVALID_MSG;
-        }
-        else if (c->n_filters >= J2534_CH_MAX_FILTERS)
-        {
-            st = J2534_ERR_EXCEEDED_LIMIT;
-        }
-        else
-        {
-            uint32_t fl = pattern->tx_flags | flow_control->tx_flags;
-            bool ext = (fl & J2534_TX_CAN_29BIT_ID) != 0;
-            bool pad = (flow_control->tx_flags & J2534_TX_ISO15765_FRAME_PAD) != 0;
-            uint32_t idmask = ext ? 0x1FFFFFFFu : 0x7FFu;
-            uint32_t rx = get_id_be(pattern->data) & idmask;
-            uint32_t tx = get_id_be(flow_control->data) & idmask;
-            int sess = -1;
-
-            st = j2534_iso_bind(c, tx, rx, ext, pad, &sess);
-
-            if (st == J2534_STATUS_NOERROR)
-            {
-                /* the tool re-arming the same ECU: its old record goes */
-                for (int i = 0; i < c->n_filters; i++)
-                {
-                    if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER &&
-                        c->filters[i].session == sess)
-                    {
-                        filter_remove_at(c, i);
-                        break;
-                    }
-                }
-
-                j2534_ch_filter_t *f = &c->filters[c->n_filters++];
-
-                memset(f, 0, sizeof(*f));
-                f->id = c->next_filter_id++;
-                f->type = type;
-                f->session = sess;
-                *filter_id = f->id;
-            }
-        }
-    }
-    else if (type == J2534_PASS_FILTER || type == J2534_BLOCK_FILTER)
-    {
-        if (mask == NULL || pattern == NULL)
-        {
-            st = J2534_ERR_NULL_PARAMETER;
-        }
-        else if (c->n_filters >= J2534_CH_MAX_FILTERS)
-        {
-            st = J2534_ERR_EXCEEDED_LIMIT;
-        }
-        else
-        {
-            j2534_ch_filter_t *f = &c->filters[c->n_filters];
-            uint8_t n = (uint8_t)(mask->data_size < 8 ? mask->data_size : 8);
-
-            memset(f, 0, sizeof(*f));
-            f->id = c->next_filter_id++;
-            f->type = type;
-            f->session = -1;
-            f->len = n;
-            memcpy(f->mask, mask->data, n);
-            memcpy(f->pattern, pattern->data,
-                   pattern->data_size < n ? pattern->data_size : n);
-            c->n_filters++;
-            *filter_id = f->id;
-        }
-    }
-    else
-    {
-        st = J2534_ERR_INVALID_MSG;
-    }
-
-    xSemaphoreGive(s_lock);
-    return st;
-}
-
-uint32_t j2534_channel_stop_filter(int slot, uint32_t filter_id)
-{
-    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
-    {
-        return J2534_ERR_INVALID_CHANNEL_ID;
-    }
-
-    j2534_channel_t *c = &s_ch[slot];
-    uint32_t st = J2534_ERR_INVALID_FILTER_ID;
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    for (int i = 0; i < c->n_filters; i++)
-    {
-        if (c->filters[i].id == filter_id)
-        {
-            /* A TP2.0 connection owns this slot until teardown. */
-            if (c->filters[i].tp_owned)
-            {
-                break;
-            }
-
-            if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
-            {
-                j2534_iso_unbind(c, c->filters[i].session);
-            }
-
-            filter_remove_at(c, i);
-            st = J2534_STATUS_NOERROR;
-            break;
-        }
-    }
-    xSemaphoreGive(s_lock);
-    return st;
-}
-
-void j2534_channel_clear_filters(int slot)
-{
-    if (slot < 0 || slot >= J2534_MAX_CHANNELS)
-    {
-        return;
-    }
-
-    j2534_channel_t *c = &s_ch[slot];
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    for (int i = c->n_filters - 1; i >= 0; i--)
-    {
-        if (c->filters[i].type == J2534_FLOW_CONTROL_FILTER)
-        {
-            j2534_iso_unbind(c, c->filters[i].session);
-        }
-
-        /* Implicit TP2.0 pass filters stay until the connection does. */
-        if (!c->filters[i].tp_owned)
-        {
-            filter_remove_at(c, i);
-        }
-    }
-    xSemaphoreGive(s_lock);
-}
-
-bool j2534_ch_has_pass_filter(const j2534_channel_t *c)
-{
-    for (int i = 0; i < c->n_filters; i++)
-    {
-        if (c->filters[i].type == J2534_PASS_FILTER && !c->filters[i].tp_owned)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/* apply PASS/BLOCK filters to a [id][data] view */
-bool j2534_ch_filters_pass(const j2534_channel_t *c, const uint8_t *view,
-                           size_t len)
-{
-    bool any_pass = false, has_pass = false;
-
-    for (int i = 0; i < c->n_filters; i++)
-    {
-        const j2534_ch_filter_t *f = &c->filters[i];
-
-        if (f->tp_owned || f->type == J2534_FLOW_CONTROL_FILTER)
-        {
-            continue; /* a session, not a user match rule */
-        }
-
-        bool m = j2534_filter_match(f->mask, f->len, f->pattern, f->len,
-                                    view, len);
-
-        if (f->type == J2534_BLOCK_FILTER && m)
-        {
-            return false;
-        }
-        if (f->type == J2534_PASS_FILTER)
-        {
-            has_pass = true;
-            any_pass = any_pass || m;
-        }
-    }
-
-    return has_pass ? any_pass : true; /* no PASS filter = pass all */
 }
 
 /* ---- rx poll ---------------------------------------------------------- */
@@ -698,14 +478,14 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
         return false;
     }
 
-    j2534_channel_t *c = &s_ch[slot];
+    j2534_channel_t *c = &j2534_ch_tbl[slot];
     if (!c->in_use)
     {
         return false;
     }
 
     bool got = false;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
 
     if (c->protocol == J2534_PROT_CAN && c->can_q != NULL)
     {
@@ -742,21 +522,21 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
         got = j2534_legacy_poll(c, slot, out);
     }
 
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(j2534_ch_lock);
     return got;
 }
 
 bool j2534_channel_is_tp20(int slot)
 {
-    return slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
-           s_ch[slot].protocol == J2534_PROT_TP2_0;
+    return slot >= 0 && slot < J2534_MAX_CHANNELS && j2534_ch_tbl[slot].in_use &&
+           j2534_ch_tbl[slot].protocol == J2534_PROT_TP2_0;
 }
 
 bool j2534_channel_has_config(int slot)
 {
-    return slot >= 0 && slot < J2534_MAX_CHANNELS && s_ch[slot].in_use &&
-           (s_ch[slot].protocol == J2534_PROT_TP2_0 ||
-            s_ch[slot].protocol == J2534_PROT_ISO15765);
+    return slot >= 0 && slot < J2534_MAX_CHANNELS && j2534_ch_tbl[slot].in_use &&
+           (j2534_ch_tbl[slot].protocol == J2534_PROT_TP2_0 ||
+            j2534_ch_tbl[slot].protocol == J2534_PROT_ISO15765);
 }
 
 uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
@@ -773,29 +553,29 @@ uint32_t j2534_channel_ioctl(int slot, uint32_t ioctl_id,
         *out_len = 0;
     }
 
-    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !s_ch[slot].in_use)
+    if (slot < 0 || slot >= J2534_MAX_CHANNELS || !j2534_ch_tbl[slot].in_use)
     {
         return J2534_ERR_INVALID_CHANNEL_ID;
     }
 
-    if (s_ch[slot].protocol == J2534_PROT_ISO15765 && config)
+    if (j2534_ch_tbl[slot].protocol == J2534_PROT_ISO15765 && config)
     {
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        st = j2534_iso_config(&s_ch[slot],
+        xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+        st = j2534_iso_config(&j2534_ch_tbl[slot],
                               ioctl_id == J2534_IOCTL_GET_CONFIG,
                               body, body_len, out, out_cap, out_len);
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(j2534_ch_lock);
         return st;
     }
 
-    if (s_ch[slot].protocol != J2534_PROT_TP2_0)
+    if (j2534_ch_tbl[slot].protocol != J2534_PROT_TP2_0)
     {
         return config ? J2534_STATUS_NOERROR : J2534_ERR_NOT_SUPPORTED;
     }
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    st = j2534_tp20_ioctl(&s_ch[slot], ioctl_id, body, body_len,
+    xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+    st = j2534_tp20_ioctl(&j2534_ch_tbl[slot], ioctl_id, body, body_len,
                           out, out_cap, out_len);
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(j2534_ch_lock);
     return st;
 }

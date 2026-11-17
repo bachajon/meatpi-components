@@ -22,9 +22,10 @@
 
 /**
  * @file j2534_channel_private.h
- * @brief The channel record shared by j2534_channel.c (lifecycle, CAN,
- *        filters) and j2534_channel_iso.c (the ISO15765 side). Every
- *        function here runs with the channel lock held by the caller.
+ * @brief The channel record shared by j2534_channel.c (lifecycle, CAN),
+ *        j2534_channel_filter.c (the filter table) and
+ *        j2534_channel_iso.c (the ISO15765 side). Every function here
+ *        runs with the channel lock held by the caller.
  */
 #pragma once
 
@@ -34,6 +35,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "can_isotp.h"
 
@@ -121,6 +123,20 @@ void j2534_ch_say_refused(const char *what);
  *  (0x34..0x37) is counted on the status (`reflash_seen`), never refused
  *  (the content gate went on 2026-10-27). */
 void j2534_ch_note_reflash(uint8_t sid);
+
+/* ---- j2534_channel.c, used by the filter file ------------------------ */
+
+/** The channel records, one per slot: J2534_MAX_CHANNELS of them (PSRAM). */
+extern j2534_channel_t j2534_ch_tbl[];
+
+/** The channel lock: one mutex for all the records, taken by every
+ *  j2534_channel_* entry point around its work on a slot. */
+extern SemaphoreHandle_t j2534_ch_lock;
+
+/** The CAN id a message's data begins with: 4 bytes, big-endian. */
+uint32_t j2534_ch_get_id_be(const uint8_t *p);
+
+/* ---- j2534_channel_filter.c ------------------------------------------ */
 
 /** PASS/BLOCK verdict over a [4-byte id][frame] view. No PASS filter at
  *  all passes everything (the CAN channel's rule). */

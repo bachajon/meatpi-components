@@ -144,7 +144,8 @@ Layout (each file under the 700-line cap):
 | `j2534_server_pump.c` | the RX pump (the `j2534_rx` task, its batch and scratch buffers). Out of the core on 2026-11-13: the core had grown to 743 lines, past the cap this table states; the code moved unchanged |
 | `j2534_server_voltage.c` | READ_VBATT: the battery owner and checked millivolt conversion; host-tested |
 | `j2534_server_transport.c` | the `j2534_transport_t` seam: session lock, send lock, coalesced frame writes, `j2534_server_serve_transport()`, the TCP listener + `allow_lan` gate, the legacy serial vtable adapter |
-| `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the filter table, the bus-bitrate rule, the `reflash_seen` count (the content gate went 2026-10-27) |
+| `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the bus-bitrate rule, the `reflash_seen` count (the content gate went 2026-10-27) |
+| `j2534_channel_filter.c` | the filter table: adding a PASS, BLOCK or FLOW_CONTROL filter, stopping one, clearing them, and the PASS/BLOCK verdict the receive paths ask for. Out of `j2534_channel.c` on 2026-11-18: it had grown to 801 lines, past the cap this table states; the code moved unchanged |
 | `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications |
 | `j2534_iso_cfg.c/.h` | PURE: the `SET_CONFIG` / `GET_CONFIG` lists of an ISO15765 channel (`ISO15765_BS`, `ISO15765_STMIN`): the ranges, a list taken whole or not at all, the answer a GET makes, the values a channel opens with. Host-tested |
 | `j2534_channel_legacy.c` | the J1850 VPW side (2026-10-19): the VPW init, header-cached WRITE through `obd_chip` (short payload as one frame, longer through `VTFullyRequestCk`), reply-line parsing with `7F xx 78` ridden out, a small PSRAM RX ring the pump drains; pure chip-command helpers live in `j2534_proto.c` |
@@ -208,7 +209,7 @@ frames in one `PassThruWriteMsgs` 17 reached the bus before the call ended
 | `s_req_payload` (request payload), `s_rx_wire`, `s_tx_frame` (one whole frame) | 4384 + 4160 + 4164 B |
 | `j2534_msg_t` scratch: RX pump 1, handler 4, periodic slots 4 (each ~4.2 KB) | ~38 KB |
 | `s_pdu` (the ISO-TP reassembly scratch of the RX pump) | 4128 B |
-| channel records `s_ch` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
+| channel records `j2534_ch_tbl` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
 | J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
 | ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (256 frames since 2026-11-17, 4 KB of PSRAM each: what the CAN node releases at once after a flash write; 32 before) | per open session |
 | a TP 2.0 channel while it is open: its state and, for each of the 4 connections, a reassembly buffer and a delivery buffer of 4092 B; taken from the heap at CONNECT, freed at DISCONNECT (not a PSRAM static yet: an open item against the standard) | ~33 KB heap |
