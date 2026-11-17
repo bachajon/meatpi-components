@@ -180,9 +180,17 @@ static esp_err_t on_can_tx(uint32_t id, const uint8_t *data, uint8_t size,
 {
     struct can_isotp_session *s = arg;
 
-    /* blocks up to 100 ms when the TWAI TX queue is full; a failure makes
-       the stack abort this transfer (send_status error -> our send times
-       out), exactly the "bus not delivering" outcome we want */
+    /* The driver holds 16 frames in flight and refuses one more at once;
+       with STmin 0 the stack sends in a loop, and the refused 17th frame
+       ended every request above 118 bytes (bench 2026-11-18, README).
+       ESP_ERR_TIMEOUT = "not now": the stack keeps the frame for its next
+       poll. Any other failure aborts the transfer (send_status error ->
+       our send times out), the "bus not delivering" outcome we want. */
+    if (can_manager_tx_ready() && !can_manager_tx_room())
+    {
+        return ESP_ERR_TIMEOUT;
+    }
+
     return can_manager_send(id, s->ext, false, data, size);
 }
 

@@ -99,6 +99,17 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
 
 ## Limits (esp_isotp 0.1.1)
 
+- As a SENDER this side follows the ECU's flow control. When that asks for
+  no gap (`30 00 00`) the stack hands its consecutive frames over in a
+  loop, faster than the bus takes them, and the CAN driver holds 16 frames
+  in flight. Until 2026-11-18 the driver's refusal of the 17th came back
+  to the stack as an error and the transfer was abandoned: a request above
+  118 bytes stopped after 16 or 17 consecutive frames and `send()` timed
+  out (bench: 125 bytes and more; with `30 00 01` up to 4000 bytes went
+  through). `on_can_tx` now answers `ESP_ERR_TIMEOUT` ("not now") while
+  `can_manager_tx_room()` is false and the stack sends that frame at its
+  next poll: 4000 bytes leave in 0.14 s. Bench: `j2534_flow_control_bench.py`
+  leg Q.
 - The flow control THIS side sends as a receiver is the session's own
   (2026-11-17, Elias Kotlyar's pull request 3): `can_isotp_cfg_t`
   `block_size` and `stmin_ms` (or `stmin_us`, which wins when it is not 0:
