@@ -371,6 +371,18 @@ green afterwards). What changed, and what to keep doing:
   the firmware does next (other networks first, then this one again, the
   timed ban is gone), with the hint to correct the password here.
   Probe: `probe_wifi_why.mjs`.
+- Access point + Station costs performance (2026-11-18, Ali: "warn user in
+  the UI of performance degradation"): the two share one radio, and every
+  search for the WiFi network takes it away from the access point's
+  clients. The WiFi mode card shows one warning line while that mode is
+  picked, with the detail (use Access point only on the road, or raise the
+  Search interval) behind an info bubble; the Quick Setup wizard says it in
+  the mode's description. `sta_search_interval_s` is a station row behind
+  Show advanced. Probe: `probe_wifi_mode.mjs`.
+- The Connections card stages the whole `socket_manager` object
+  (2026-11-18), not `{servers}` alone: a PUT replaces the object, so any
+  other top-level key of that component would go back to its default at
+  the first edit of a connection. Probe: `probe_connections.mjs`.
 - Size budget (2026-09-06): the build now minifies index.html,
   `gzip_asset.py` runs rjsmin/rcssmin (vendored under `tools/`,
   Apache-2.0, pure Python, so the IDF Python is enough) before gzipping:

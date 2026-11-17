@@ -470,7 +470,7 @@ SCREENS.wifi=async()=>{
       radio("qs-mode","qs-mode-sta",W.wifiMode==="sta","Station only (recommended)",
         "WiCAN's own access point stays off; you reach WiCAN at its address on "+net+". If it ever cannot join, hold its button for 5 seconds: the access point comes up for 10 minutes with your password.",
         ()=>{W.wifiMode="sta";paintMode();}),
-      radio("qs-mode","qs-mode-apsta",W.wifiMode==="apsta","Access point + Station","WiCAN keeps its own network as a second way in.",()=>{W.wifiMode="apsta";paintMode();}),
+      radio("qs-mode","qs-mode-apsta",W.wifiMode==="apsta","Access point + Station","WiCAN keeps its own network as a second way in. The two share one radio, which costs performance: a device on the access point sees short pauses in live data while WiCAN searches for "+net+".",()=>{W.wifiMode="apsta";paintMode();}),
       W.wifiMode==="apsta"?h("label",{class:"qs-agree",style:"margin-left:28px;padding:8px 12px"},
         h("input",{type:"checkbox",id:"qs-ap-auto",checked:W.apAuto,onchange:e=>{W.apAuto=e.target.checked;}}),
         h("div",{},h("b",{},"Turn the access point off while WiCAN is on "+net+" (recommended)"),h("span",{},"It comes back by itself whenever "+net+" is lost."))):null));
