@@ -1,5 +1,10 @@
 ﻿idf_component_register(
     SRCS "wifi_manager.c"
+         "wifi_manager_sta.c"
+         "wifi_manager_ap.c"
+         "wifi_manager_handler.c"
+         "wifi_manager_reconnect.c"
+         "wifi_manager_network.c"
          "wifi_manager_status.c"
          "wifi_manager_settings.c"
          "wifi_manager_select.c"

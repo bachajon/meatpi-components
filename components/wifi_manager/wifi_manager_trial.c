@@ -30,7 +30,7 @@
  *        takes the driver's events and a clock and answers with the one
  *        action the glue must perform (connect, or finish). No IDF, so it
  *        runs in the host suite (test_trial.c). wifi_manager_try.c is the
- *        glue; wifi_manager.c hands it the events.
+ *        glue; wifi_manager_handler.c hands it the events.
  */
 #include <string.h>
 

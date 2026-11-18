@@ -27,7 +27,7 @@
  *        BLE connect suspends STA / AP-vs-BLE exclusivity). EPHEMERAL:
  *        settings stay untouched, a reboot (or resume) restores the
  *        configured mode. The reconnect task and the AP-restore paths
- *        in wifi_manager.c consult the suspend flags.
+ *        in the radio files consult the suspend flags.
  */
 #include "wifi_manager.h"
 
@@ -101,7 +101,7 @@ static esp_err_t apply_suspend_state(void)
         esp_wifi_disconnect(); /* clean leave before the iface drops */
     }
 
-    /* adding STA fires WIFI_EVENT_STA_START -> select_and_connect */
+    /* adding STA fires WIFI_EVENT_STA_START -> wm_sta_select_and_connect */
     return esp_wifi_set_mode(target);
 }
 

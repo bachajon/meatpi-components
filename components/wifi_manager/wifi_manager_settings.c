@@ -56,7 +56,7 @@ static const settings_field_t WM_FIELDS[] =
        the station interface exists from the first boot so a network scan
        needs no AP->APSTA mode flip (that flip re-initialises the soft-AP
        and drops the phone running Quick Setup for a few seconds). With no
-       station network configured nothing connects: select_and_connect()
+       station network configured nothing connects: wm_sta_select_and_connect()
        returns at sta_count == 0 and the reconnect task is not created. */
     SETTINGS_STR_ENUM("mode",             "off,sta,ap,apsta", "apsta"),
     SETTINGS_STR ("sta_ssid",           32, ""),

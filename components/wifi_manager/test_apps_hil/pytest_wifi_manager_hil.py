@@ -267,7 +267,7 @@ def test_s14_same_ssid_two_bssids(bench, dut):
     """Two APs broadcasting the SAME SSID+password (mesh/repeater case,
     legacy behavior): the device must associate cleanly with ONE of them,
     esp_wifi picks the stronger BSSID (WIFI_ALL_CHANNEL_SCAN +
-    WIFI_CONNECT_AP_BY_SIGNAL, wifi_manager.c apply_sta_network)."""
+    WIFI_CONNECT_AP_BY_SIGNAL, wifi_manager_sta.c wm_sta_apply_network)."""
     # same identity on both radios, different channels
     bench.cleanup()
     bench.ap_up(AP1_CON, AP1_SSID, AP1_PSK, ifname="wlan1", channel=1)
@@ -303,7 +303,7 @@ def test_s8_ap_channel_follows_sta(bench, dut):
                ap_ssid=DUT_AP_SSID, ap_channel=6)
 
     # sync runs on got-ip (association-time set_config is refused by the
-    # driver, see wifi_manager.c), so got-IP logs FIRST
+    # driver, see wifi_manager_handler.c), so got-IP logs FIRST
     dut.expect(r"STA got IP", 60)
     dut.expect(r"moving AP to STA channel 11", 60)
     wait_status(dut, "ap_ch=11")

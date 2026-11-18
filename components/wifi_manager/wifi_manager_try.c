@@ -27,7 +27,7 @@
  *        never a setting: the credentials live here for the seconds of the
  *        trial and are gone with it (the driver's config storage is RAM).
  *        Three tasks touch the trial: httpd (begin, status), the WiFi event
- *        task (the hooks wifi_manager.c calls) and esp_timer (the 1 s tick
+ *        task (the hooks wifi_manager_handler.c calls) and esp_timer (the 1 s tick
  *        for the budgets); one mutex orders them, and the driver is called
  *        outside it. The reconnect task stands back while a trial runs
  *        (wm_try_active()) and reconnects the configured network afterwards
@@ -231,7 +231,7 @@ static void tick_cb(void *arg)
     perform(act, on_air);
 }
 
-/* ---- the hooks wifi_manager.c calls ----------------------------------------- */
+/* ---- the hooks the radio files call ----------------------------------------- */
 
 bool wm_try_active(void)
 {

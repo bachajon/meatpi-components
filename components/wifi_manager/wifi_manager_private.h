@@ -155,7 +155,7 @@ typedef struct
     /* v6: PER-NETWORK STA addressing, static (user-fixed) or DHCP
        (default). Each candidate lives on its own LAN, so its addressing
        travels with it through the empty-slot collapse (like trusted[]).
-       Applied per CONNECT ATTEMPT (apply_sta_network). Host-order.
+       Applied per CONNECT ATTEMPT (wm_sta_apply_network). Host-order.
        sta_dns = GLOBAL custom DNS override for BOTH modes (0 =
        automatic: DHCP-provided, or that network's gateway when static). */
     wm_addr_t    sta_addr[WM_MAX_CANDIDATES];
@@ -380,8 +380,8 @@ wm_trial_action_t wm_trial_on_got_ip(wm_trial_t *t, const char *ip,
                                      int8_t rssi, uint32_t now_ms);
 wm_trial_action_t wm_trial_tick(wm_trial_t *t, uint32_t now_ms);
 
-/* the glue (wifi_manager_try.c): hooks wifi_manager.c calls from its event
- * handlers and its reconnect task; each returns true when the event belonged
+/* the glue (wifi_manager_try.c): hooks the radio files call from the event
+ * handlers and the reconnect task; each returns true when the event belonged
  * to a running trial and the normal bookkeeping must stand back */
 bool wm_try_active(void);
 /** True once after a trial ended: the reconnect task re-joins the configured
@@ -392,7 +392,7 @@ bool wm_try_on_disconnected(uint8_t reason);
 void wm_try_on_associated(uint8_t channel);
 bool wm_try_on_got_ip(const char *ip);
 
-/* wifi_manager.c internals the glue needs: the station's driver config and
+/* wifi_manager_sta.c internals the glue needs: the station's driver config and
  * addressing for the trial, and back to the configured network (entry 0,
  * or an empty config when none is configured) */
 bool      wm_sta_attempt_in_flight(void);
@@ -409,12 +409,109 @@ void      wm_sta_note_rejoin_hint(void);
  * (BLE/WiFi arbitration). Settings untouched; a reboot resets. */
 
 /** True while the policy holds STA / AP suspended (gates the reconnect
- *  task and the AP-restore paths in wifi_manager.c). */
+ *  task and the AP-restore paths in the radio files). */
 bool wm_suspend_sta_active(void);
 bool wm_suspend_ap_active(void);
 
 /** wifi_manager.c internals the suspend layer needs. */
 bool wm_core_started(void);
+
+/* ---- the radio files (wifi_manager.c split by responsibility, 2026-11-18)
+ * wifi_manager.c keeps the lifecycle and owns the status, the lock and the
+ * event group; the station connect path is wifi_manager_sta.c, the access
+ * point side wifi_manager_ap.c, the driver event handler
+ * wifi_manager_handler.c, the reconnect task wifi_manager_reconnect.c and
+ * the gates of the connected network wifi_manager_network.c. What those
+ * files share is declared here; what needs an IDF or FreeRTOS type (the
+ * lock, the scan scratch, the task handle, the event handler) is in
+ * wifi_manager_bridge.h, which the host tests never see. */
+
+typedef struct
+{
+    bool     radio_inited; /* netifs + esp_wifi_init + handlers done once */
+    bool     started;
+    bool     sta_connected;
+    bool     ap_started;
+    char     sta_ip[16];
+    char     last_attempted_ssid[WM_SSID_LEN];
+    int      last_attempted_idx;   /* config entry of the last attempt   */
+    uint8_t  last_reason;          /* WIFI_REASON_* of the last disconnect */
+    int32_t  sta_retry_count;
+    uint16_t ap_station_count;
+} wm_status_t;
+
+/** The radio's status (wifi_manager.c, PSRAM .bss). */
+extern wm_status_t wm_status;
+
+/** The selection state and failure memory of the configured networks
+ *  (wifi_manager.c): what the wm_select_* functions above work on. */
+extern wm_select_state_t wm_select_state;
+
+/** Milliseconds since boot, from the tick count (wifi_manager.c). */
+uint32_t wm_now_ms(void);
+
+/* the station connect path (wifi_manager_sta.c) */
+
+/** One configured entry into the driver, with its addressing, and noted as
+ *  the last attempt. @p first_channel 1..13: scan it first and stop there;
+ *  0: all channels, by signal. */
+esp_err_t wm_sta_apply_network(const wm_config_t *wcfg, size_t idx,
+                               uint8_t first_channel);
+
+/** Pick the best visible candidate (or rotate blindly) and connect.
+ *  @return true when a connect attempt was actually issued. */
+bool wm_sta_select_and_connect(void);
+
+/** When the connect attempt in flight began (wm_now_ms), 0 = none: the
+ *  event handler clears it when the attempt concludes. */
+extern int64_t wm_sta_connect_started_ms;
+
+/** True while the pick is an entry that has been rejecting us and nothing
+ *  better is visible (one INFO line per transition). */
+extern bool wm_sta_last_resort;
+
+/* the access point side (wifi_manager_ap.c) */
+
+/** Apply the boot-applied AP config to the AP netif: softAP config,
+ *  gateway IP, DHCP server. */
+esp_err_t wm_ap_apply_side(const wm_config_t *cfg);
+
+/** In APSTA, mirror the channel the station is on into the AP config; put
+ *  off while a client is on the AP (wm_ap_channel_stale). */
+void wm_ap_sync_channel_to_sta(void);
+
+/** True while that write is owed: the AP config still names the channel
+ *  the radio has left. */
+extern bool wm_ap_channel_stale;
+
+/* the reconnect task and its roam-to-preferred bookkeeping
+ * (wifi_manager_reconnect.c) */
+
+/* roam-to-preferred trial: we LEAVE a working network to try a better
+ * one; if that attempt is rejected, one strike deprioritises it and we
+ * go straight back: no three-strike dance every roam interval */
+typedef enum
+{
+    WM_ROAM_IDLE = 0,
+    WM_ROAM_LEAVING, /* our own disconnect is on its way              */
+    WM_ROAM_TRYING,  /* the attempt on the preferred entry is running */
+} wm_roam_state_t;
+
+/** The roam trial's state and the entry it is trying. */
+extern volatile wm_roam_state_t wm_sta_roam;
+extern volatile int             wm_sta_roam_target;
+
+/** Config index of the network the station is on, -1 = none. */
+extern volatile int wm_sta_connected_idx;
+
+/** True once the station had an address since the last start. */
+extern volatile bool wm_sta_ever_connected;
+
+/** When the last roam check ran, or the last got-ip (wm_now_ms). */
+extern uint32_t wm_sta_last_roam_ms;
+
+/** The reconnect task's body; wifi_manager_start() creates the task. */
+void wm_reconnect_task(void *arg);
 
 /* ---- settings glue (wifi_manager_settings.c) ------------------------------ */
 

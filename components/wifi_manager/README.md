@@ -89,14 +89,14 @@ by the future button/input manager).
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `mode` | enum `off/sta/ap/apsta` | `apsta` | fresh default since 2026-10-01 (the code shipped `ap` from 2026-07-05 to then): the station interface exists from the first boot, so `GET /api/wifi/scan` needs no AP->APSTA mode flip (the flip re-initialises the soft-AP and drops the associated phone for a few seconds, which broke the Quick Setup wizard's scan step one time in three on the bench). With 0 station networks nothing connects: `select_and_connect()` returns at `sta_count == 0`, the reconnect task is not created, the UI shows "No network configured" |
+| `mode` | enum `off/sta/ap/apsta` | `apsta` | fresh default since 2026-10-01 (the code shipped `ap` from 2026-07-05 to then): the station interface exists from the first boot, so `GET /api/wifi/scan` needs no AP->APSTA mode flip (the flip re-initialises the soft-AP and drops the associated phone for a few seconds, which broke the Quick Setup wizard's scan step one time in three on the bench). With 0 station networks nothing connects: `wm_sta_select_and_connect()` returns at `sta_count == 0`, the reconnect task is not created, the UI shows "No network configured" |
 | `sta_ssid` / `sta_password` | string ≤32 / ≤64 | `""` | empty ssid = no STA network |
 | `fallback1..5_ssid` / `_password` | string | `""` | priority order; flat keys (schema subset has no arrays) |
 | `hostname` | string ≤32 | `""` | DHCP/DNS host name of the STA netif. Empty → `wican_<12-hex device id>` (the name `mdns_manager` advertises as `.local`), pushed with `esp_netif_set_hostname` before the DHCP client starts, so a router's client list shows it instead of lwIP's default `espressif` (2026-09-08; pure builder `wm_default_hostname`, host-tested) |
 | `sta_auto_reconnect` | bool | `true` | |
 | `sta_max_retry` | int −1..1000 | `-1` | −1 = infinite; limit hits trigger a 1-min cooldown |
 | `sta_search_interval_s` | int 10..3600 | `30` | 2026-11-18: the slowest cadence of the tries for a network that is out of reach (the cap of the backoff: 5, 5, 10, 20, 40 s ... up to this). Every try is a scan of all channels, and with the access point up the one radio leaves the access point's clients for that time: on the bench three silences of about 365 ms a try, now and then one of 1.2 to 1.5 s. A unit in `apsta` mode whose home network is out of reach (a drive) did that every 30 s; a longer interval means fewer pauses and a later reconnect once the network is back (the first tries after a loss stay fast whatever the value). With a client on the access point and a station session earlier in this boot, the AP-client pause (60 s) adds to it. `/api/wifi/status` `sta_attempt.search_interval_s` is the value in force and `sta_attempt.tries` counts the tries since boot. Measured on the bench 2026-11-18 (the home network switched off, the unit restarted cold, a client on its access point reading `tries` once a second): with 120 the tries came 80 s and then 120.0 s apart, four times in a row; with 30 every 30 s, ten in five minutes. A new key with a default: no version bump |
-| `sta_ip_mode` / `fallback1..5_ip_mode` | enum `dhcp/static` | `dhcp` | v6: PER-NETWORK STA addressing, each network (primary + every fallback) carries its own choice, since they live on different LANs. Applied per CONNECT ATTEMPT (`apply_sta_network`): DHCP client stopped + `esp_netif_set_ip_info` for a static candidate, restarted (stale address cleared) for a DHCP one; got-ip still fires so the reconnect/roam machinery is unchanged. Bench-verified 2026-07-11 (static reachable from the LAN, DHCP restore clean) |
+| `sta_ip_mode` / `fallback1..5_ip_mode` | enum `dhcp/static` | `dhcp` | v6: PER-NETWORK STA addressing, each network (primary + every fallback) carries its own choice, since they live on different LANs. Applied per CONNECT ATTEMPT (`wm_sta_apply_network`): DHCP client stopped + `esp_netif_set_ip_info` for a static candidate, restarted (stale address cleared) for a DHCP one; got-ip still fires so the reconnect/roam machinery is unchanged. Bench-verified 2026-07-11 (static reachable from the LAN, DHCP restore clean) |
 | `sta_static_ip` / `fallback1..5_static_ip` | string (IPv4) | `""` | v6: REQUIRED when that network is static (validated: dotted quad, host octet 1..254) |
 | `sta_static_netmask` / `fallback1..5_static_netmask` | string (IPv4) | `255.255.255.0` | v6: must be a contiguous mask (`wm_netmask_valid`, host-tested) |
 | `sta_static_gw` / `fallback1..5_static_gw` | string (IPv4) | `""` | v6: optional (isolated-LAN use); validated as a host address when set |
@@ -177,7 +177,7 @@ injected events and a clock, 10 tests). `wifi_manager_try.c` is the glue: one
 mutex over the three tasks that touch it (httpd, the WiFi event task, esp_timer
 for the 1 s tick), the driver called outside it; the radio action starts 300 ms
 after the request was accepted so the answer leaves the device first (a page
-over the station would never see it otherwise). `wifi_manager.c` hands its
+over the station would never see it otherwise). `wifi_manager_handler.c` hands its
 events to the trial first: a trial's disconnect (its result, or its own
 letting-go afterwards) never reaches the configured networks' attempt memory,
 a trial's got-IP is not a connection of ours (the status stays down, no
@@ -228,7 +228,7 @@ The client sees at most one channel hop, and the hop itself is announced
 bench 2026-10-08 with the Pi's mt76x2u as the client). What knocks a client
 off is the silence before it (the station's all-channel scan) and, until
 2026-10-08, the AP config write that mirrored the new channel
-(`sync_ap_channel_to_sta`): `esp_wifi_set_config(WIFI_IF_AP)` restarts the
+(`wm_ap_sync_channel_to_sta`): `esp_wifi_set_config(WIFI_IF_AP)` restarts the
 soft AP and deauthenticates its stations (`station leave, reason = 2` within
 7 ms of got-IP). The write is skipped while `ap_station_count > 0` and done
 when the last client leaves; the radio is on the station's channel either
