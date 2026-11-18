@@ -75,8 +75,18 @@ static uint32_t sess_ms(void)
 esp_err_t ble_manager_init(void)
 {
     static const log_descriptor_t LOG_DESC = { "ble_manager", ESP_LOG_INFO };
+    /* The stack's own tag at WARN: at INFO it prints two lines for every
+       notification (`GATT procedure initiated: notify`, `att_handle=..`).
+       A stream of 100 notifications a second filled the log ring in
+       seconds: on the bench (2026-11-18) the one E line that explained a
+       fault (`ble_att_svr_pkt rc=6`) was gone from the ring a minute
+       later and only the console capture still had it. What the INFO
+       lines said about a session, this component says itself (the
+       session log lines). `PUT /api/logs/level` with the tag brings them back. */
+    static const log_descriptor_t STACK_LOG = { "NimBLE", ESP_LOG_WARN };
 
     log_manager_register(&LOG_DESC);
+    log_manager_register(&STACK_LOG);
     return blm_settings_register();
 }
 
@@ -182,6 +192,19 @@ esp_err_t ble_manager_unsubscribe(QueueHandle_t q)
 
     s_sub = NULL;
     return ESP_OK;
+}
+
+void ble_manager_pipe_drops(uint32_t *rx_drops, uint32_t *tx_drops)
+{
+    if (rx_drops != NULL)
+    {
+        *rx_drops = s_sub_drops;
+    }
+
+    if (tx_drops != NULL)
+    {
+        *tx_drops = blm_io_tx_drops();
+    }
 }
 
 esp_err_t ble_manager_send(const uint8_t *data, size_t len)

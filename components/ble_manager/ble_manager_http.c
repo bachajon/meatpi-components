@@ -131,6 +131,22 @@ static esp_err_t status_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(bl, "ms", s_blast_ms);
     }
 
+    {
+        /* what the data pipe (FFF1 / FFF2) lost, since boot */
+        blm_pipe_stats_t ps = { 0 };
+        cJSON *p = cJSON_AddObjectToObject(o, "pipe");
+
+        blm_io_pipe_stats(&ps);
+        cJSON_AddNumberToObject(p, "tx_drops", ps.tx_drops);
+        cJSON_AddNumberToObject(p, "tx_drop_bytes", ps.tx_drop_bytes);
+        cJSON_AddNumberToObject(p, "tx_holds", ps.tx_holds);
+        cJSON_AddNumberToObject(p, "notify_drops", ps.notify_drops);
+        cJSON_AddNumberToObject(p, "notify_drop_bytes", ps.notify_drop_bytes);
+#if CONFIG_BT_NIMBLE_ENABLED
+        cJSON_AddNumberToObject(p, "buffer_waits", blm_gatt_buffer_waits());
+#endif
+    }
+
     size_t used, cap;
 
     ble_manager_channel_capacity(&used, &cap);

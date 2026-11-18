@@ -62,6 +62,92 @@ Proven on the iPad the same afternoon: the reconnect at 14:22 logged the
 same order, then the new line, the subscribe at +0.3 s, the first write at
 +0.9 s, no rejection, no pairing request, no PIN.
 
+## The data pipe under overload (2026-11-18)
+
+A phone's link carries some 15 to 20 KB a second on the bench; a CAN bus
+makes more than that as soon as it is busy. A connection row that puts a
+bus on the pipe (`can` to `ble` with slcan, RealDash, GVRET or the raw
+records) therefore runs with the pipe overloaded as a matter of course.
+Three things went wrong there. Two were found by reading, the third by the
+bench that was written to show them
+(`tools/testbench/ble/ble_overload_bench.py`, stage `bleoverload`,
+`testing/bleoverload.md`), with a bus at 2,000 frames a second as slcan
+text:
+
+1. **A unit was cut.** The bridge hands the pipe whole units (whole slcan
+   lines, whole records), up to 1 KB at a time. `blm_io_queue_tx` split a
+   unit into 128-byte chunks and stopped at the first chunk that found the
+   queue full, so its head went to the central and its tail did not. The
+   central read half a line glued to the next one: 19 such pieces among
+   13,525 lines.
+2. **Nothing counted what was lost** where a bench or a user could read
+   it: 538 KB in 19 s, on no route. A packet the link did not take inside
+   the 100 ms notify wait was dropped with no count at all.
+3. **The central's writes stopped arriving, and it dropped the link.** A
+   notification the link has not taken yet stays in the host, in the host's
+   own buffers (msys), and an empty pool was the only brake on the task
+   that notifies. msys is two pools; a notification built with
+   `ble_hs_mbuf_from_flat` takes every block from the small one (32
+   blocks), so ten waiting notifications emptied it. The host takes the
+   buffer for the answer to a write from that same pool, BEFORE it carries
+   the write out. A write that arrived then was neither carried out nor
+   answered (`NimBLE: ble_att_svr_pkt rc=6` on the console), and the
+   central ended the link when its ATT timeout ran out, 30 s later. Seen in
+   every run: of the writes sent during the flood, the first few were
+   answered, then one was not.
+
+What the pipe does now:
+
+- **A unit goes into the tx queue whole or not at all**
+  (`blm_io_queue_tx` asks for the room first, `blm_pack_chunks`). The queue
+  is 128 chunks, 16 KB in external RAM (it was 32). A unit that does not fit
+  is dropped and counted: `pipe.tx_drops` (units) and `pipe.tx_drop_bytes`.
+  The warning for it (`tx queue full`) is written once a second at most.
+- **Once a unit is in the queue it reaches the central** while the link
+  lives. A packet the link does not take inside the notify wait is kept and
+  offered again (`pipe.tx_holds` counts the waits); only a packet the stack
+  refuses for a reason that waiting does not cure is dropped
+  (`pipe.notify_drops`, `pipe.notify_drop_bytes`). So the stream a central
+  reads never has a piece missing from its middle: what is lost is lost in
+  whole units, at the queue's door.
+- **A notification's bytes ride in a pool of our own**
+  (`ble_manager_gatt_tx.c`, `BLM_NOTIFY_POOL_BLOCKS`, 8 blocks of 554 bytes
+  in external RAM), not in the host's buffers. At most 8 notifications
+  wait in the host at a time, whatever their size; each still takes one
+  small host buffer for its header, which leaves the host 24 of its 32. A
+  try that finds the pool empty backs off as it did for an empty msys;
+  `pipe.buffer_waits` counts those tries. What waits in the host also
+  waits in front of every answer, so the pool is small: the pipe's own
+  queue is where a backlog belongs. This holds for every notification of
+  this component (the data pipe, the CLI, the stream channels).
+- **When the link ends, what was queued for it is dropped at once**, so the
+  next central starts on an empty pipe (the old loop took a chunk every
+  100 ms).
+- **The stack's log tag is at WARN** (`NimBLE`, registered in
+  `ble_manager_init`). At INFO it printed two lines for every
+  notification, some 130 lines a second during a stream. That filled the
+  log ring in seconds: the one line that explained fault 3 was gone from
+  the ring a minute later and only a console capture still had it.
+  `PUT /api/logs/level` with the tag brings the lines back.
+
+The counts are since boot, on `GET /api/ble`, object `pipe`:
+`tx_drops`, `tx_drop_bytes`, `tx_holds`, `notify_drops`,
+`notify_drop_bytes`, `buffer_waits`.
+
+The same bench with the changes: `BLE OVERLOAD PASS`, 13 checks (2026-11-18 15:32, image `c905eda7...`). Of 24,242 frames 10,256 lines arrived (18.1 KB a second), none cut; 307,692 bytes did not arrive and 307,692 are counted; 11 of 11 writes sent during the flood were answered (the slowest 0.62 s) and reached the bus; the link stayed up.
+
+Not changed, tried and not shown: a write to FFF2 that the bridge behind
+it has no room for is taken in part and acknowledged (`blm_core_on_rx`
+queues what fits and counts the rest, `drops sub` in the session summary).
+The bench kept the bus full so that the unit could not send, and wrote 240
+times 35 lines with response: the unit took every write, handed every line
+to its CAN interface, and that interface gave up on what it could not send
+(`tx_lost` on `/api/can`). The bridge's queue never filled. A bus with no
+node that acknowledges, at a low bit rate, would be the place to look.
+
+Pure logic and its test: `blm_pack_chunks` in `ble_manager_pack.c`,
+`test_chunks_a_unit_needs` in `host_test/main/test_pack.c`.
+
 ## Session log lines (2026-11-08)
 
 A field report about an app ("RealDash takes four tries", "Car Scanner
@@ -232,6 +318,15 @@ unchanged; and the controller cannot run while the cache is off for a flash
 erase (no auto-suspend on this flash chip), so a settings save or a firmware
 update pauses the link for each erase; `blehttp`'s 512 KB uploads to the
 internal flash over a live link still completed byte-exact with 0 link drops.
+
+## The data pipe's drop counters (2026-11-18)
+
+`ble_manager_pipe_drops(&rx_drops, &tx_drops)`: writes of the app that
+found the subscriber's queue full, and chunks handed to
+`ble_manager_send()` that found the transmit queue full, both since boot.
+They stood in the session's log line only (`drops sub N tx N` at the
+disconnect); `/api/bridges` now shows them as `losses` on the end of the
+bridge that uses the `ble` jack.
 
 ## Stream channels (2026-09-21)
 

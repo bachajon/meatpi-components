@@ -245,11 +245,14 @@ Kotlin: `ByteBuffer.wrap(bytes).order(LITTLE_ENDIAN)`; Swift:
 
 Delivery on this pipe is
 by notification (the ELM/slcan contract): under a flood the device drops
-whole records at its TX queue (`br_ble_can` `stats` on `/api/bridges`,
-`tx queue full` in its log) rather than blocking the bus, so a CAN
-monitor app must tolerate gaps; a lost notification can also cost the
-tail of a straddling record, which the sanity rules above catch (skip one
-byte and re-sync). Bench 2026-09-21 (`ble_can_raw_pi.py`, row `br_ble_can`
+at its TX queue rather than blocking the bus, so a CAN monitor app must
+tolerate gaps. Since 2026-11-18 what it drops is whole units only (whole
+records, whole slcan lines: what the bridge hands over in one go), every
+one counted (`pipe.tx_drops`, `pipe.tx_drop_bytes` on `/api/ble`, `tx
+queue full` in its log), and what it has queued reaches you: the stream
+you read has gaps between records, never half a record. The sanity rules
+above stay a good idea for a link that drops a notification on your
+side. Bench 2026-09-21 (`ble_can_raw_pi.py`, row `br_ble_can`
 = `can` / `raw`, UB500 central, WiFi STA up): the pre-timestamp layout
 ran at exactly 14.0 bytes per record with 0 malformed and 0 straddling
 records over 88 notifications, 20 of 20 `7DF 0100` requests answered from
@@ -400,7 +403,11 @@ The full WiCAN command line (same registry as UART/WebSocket; commands in
 - **Flow control**: the device retries a notification for up to 2 s when
   the radio credits are exhausted (a slow phone throttles a transfer
   instead of losing data); a burst it cannot absorb on FFF2 is counted
-  and dropped, which the ELM dialect tolerates. On the stream channels a
+  and dropped, which the ELM dialect tolerates. The device keeps answering
+  your writes while it notifies at the link's limit: within a second on
+  the bench, behind the notifications already on their way. Until
+  2026-11-18 it could stop answering there, and the phone ended the link
+  30 s later (its ATT timeout). On the stream channels a
   notification is retried up to 30 s (the same budget as an indication)
   and the HTTP tunnel keeps at most 16 KB unacknowledged by the app's
   `CREDIT` frames.

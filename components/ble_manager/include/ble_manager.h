@@ -237,6 +237,14 @@ esp_err_t ble_manager_channel_stats(int id, ble_manager_channel_stats_t *out);
 /** Registry occupancy for WICAN CAPS / /api/status health.caps (§12). */
 void ble_manager_channel_capacity(size_t *used, size_t *cap);
 
+/** The data pipe's two loss counters, since boot (2026-11-18: until then
+ *  they stood in the session's log line only): @p rx_drops = writes of the
+ *  app that found the subscriber's queue full, @p tx_drops = units handed
+ *  to ble_manager_send() that found no room in the transmit queue and were
+ *  dropped whole (a unit is what the bridge hands over in one call). Either may be
+ *  NULL. `/api/bridges` shows them on the bridge that uses the `ble` jack. */
+void ble_manager_pipe_drops(uint32_t *rx_drops, uint32_t *tx_drops);
+
 /** GET /api/ble: link state + the channel registry with its counters
  *  (components/HTTP_API.md 6e15). Call before http_server_manager_start(). */
 esp_err_t ble_manager_register_http(void);

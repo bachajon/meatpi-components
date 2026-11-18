@@ -24,6 +24,18 @@ static void test_packets_needed_rounds_up(void)
 
 /* ---- fill/flush state machine ----------------------------------------------------- */
 
+/* the queue slots a unit needs: a unit goes into the pipe whole or not at
+   all, so the room is asked for before the first chunk goes in */
+static void test_chunks_a_unit_needs(void)
+{
+    TEST_ASSERT_EQUAL(0, blm_pack_chunks(0));
+    TEST_ASSERT_EQUAL(1, blm_pack_chunks(1));
+    TEST_ASSERT_EQUAL(1, blm_pack_chunks(BLE_MANAGER_CHUNK_SIZE));
+    TEST_ASSERT_EQUAL(2, blm_pack_chunks(BLE_MANAGER_CHUNK_SIZE + 1));
+    TEST_ASSERT_EQUAL(4, blm_pack_chunks(490));  /* the largest FFF2 write */
+    TEST_ASSERT_EQUAL(8, blm_pack_chunks(1024)); /* the bridge's largest unit */
+}
+
 static void test_fill_partial_then_full(void)
 {
     uint8_t buf[20];
@@ -163,6 +175,7 @@ void run_pack_tests(void)
     RUN_TEST(test_packets_needed_rounds_up);
     RUN_TEST(test_fill_partial_then_full);
     RUN_TEST(test_fill_exact_boundary);
+    RUN_TEST(test_chunks_a_unit_needs);
     RUN_TEST(test_name_from_id);
     RUN_TEST(test_serial_legacy_plus7);
     RUN_TEST(test_tx_power_clamp);

@@ -37,12 +37,15 @@
  */
 #include "ble_manager.h"
 
+#include "esp_attr.h"
 #include "esp_bt.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
+#include "os/os_mbuf.h"
+#include "os/os_mempool.h"
 
 #include "ble_manager_private.h"
 
@@ -50,8 +53,73 @@
 #define BLM_CONGEST_WINDOW_MS 5
 /* the legacy 50 x 2 ms budget of the data/CLI notifies */
 #define BLM_NOTIFY_WAIT_MS    100
+/* A notification's bytes ride in a buffer of a pool of our own, not in the
+ * host's (msys). A notification the link has not taken yet stays in the
+ * host. Built from the host's buffers (ble_hs_mbuf_from_flat), ten of them
+ * emptied the pool the host takes its small buffers from, and an empty
+ * pool was the only brake. On the bench (2026-11-18, a CAN bus at 2,000
+ * frames a second as slcan text toward a central that took 20 KB a second)
+ * a write from the central then found no buffer for its answer (`NimBLE:
+ * ble_att_svr_pkt rc=6` on the console): it was neither carried out nor
+ * answered, and the central dropped the link 30 s later, its ATT timeout.
+ * With this pool at most BLM_NOTIFY_POOL_BLOCKS notifications wait in the
+ * host at a time, whatever their size. Each still takes one small host
+ * buffer for its header, which leaves the host 24 of its 32. What waits
+ * in the host also waits in front of every answer, so the pool is small:
+ * the pipe's own queue (16 KB) is where a backlog belongs.
+ *
+ * (A first cut kept 60 % of msys free. It never held anything back: msys
+ * is two pools and notifications use the small one only, 32 of 80 blocks,
+ * exactly the 40 % that check allowed.) */
+#define BLM_NOTIFY_POOL_BLOCKS 8
+/* the room in front of the bytes that the host's own packets have (the
+   HCI data header and the L2CAP header, 4 bytes each) */
+#define BLM_NOTIFY_LEAD        8
+/* one block holds the largest notification whole: the mbuf and packet
+   headers (24 bytes), the room in front, the bytes, and some to spare */
+#define BLM_NOTIFY_BLOCK_SIZE  (BLM_SEND_BUF_SIZE + 64)
+
+static os_membuf_t s_ntf_mem[OS_MEMPOOL_SIZE(BLM_NOTIFY_POOL_BLOCKS,
+                                             BLM_NOTIFY_BLOCK_SIZE)] EXT_RAM_BSS_ATTR;
+static struct os_mempool s_ntf_mp;    /* internal: small, the pool's list head */
+static struct os_mbuf_pool s_ntf_pool;
+static bool s_ntf_ready;
 
 static volatile TickType_t s_congested_until; /* window end, 0 = clear */
+static uint32_t s_buffer_waits; /* tries that found the notify pool empty */
+
+/** @p len bytes as a packet for ble_gatts_notify_custom(), from the notify
+ *  pool. NULL = every block is in the host already (counted): wait. */
+static struct os_mbuf *notify_mbuf(const uint8_t *buf, uint16_t len)
+{
+    if (!s_ntf_ready)
+    {
+        return ble_hs_mbuf_from_flat(buf, len); /* no pool: the host's, as before */
+    }
+
+    struct os_mbuf *om = os_mbuf_get_pkthdr(&s_ntf_pool, 0);
+
+    if (om == NULL)
+    {
+        s_buffer_waits++;
+        return NULL;
+    }
+
+    om->om_data += BLM_NOTIFY_LEAD;
+
+    if (os_mbuf_append(om, buf, len) != 0)
+    {
+        os_mbuf_free_chain(om);
+        return NULL;
+    }
+
+    return om;
+}
+
+uint32_t blm_gatt_buffer_waits(void)
+{
+    return s_buffer_waits;
+}
 
 /* one indication in flight per link: the sender takes s_ind_slot, the
    GAP NOTIFY_TX event (EDONE = confirmed, ETIMEOUT = the 30 s ATT
@@ -76,6 +144,17 @@ void blm_tx_init(void)
         s_ind_slot = xSemaphoreCreateBinaryStatic(&s_ind_slot_buf);
         s_ind_done = xSemaphoreCreateBinaryStatic(&s_ind_done_buf);
         xSemaphoreGive(s_ind_slot);
+
+        s_ntf_ready =
+            os_mempool_init(&s_ntf_mp, BLM_NOTIFY_POOL_BLOCKS, BLM_NOTIFY_BLOCK_SIZE,
+                            s_ntf_mem, "blm_notify") == OS_OK &&
+            os_mbuf_pool_init(&s_ntf_pool, &s_ntf_mp, BLM_NOTIFY_BLOCK_SIZE,
+                              BLM_NOTIFY_POOL_BLOCKS) == 0;
+
+        if (!s_ntf_ready)
+        {
+            ESP_LOGW("ble_manager", "no notify pool: notifications use the host's buffers");
+        }
     }
 }
 
@@ -156,7 +235,10 @@ esp_err_t blm_gatt_notify_handle(uint16_t val_handle, const uint8_t *buf,
             continue;
         }
 
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, len);
+        /* no block free = BLM_NOTIFY_POOL_BLOCKS notifications wait in the
+           host already: back off like for an empty pool, the same
+           self-expiring window */
+        struct os_mbuf *om = notify_mbuf(buf, len);
         int rc = (om == NULL) ? BLE_HS_ENOMEM
                               : ble_gatts_notify_custom(blm_gatt_conn_handle(),
                                                         val_handle, om);

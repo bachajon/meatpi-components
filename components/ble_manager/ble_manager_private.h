@@ -42,7 +42,10 @@ extern "C" {
 #define BLM_SEND_BUF_SIZE  490  /* legacy BLE_SEND_BUF_SIZE               */
 #define BLM_CLI_MAX        1024 /* legacy BLE_CMDLINE_MAX                 */
 #define BLM_NAME_MAX       32
-#define BLM_TX_QUEUE_DEPTH 32
+/* the pipe's tx queue, in chunks of 128 bytes: 16 KB in external RAM. A
+   unit from the bridge (up to 1 KB) needs 8, and it goes in whole or not
+   at all (blm_io_queue_tx) */
+#define BLM_TX_QUEUE_DEPTH 128
 
 /* ---- pure helpers (ble_manager_pack.c: host-tested) ------------------------ */
 
@@ -57,6 +60,9 @@ int blm_pack_packets_needed(size_t pending, size_t add, size_t max_data);
  */
 bool blm_pack_fill(uint8_t *buf, size_t *buf_len, size_t max_data,
                    const uint8_t *in, size_t in_len, size_t *consumed);
+
+/** Queue slots (chunks of BLE_MANAGER_CHUNK_SIZE) that `len` bytes need. */
+size_t blm_pack_chunks(size_t len);
 
 /** Device name from the device id: "WiC_<id>" (legacy ble_uid). */
 void blm_ident_name(const char *device_id, char *name, size_t name_len);
@@ -360,7 +366,22 @@ esp_err_t blm_io_start(void);
 void      blm_io_stop(void);
 esp_err_t blm_io_queue_tx(const uint8_t *data, size_t len);
 esp_err_t blm_io_cli_write(const char *data, size_t len);
-uint32_t  blm_io_tx_drops(void);   /* tx queue full, since boot          */
+uint32_t  blm_io_tx_drops(void);   /* units the tx queue refused, since boot */
+
+/** What the data pipe lost, since boot (GET /api/ble, "pipe"). */
+typedef struct
+{
+    uint32_t tx_drops;          /* units refused whole: no room in the tx queue */
+    uint32_t tx_drop_bytes;
+    uint32_t tx_holds;          /* a packet the link did not take in time: kept */
+    uint32_t notify_drops;      /* packets the stack refused for another reason */
+    uint32_t notify_drop_bytes;
+} blm_pipe_stats_t;
+
+void blm_io_pipe_stats(blm_pipe_stats_t *out);   /* the tx fields */
+/** NimBLE backend: notify tries that found every block of the notify pool
+ *  in the host already and waited (ble_manager_gatt_tx.c). */
+uint32_t blm_gatt_buffer_waits(void);
 
 #ifdef __cplusplus
 }

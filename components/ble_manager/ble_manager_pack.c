@@ -63,6 +63,11 @@ bool blm_pack_fill(uint8_t *buf, size_t *buf_len, size_t max_data,
     return *buf_len == max_data;
 }
 
+size_t blm_pack_chunks(size_t len)
+{
+    return (len + BLE_MANAGER_CHUNK_SIZE - 1) / BLE_MANAGER_CHUNK_SIZE;
+}
+
 void blm_ident_name(const char *device_id, char *name, size_t name_len)
 {
     /* legacy ble_uid format "WiC_<12-hex MAC>" (legacy main.c), with the
