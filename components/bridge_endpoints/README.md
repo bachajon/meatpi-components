@@ -35,6 +35,15 @@ the unit writes its flash (the UART interrupt waits for the write, the
 FIFO is 128 bytes, 0.64 ms at 2 Mbaud) are counted now (`rx_overruns`, one
 W line per hundred).
 
+The port's UART hands its FIFO over at 32 bytes and its interrupt runs on
+the app core (2026-11-18), the two settings the OBD chip's port has since
+2026-11-11 (`obd_chip_uart.c` has the measurement). With the SDK's 120 of
+128 bytes the interrupt had 40 us at 2 Mbaud, on core 0 behind WiFi's: a
+stream from the PC (60,000 bytes at 50,000 bytes a second, 400 at a time)
+lost about 40 bytes in 3 passes of 38 while the unit wrote no flash (`its
+FIFO ran over`). A flash write still costs bytes; that is what
+`rx_overruns` is for.
+
 Add-on component packs may register further jacks straight with
 bridge_manager during their ext init hook (same pre-start window).
 Dynamic socket/WS jacks follow the settings names, renaming a server

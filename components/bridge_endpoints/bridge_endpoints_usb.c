@@ -33,7 +33,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "soc/soc_caps.h"
 
 #include "bridge_manager.h"
 
@@ -55,6 +57,25 @@ static const char *TAG = "bridge_endpoints";
  * below is only what a lost event costs. */
 #define USB_EVT_QUEUE   32
 #define USB_EVT_WAIT_MS 20
+
+/* The hand-over of the UART's FIFO (128 bytes), the two settings the OBD
+ * chip's port has since 2026-11-11 (obd_chip_uart.c has the measurement).
+ * The driver's interrupt comes when this many bytes wait in the FIFO; at
+ * 2 Mbaud a byte arrives every 5 us, so it has (128 - threshold) * 5 us to
+ * start reading. The SDK's 120 left it 8 bytes, 40 us, and the driver
+ * binds the interrupt to the core that installs it, which was core 0,
+ * behind WiFi's. A stream from the PC (60,000 bytes at 50,000 bytes a
+ * second, 400 at a time) lost about 40 bytes in one pass of twelve with no
+ * flash write in the unit (bench 2026-11-18: 3 passes of 38, `its FIFO ran
+ * over`). At 32 the interrupt has 96 bytes, 480 us, and it runs on the app
+ * core. A short command from the PC is under 32 bytes and still comes with
+ * the driver's rx-timeout, as before. Nothing covers a flash write: the
+ * interrupt is flash code and waits for it (rx_overruns counts that). */
+#define USB_RX_FULL_THRESH 32
+#define USB_ISR_CORE       (portNUM_PROCESSORS - 1) /* the app core */
+
+_Static_assert(USB_RX_FULL_THRESH < SOC_UART_FIFO_LEN,
+               "the hand-over point lies inside the hardware FIFO");
 
 static QueueHandle_t s_usb_sub;
 static QueueHandle_t s_usb_evt_q;     /* the UART driver's own            */
@@ -189,7 +210,9 @@ static void usb_rx_task(void *arg)
     }
 }
 
-esp_err_t bep_usb_start(void)
+/** The driver install and the port's configuration, on the calling core:
+ *  the driver binds its interrupt to the core that runs the install. */
+static esp_err_t usb_uart_install(void)
 {
     uart_config_t cfg =
     {
@@ -213,8 +236,58 @@ esp_err_t bep_usb_start(void)
 
     if (err == ESP_OK)
     {
+        /* the driver install left the hand-over point at the SDK's 120 */
+        err = uart_set_rx_full_threshold(USB_UART, USB_RX_FULL_THRESH);
+    }
+
+    if (err == ESP_OK)
+    {
         err = uart_set_pin(USB_UART, USB_TX_PIN, USB_RX_PIN,
                            UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    }
+
+    return err;
+}
+
+typedef struct
+{
+    esp_err_t         result;
+    SemaphoreHandle_t done;
+} usb_install_ctx_t;
+
+static void usb_install_task(void *arg)
+{
+    usb_install_ctx_t *ctx = (usb_install_ctx_t *)arg;
+
+    ctx->result = usb_uart_install();
+    xSemaphoreGive(ctx->done);
+    vTaskDelete(NULL);
+}
+
+esp_err_t bep_usb_start(void)
+{
+    static StaticSemaphore_t done_buf; /* internal: FreeRTOS object */
+    usb_install_ctx_t ctx =
+    {
+        .result = ESP_FAIL,
+        .done = xSemaphoreCreateBinaryStatic(&done_buf),
+    };
+    esp_err_t err;
+
+    /* the install on a one-shot task pinned to USB_ISR_CORE (the pattern
+       of the OBD chip's port and of can_manager); on this core when the
+       task cannot be made */
+    if (xTaskCreatePinnedToCore(usb_install_task, "usb_obd_init", 3072, &ctx,
+                                10, NULL, USB_ISR_CORE) != pdPASS)
+    {
+        ESP_LOGW(TAG, "usb_obd: no task for the UART install, its interrupt "
+                      "stays on core %d", (int)xPortGetCoreID());
+        err = usb_uart_install();
+    }
+    else
+    {
+        (void)xSemaphoreTake(ctx.done, portMAX_DELAY);
+        err = ctx.result;
     }
 
     if (err != ESP_OK)
