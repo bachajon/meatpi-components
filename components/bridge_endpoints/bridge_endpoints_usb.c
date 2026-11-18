@@ -47,8 +47,25 @@ static const char *TAG = "bridge_endpoints";
 #define USB_BAUD      2000000 /* matches the OBD chip side (meatpi):
                                  no bottleneck through the passthrough */
 
+/* The reader waits for the UART driver's events, not for a count of bytes.
+ * Until 2026-11-18 it asked for 128 bytes with a 20 ms limit, and the
+ * driver waits its whole limit again behind every arrival, so a command of
+ * a few bytes left the jack 20 ms after it came (bench: of 40 short writes
+ * to a TCP client the fastest took 20.8 ms, the median 21.5 ms). The wait
+ * below is only what a lost event costs. */
+#define USB_EVT_QUEUE   32
+#define USB_EVT_WAIT_MS 20
+
 static QueueHandle_t s_usb_sub;
-static uint32_t s_usb_drops;
+static QueueHandle_t s_usb_evt_q;     /* the UART driver's own            */
+static uint32_t s_usb_drops;          /* chunks the bridge's queue did not
+                                         take                             */
+/* Bytes from the PC that the UART lost: its 128 byte FIFO ran over (the
+ * interrupt came late: it waits for a flash write, 0.64 ms fill the FIFO
+ * at this speed) or the driver's ring was full. Counted per event, the
+ * driver does not say how many bytes. In no counter at all until
+ * 2026-11-18. */
+static uint32_t s_usb_overruns;
 static TaskHandle_t s_usb_task;
 static StaticTask_t s_usb_tcb;        /* internal: FreeRTOS object       */
 static StackType_t s_usb_stack[3072]; /* internal: UART driver path (§2) */
@@ -56,6 +73,27 @@ static StackType_t s_usb_stack[3072]; /* internal: UART driver path (§2) */
 esp_err_t bep_usb_send(const uint8_t *d, size_t l)
 {
     return (uart_write_bytes(USB_UART, d, l) == (int)l) ? ESP_OK : ESP_FAIL;
+}
+
+int bep_usb_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    (void)q;
+
+    if (cap < 1)
+    {
+        return 0;
+    }
+
+    /* chunks from the PC that the bridge's queue had no room for */
+    out[0] = (bridge_loss_t){ "rx_drops", s_usb_drops };
+
+    if (cap < 2)
+    {
+        return 1;
+    }
+
+    out[1] = (bridge_loss_t){ "rx_overruns", s_usb_overruns };
+    return 2;
 }
 
 esp_err_t bep_usb_subscribe(QueueHandle_t q)
@@ -88,24 +126,64 @@ static void usb_rx_task(void *arg)
 
     while (true)
     {
-        int got = uart_read_bytes(USB_UART, chunk.data, sizeof(chunk.data),
-                                  pdMS_TO_TICKS(20));
+        uart_event_t evt;
 
-        if (got <= 0 || s_usb_sub == NULL)
+        if (xQueueReceive(s_usb_evt_q, &evt,
+                          pdMS_TO_TICKS(USB_EVT_WAIT_MS)) == pdTRUE &&
+            (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL))
         {
-            continue;
+            s_usb_overruns++;
+
+            if ((s_usb_overruns % 100) == 1)
+            {
+                ESP_LOGW(TAG, "usb_obd: the UART lost bytes from the PC (%s "
+                         "ran over, %lu times so far)",
+                         evt.type == UART_FIFO_OVF ? "its FIFO" : "the ring",
+                         (unsigned long)s_usb_overruns);
+            }
         }
 
-        chunk.len = (uint16_t)got;
-
-        if (xQueueSend(s_usb_sub, &chunk, 0) != pdTRUE)
+        /* by what the driver holds, not by the event's size: an event lost
+           to a full event queue costs the wait above and no byte */
+        for (;;)
         {
-            s_usb_drops++; /* bounded queue: drop-and-count, never block */
+            size_t have = 0;
 
-            if ((s_usb_drops % 100) == 1)
+            (void)uart_get_buffered_data_len(USB_UART, &have);
+
+            if (have == 0)
             {
-                ESP_LOGW(TAG, "usb_obd subscriber full (%lu drops)",
-                         (unsigned long)s_usb_drops);
+                break;
+            }
+
+            if (have > sizeof(chunk.data))
+            {
+                have = sizeof(chunk.data);
+            }
+
+            int got = uart_read_bytes(USB_UART, chunk.data, have, 0);
+
+            if (got <= 0)
+            {
+                break;
+            }
+
+            if (s_usb_sub == NULL)
+            {
+                continue; /* no bridge on the jack: read and gone, as before */
+            }
+
+            chunk.len = (uint16_t)got;
+
+            if (xQueueSend(s_usb_sub, &chunk, 0) != pdTRUE)
+            {
+                s_usb_drops++; /* bounded queue: drop-and-count, never block */
+
+                if ((s_usb_drops % 100) == 1)
+                {
+                    ESP_LOGW(TAG, "usb_obd subscriber full (%lu drops)",
+                             (unsigned long)s_usb_drops);
+                }
             }
         }
     }
@@ -123,7 +201,8 @@ esp_err_t bep_usb_start(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    esp_err_t err = uart_driver_install(USB_UART, 4096, 4096, 0, NULL, 0);
+    esp_err_t err = uart_driver_install(USB_UART, 4096, 4096, USB_EVT_QUEUE,
+                                        &s_usb_evt_q, 0);
 
     if (err != ESP_OK)
     {

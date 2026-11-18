@@ -73,7 +73,8 @@ static QueueHandle_t s_in_q;
 static StaticQueue_t s_in_q_buf;   /* internal: FreeRTOS object */
 static uint8_t s_in_q_store[8 * sizeof(cmdline_chunk_t)] EXT_RAM_BSS_ATTR;
 static QueueHandle_t s_sub_q;      /* the bridge's queue            */
-static uint32_t s_drops;
+static uint32_t s_in_drops;        /* input: the console's queue full */
+static uint32_t s_out_drops;       /* output: the bridge's queue full */
 static cm_line_asm_t s_ep_asm;
 
 /* async exec face: whole lines + their sink, run by the dispatcher
@@ -200,6 +201,19 @@ void cmdline_manager_capacity(size_t *used, size_t *cap)
     }
 }
 
+void cmdline_manager_drops(uint32_t *in_drops, uint32_t *out_drops)
+{
+    if (in_drops != NULL)
+    {
+        *in_drops = s_in_drops;
+    }
+
+    if (out_drops != NULL)
+    {
+        *out_drops = s_out_drops;
+    }
+}
+
 esp_err_t cmdline_manager_register(const esp_console_cmd_t *cmd)
 {
     if (cmd == NULL || cmd->command == NULL)
@@ -315,7 +329,7 @@ static void ep_sink(const char *data, size_t len, void *arg)
 
         if (xQueueSend(s_sub_q, &chunk, pdMS_TO_TICKS(50)) != pdTRUE)
         {
-            s_drops++;
+            s_out_drops++;
             return;
         }
 
@@ -461,7 +475,7 @@ esp_err_t cmdline_manager_send(const uint8_t *data, size_t len)
 
         if (xQueueSend(s_in_q, &chunk, 0) != pdTRUE)
         {
-            s_drops++;
+            s_in_drops++;
             return ESP_ERR_NO_MEM; /* never block the transport */
         }
 

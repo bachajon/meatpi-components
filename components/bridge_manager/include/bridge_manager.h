@@ -82,6 +82,15 @@ typedef struct
     uint8_t  data[BRIDGE_MANAGER_CHUNK_SIZE];
 } bridge_chunk_t;
 
+/** One loss counter of an endpoint, by name (bridge_endpoint_t.losses). */
+typedef struct
+{
+    const char *name;  /* a string that lives forever: "rx_drops", ...     */
+    uint32_t    value; /* since boot                                       */
+} bridge_loss_t;
+
+#define BRIDGE_MANAGER_MAX_LOSSES 12 /* counters one endpoint may report   */
+
 /** An endpoint: chunk source/sink. All pointers must live forever. */
 typedef struct
 {
@@ -104,6 +113,18 @@ typedef struct
      *  send() takes or refuses at once (every endpoint but `can`). An
      *  endpoint that sets it makes room by itself; the pump only asks. */
     bool (*tx_ready)(void);
+    /** OPTIONAL (2026-11-18). What the endpoint lost, by name, since boot:
+     *  every counter of a chunk, frame or byte it read for a bridge or took
+     *  from one and did not deliver. Until then such counters stood in a
+     *  log line or a console command at best, and a bridge row with clean
+     *  counters could sit on an endpoint that was dropping. @p q is the
+     *  queue the asking bridge subscribed with: an endpoint that fans out
+     *  reports that bridge's share where it keeps one. Fills at most
+     *  @p cap entries, returns how many. NULL = nothing to report (the
+     *  endpoint cannot lose, or its provider's own route says it). Called
+     *  from any task (the web server's): plain reads of counters, no lock
+     *  held for long, no I/O. */
+    int (*losses)(QueueHandle_t q, bridge_loss_t *out, int cap);
 } bridge_endpoint_t;
 
 /**
@@ -185,6 +206,14 @@ esp_err_t bridge_manager_register_translator(const bridge_translator_t *tr);
 
 /** Per-bridge counters by configured bridge name. */
 esp_err_t bridge_manager_stats(const char *bridge_name, bridge_stats_t *out);
+
+/** The loss counters of one end of a running bridge, as its endpoint
+ *  reports them (bridge_endpoint_t.losses): @p side_b false = end `a`.
+ *  *@p count = entries written to @p out (at most @p cap), 0 when the
+ *  endpoint reports none. ESP_ERR_NOT_FOUND when no bridge of that name
+ *  runs. `/api/bridges` shows them as `losses.a` and `losses.b`. */
+esp_err_t bridge_manager_losses(const char *bridge_name, bool side_b,
+                                bridge_loss_t *out, int cap, int *count);
 
 /** Why a configured, ENABLED bridge is not running since start (2026-10-29):
  *  the endpoint or translator its row names was never registered in this

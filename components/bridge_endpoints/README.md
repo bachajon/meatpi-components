@@ -16,6 +16,25 @@ component that may depend on bridge_manager AND the providers
 | socket servers | `socket_manager`: one jack PER CONFIGURED server, under its **configured name** (defaults `obd0 slcan0 gvret0 udp0`) | start (dynamic) |
 | WS channels | `websocket_manager`: one jack per configured channel (defaults `ws_obd ws_can ws_cli ws_log`; slots for all 6 channels since wsm v2) | start (dynamic) |
 
+**What each jack lost (2026-11-18).** Every jack gives bridge_manager's
+`losses` hook, so `/api/bridges` shows, on each end of a running bridge,
+the counters that stood in a log line or nowhere until then:
+
+| Jack | Names | Counts |
+|---|---|---|
+| every jack | `rx_drops` | chunks the jack read that the bridge's queue had no room for (`obd` and `can`: this bridge's share of the fan-out) |
+| `ble`, `cli`, socket servers, WS channels | `tx_drops` | chunks a bridge handed over that the jack dropped: the Bluetooth transmit queue or the console's input queue was full, a TCP or WebSocket client was behind by more than its buffer |
+| `can` | `tx_drops`, `tx_refused`, `tx_malformed` | frames that found the jack's TX queue full; frames the controller did not take (a bus that took nothing for 100 ms, a bus-off); chunks that were not whole frames |
+| `usb_obd` | `rx_overruns` | times the UART lost bytes from the PC: its FIFO or the driver's ring ran over |
+
+The `usb_obd` reader (2026-11-18) waits for the UART driver's events and
+reads what the driver holds. It used to ask for 128 bytes with a 20 ms
+limit, which the driver waits out in full behind every arrival: a command
+of a few bytes left the jack 20 ms late. The bytes the UART loses while
+the unit writes its flash (the UART interrupt waits for the write, the
+FIFO is 128 bytes, 0.64 ms at 2 Mbaud) are counted now (`rx_overruns`, one
+W line per hundred).
+
 Add-on component packs may register further jacks straight with
 bridge_manager during their ext init hook (same pre-start window).
 Dynamic socket/WS jacks follow the settings names, renaming a server
@@ -48,7 +67,7 @@ the socket/WS jack NAMES come from those components' own settings.
 | Where | What | ~Size |
 |---|---|---|
 | Internal `.bss` | USB RX task stack (3 KB, UART driver path §2) + TCBs | ~3.5 KB |
-| Internal heap | UART2 driver rings (4 KB + 4 KB) at start | ~8 KB |
+| Internal heap | UART2 driver rings (4 KB + 4 KB) and, since 2026-11-18, its event queue (32 events) at start | ~8.5 KB |
 | PSRAM `.bss` | CAN pump stack (3 KB) + name buffers | ~3.2 KB |
 | PSRAM `.bss` | the `can` jack's TX queue (1024 frames of 20 B) + its task's stack (3 KB) | ~23.5 KB |
 | Internal `.bss` | that queue's and task's control blocks | ~0.5 KB |
@@ -59,4 +78,10 @@ the socket/WS jack NAMES come from those components' own settings.
 Glue: no host suite (thin wrappers + two FreeRTOS adapters with no
 isolatable pure logic; the frame⇄chunk codec it uses is host-tested in
 `can_manager`'s `can_frame_wire`). Covered live by the bridge benches:
-translator suites (slcan/gvret TCP+WS) and the USB passthrough leg.
+translator suites (slcan/gvret TCP+WS), the USB passthrough leg, and
+since 2026-11-18 the firmware repo's `tools/testbench/usb/
+usb_obd_pipe_bench.py` (`USB OBD PIPE PASS`: the `usb_obd` jack bridged
+raw to a TCP server, a short write's delay, every byte of a stream, the
+bytes lost during a flash write in `rx_overruns`) and leg C of
+`tools/testbench/can/mqtt_can_batch_bench.py` (every running bridge
+reports the losses of both its ends).

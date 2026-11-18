@@ -108,6 +108,43 @@ static void add_bridge(cJSON *item, const cJSON *bridges, const char *name)
     }
 }
 
+/* "losses": what the endpoints at the two ends of a running bridge lost, by
+   name, as each reports it (bridge_endpoint_t.losses, 2026-11-18). An end
+   whose endpoint reports nothing is left out; a bridge with neither has no
+   "losses". Until then a jack's own drop counters reached no route: a
+   client's burst that the bus did not take, or a tx message that CAN over
+   MQTT threw away, left every number here at rest. */
+static void add_losses(cJSON *item, const char *name)
+{
+    static const char *const ENDS[] = { "a", "b" };
+    cJSON *losses = NULL;
+
+    for (int side = 0; side < 2; side++)
+    {
+        bridge_loss_t l[BRIDGE_MANAGER_MAX_LOSSES];
+        int n = 0;
+
+        if (bridge_manager_losses(name, side == 1, l,
+                                  BRIDGE_MANAGER_MAX_LOSSES, &n) != ESP_OK ||
+            n <= 0)
+        {
+            continue;
+        }
+
+        if (losses == NULL)
+        {
+            losses = cJSON_AddObjectToObject(item, "losses");
+        }
+
+        cJSON *end = cJSON_AddObjectToObject(losses, ENDS[side]);
+
+        for (int i = 0; end != NULL && i < n; i++)
+        {
+            cJSON_AddNumberToObject(end, l[i].name, l[i].value);
+        }
+    }
+}
+
 static esp_err_t bridges_handler(httpd_req_t *req)
 {
     static const char *const KEYS[] =
@@ -141,6 +178,7 @@ static esp_err_t bridges_handler(httpd_req_t *req)
             cJSON_AddNumberToObject(s, "b2a_bytes", st.b2a_bytes);
             cJSON_AddNumberToObject(s, "send_errors", st.send_errors);
             cJSON_AddNumberToObject(s, "codec_errors", st.codec_errors);
+            add_losses(item, name);
         }
         else
         {

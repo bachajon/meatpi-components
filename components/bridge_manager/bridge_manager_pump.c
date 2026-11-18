@@ -647,6 +647,26 @@ const char *bm_pump_reason(const char *bridge_name)
     return NULL;
 }
 
+esp_err_t bm_pump_losses(const char *bridge_name, bool side_b, void *out,
+                         int cap, int *count)
+{
+    for (int i = 0; i < BRIDGE_MANAGER_MAX_BRIDGES; i++)
+    {
+        const bm_bridge_t *br = &s_br[i];
+
+        if (br->in_use && strcmp(br->cfg->name, bridge_name) == 0)
+        {
+            const bridge_endpoint_t *ep = side_b ? br->b : br->a;
+
+            *count = (ep->losses == NULL)
+                         ? 0 : ep->losses(side_b ? br->qb : br->qa, out, cap);
+            return ESP_OK;
+        }
+    }
+
+    return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t bm_pump_stats(const char *bridge_name, void *stats_out)
 {
     for (int i = 0; i < BRIDGE_MANAGER_MAX_BRIDGES; i++)

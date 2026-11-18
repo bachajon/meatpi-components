@@ -154,6 +154,10 @@ esp_err_t bm_pump_start_all(void);
 void      bm_pump_stop_all(void);
 esp_err_t bm_pump_stats(const char *bridge_name, void *stats_out);
 
+/** bridge_manager_losses(): @p out is a bridge_loss_t array. */
+esp_err_t bm_pump_losses(const char *bridge_name, bool side_b, void *out,
+                         int cap, int *count);
+
 /** Why a configured, enabled bridge was not built at the last start: a
  *  short sentence (the unregistered endpoint or translator named, or a
  *  refused subscribe), NULL when it runs, is disabled, or is unknown. */

@@ -78,7 +78,10 @@ static TaskHandle_t s_can_pump;
 static StaticTask_t s_can_pump_tcb;                          /* internal: FreeRTOS */
 static StackType_t s_can_pump_stack[3072] EXT_RAM_BSS_ATTR;  /* PSRAM: no flash    */
 static volatile bool s_can_pump_run;
-static uint32_t s_can_ep_drops;
+/* chunks a bridge's full queue did not take, per subscriber slot (zeroed
+   when a bridge takes the slot): each bridge's own share on /api/bridges */
+static uint32_t s_can_rx_drops[BEP_CAN_MAX_SUBS];
+static uint32_t s_can_tx_malformed;     /* chunks that were not whole frames   */
 
 /* ---- TX: a queue of the jack's own, so no bridge pump waits for the bus ------
  *
@@ -264,11 +267,44 @@ esp_err_t bep_can_send(const uint8_t *d, size_t l)
 
     if (l == 0 || off < l)
     {
-        s_can_ep_drops++;
+        s_can_tx_malformed++;
         return ESP_ERR_INVALID_ARG;
     }
 
     return ESP_OK;
+}
+
+/* Until 2026-11-18 these four stood in a log line at best: a client's burst
+   that the bus did not take was lost with every counter of every route at
+   rest. */
+int bep_can_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    uint32_t rx = 0;
+    int n = 0;
+
+    for (int i = 0; i < BEP_CAN_MAX_SUBS; i++)
+    {
+        if (s_can_qs[i] == q)
+        {
+            rx = s_can_rx_drops[i];
+        }
+    }
+
+    const bridge_loss_t all[] =
+    {
+        { "rx_drops", rx },                   /* this bridge's queue was full */
+        { "tx_drops", s_can_tx_drops },       /* the jack's TX queue was full */
+        { "tx_refused", s_can_tx_refused },   /* the controller did not take  */
+        { "tx_malformed", s_can_tx_malformed },
+    };
+
+    while (n < cap && n < (int)(sizeof(all) / sizeof(all[0])))
+    {
+        out[n] = all[n];
+        n++;
+    }
+
+    return n;
 }
 
 static void can_pump_task(void *arg)
@@ -310,7 +346,7 @@ static void can_pump_task(void *arg)
             {
                 if (qs[i] != NULL && xQueueSend(qs[i], &c, 0) != pdTRUE)
                 {
-                    s_can_ep_drops++; /* that bridge's queue is full */
+                    s_can_rx_drops[i]++; /* that bridge's queue is full */
                 }
             }
         }
@@ -367,6 +403,8 @@ esp_err_t bep_can_subscribe(QueueHandle_t q)
     {
         return ESP_ERR_NO_MEM; /* BEP_CAN_MAX_SUBS bridges already on */
     }
+
+    s_can_rx_drops[slot] = 0;
 
     if (s_can_nsubs > 0)
     {

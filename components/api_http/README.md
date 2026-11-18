@@ -51,6 +51,13 @@ Registration order matters once: exact URIs (`/api/settings/submit`,
 `/api/settings`) register before the `/api/settings/*` wildcards: the
 wildcard matcher takes the first hit.
 
+`GET /api/bridges` (2026-11-18): a running bridge carries `losses`, what
+the endpoints at its two ends lost, by the names each endpoint reports
+through bridge_manager (`bridge_manager_losses()`): `{"a":{"rx_drops":0},
+"b":{"rx_drops":0,"tx_drops":0}}`. The handler knows no endpoint: a new
+jack's counters appear without a change here. Reference:
+`components/HTTP_API.md` §6e3 in the firmware repo.
+
 ## Reboot semantics
 
 One shared deferred-reboot path (`api_schedule_reboot`): respond → ~1 s

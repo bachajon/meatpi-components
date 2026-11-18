@@ -104,6 +104,13 @@ esp_err_t cmdline_manager_register(const esp_console_cmd_t *cmd);
  *  bench headroom assertion). Either pointer may be NULL. */
 void cmdline_manager_capacity(size_t *used, size_t *cap);
 
+/** The endpoint face's two loss counters, since boot (2026-11-18: one
+ *  counter that nothing read until then): @p in_drops = input chunks from
+ *  a bridge that found the console's queue full, @p out_drops = chunks of
+ *  a command's output that the bridge's queue did not take in time. Either
+ *  may be NULL. */
+void cmdline_manager_drops(uint32_t *in_drops, uint32_t *out_drops);
+
 /* ---- the endpoint trio (bridges wire transports to these) ------------------ */
 
 /** Attach the ONE subscriber queue receiving RESPONSE chunks

@@ -249,6 +249,17 @@ esp_err_t bridge_manager_stats(const char *bridge_name, bridge_stats_t *out)
     return bm_pump_stats(bridge_name, out);
 }
 
+esp_err_t bridge_manager_losses(const char *bridge_name, bool side_b,
+                                bridge_loss_t *out, int cap, int *count)
+{
+    if (bridge_name == NULL || out == NULL || count == NULL || cap < 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return bm_pump_losses(bridge_name, side_b, out, cap, count);
+}
+
 const char *bridge_manager_reason(const char *bridge_name)
 {
     if (bridge_name == NULL || !s_started)

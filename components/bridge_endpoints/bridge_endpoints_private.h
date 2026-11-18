@@ -31,15 +31,25 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+#include "bridge_manager.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ---- what a jack lost (bridge_endpoint_t.losses) --------------------------- */
+
+/** The two names every jack shares: `rx_drops` and `tx_drops`. Returns the
+ *  entries written (2, or what @p cap allows). */
+int bep_losses_rx_tx(bridge_loss_t *out, int cap, uint32_t rx_drops,
+                     uint32_t tx_drops);
 
 /* ---- usb_obd jack (bridge_endpoints_usb.c): USB port-B UART ---------------- */
 
 esp_err_t bep_usb_send(const uint8_t *d, size_t l);
 esp_err_t bep_usb_subscribe(QueueHandle_t q);
 esp_err_t bep_usb_unsubscribe(QueueHandle_t q);
+int bep_usb_losses(QueueHandle_t q, bridge_loss_t *out, int cap);
 
 /** Install the UART driver + start the RX task (start phase). */
 esp_err_t bep_usb_start(void);
@@ -49,6 +59,7 @@ esp_err_t bep_usb_start(void);
 esp_err_t bep_can_send(const uint8_t *d, size_t l);
 esp_err_t bep_can_subscribe(QueueHandle_t q);
 esp_err_t bep_can_unsubscribe(QueueHandle_t q);
+int bep_can_losses(QueueHandle_t q, bridge_loss_t *out, int cap);
 void bep_can_bind_restart(void);
 
 /** The jack's TX queue and its task (init phase, once). */

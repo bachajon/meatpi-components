@@ -108,6 +108,15 @@ sink queue to the dispatcher (a FreeRTOS QueueSet lets it serve both
 the endpoint face and async lines), which runs the command on its own
 internal stack.
 
+## The endpoint face's drop counters (2026-11-18)
+
+`cmdline_manager_drops(&in_drops, &out_drops)`: input chunks from a bridge
+that found the console's queue (8 chunks) full, and chunks of a command's
+output that the bridge's queue did not take within 50 ms, both since boot.
+One counter that nothing read until then; `/api/bridges` shows the two as
+`losses` (`tx_drops` and `rx_drops`) on the end of the bridge that uses
+the `cli` jack.
+
 ## Settings (`cmdline_manager`, reboot-to-apply)
 
 | Field | Default | Meaning |

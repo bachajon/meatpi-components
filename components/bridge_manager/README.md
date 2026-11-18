@@ -18,6 +18,7 @@ one translator component. No combinatorial code.
 | `bridge_manager_register_endpoint(ep)` | Pre-start only. Registered by thin glue or main: providers (obd_chip, socket_manager) never depend on this component. |
 | `bridge_manager_register_translator(tr)` | Pre-start only; the translator component registers itself in its `_init()` (a legitimate downward edge). `ctx_size ≤ 256`. |
 | `bridge_manager_stats(name, *out)` | Per-bridge chunk/byte counters + send/codec errors. |
+| `bridge_manager_losses(name, side_b, out, cap, &count)` | What the endpoint at one end of a running bridge lost, by name (2026-11-18): the endpoint's optional `losses` hook, asked with the queue that bridge subscribed. `count` 0 = the endpoint reports none. |
 
 ## Data path
 
@@ -80,6 +81,21 @@ one translator component. No combinatorial code.
   2000, 3938 at 3000), because the pump serves both directions. An
   endpoint without the hook is always ready and `send()` takes or refuses
   at once, as before.
+- **What an endpoint lost (`losses`, 2026-11-18)**: an endpoint may give
+  the optional `int (*losses)(QueueHandle_t q, bridge_loss_t *out, int
+  cap)`: its own loss counters as `{name, value}` pairs, at most
+  `BRIDGE_MANAGER_MAX_LOSSES` (12). The bridge's `send_errors` only counts
+  what `send()` refused at the call. What an endpoint takes and loses
+  later (a transmit queue of its own, a codec that throws a message away)
+  and what it reads and cannot hand to the bridge (the bridge's queue was
+  full) stood in the endpoint's own counter, which no route showed: bench
+  2026-11-18, a tx message that CAN over MQTT dropped for its length moved
+  no number on `/api/bridges`. The names are the endpoint's; the jacks of
+  `bridge_endpoints` share `rx_drops` (read, the bridge's queue had no
+  room) and `tx_drops` (taken from a bridge, dropped). `q` is the queue
+  the asking bridge subscribed with, so an endpoint that fans out reports
+  that bridge's share. The hook is called from the web server's task: it
+  reads counters and nothing else.
 
 ## Settings (`"bridge_manager"`, version 2)
 
@@ -186,3 +202,10 @@ running, with `reason` (2026-10-29, `bridge_manager_reason()`) when an
 enabled bridge did not build at the last start: the endpoint or translator
 its row names does not exist on this device, or an endpoint is already used
 by another bridge. The bench: `.\test.ps1 connections` (`CONNECTIONS PASS`).
+Since 2026-11-18 a running bridge also carries `losses`: `{"a":{...},
+"b":{...}}`, what the endpoint at each end lost, by the names it reports
+(`bridge_manager_losses()`); an end whose endpoint reports nothing is left
+out. The bench: the firmware repo's `tools/testbench/can/
+mqtt_can_batch_bench.py`, leg C (a tx message dropped for its length shows
+as `losses.b.tx_oversize` on the `mqtt0` end, and every running bridge
+reports both its ends).

@@ -59,6 +59,29 @@ _Static_assert(sizeof(bridge_chunk_t) == sizeof(ble_chunk_t),
 _Static_assert(sizeof(bridge_chunk_t) == sizeof(websocket_chunk_t),
                "chunk conventions diverged");
 
+/* ---- what a jack lost (bridge_endpoint_t.losses, 2026-11-18) ------------------
+ * Two names every jack here shares: `rx_drops`, chunks the jack read and the
+ * bridge's queue had no room for, and `tx_drops`, chunks a bridge handed it
+ * that it dropped. The `can` and `usb_obd` jacks add their own
+ * (bridge_endpoints_can.c, bridge_endpoints_usb.c). */
+int bep_losses_rx_tx(bridge_loss_t *out, int cap, uint32_t rx_drops,
+                     uint32_t tx_drops)
+{
+    int n = 0;
+
+    if (n < cap)
+    {
+        out[n++] = (bridge_loss_t){ "rx_drops", rx_drops };
+    }
+
+    if (n < cap)
+    {
+        out[n++] = (bridge_loss_t){ "tx_drops", tx_drops };
+    }
+
+    return n;
+}
+
 /* ---- obd_chip ---------------------------------------------------------------- */
 
 static esp_err_t obd_ep_send(const uint8_t *d, size_t l)
@@ -80,6 +103,19 @@ static esp_err_t obd_ep_unsubscribe(QueueHandle_t q)
     return obd_chip_unsubscribe(q);
 }
 
+/* the chip's fan-out keeps a count per subscriber: this bridge's own. What
+   the chip itself lost on its UART is on /api/obd_chip. */
+static int obd_ep_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    if (cap < 1)
+    {
+        return 0;
+    }
+
+    out[0] = (bridge_loss_t){ "rx_drops", obd_chip_dropped(q) };
+    return 1;
+}
+
 /* ---- ble_manager --------------------------------------------------------------- */
 
 static esp_err_t ble_ep_send(const uint8_t *d, size_t l)
@@ -97,6 +133,16 @@ static esp_err_t ble_ep_unsubscribe(QueueHandle_t q)
     return ble_manager_unsubscribe(q);
 }
 
+static int ble_ep_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    uint32_t rx = 0;
+    uint32_t tx = 0;
+
+    (void)q;
+    ble_manager_pipe_drops(&rx, &tx);
+    return bep_losses_rx_tx(out, cap, rx, tx);
+}
+
 /* ---- cmdline_manager (the CLI reachable over any bridged transport) ------------ */
 
 static esp_err_t cli_send(const uint8_t *d, size_t l)
@@ -112,6 +158,19 @@ static esp_err_t cli_subscribe(QueueHandle_t q)
 static esp_err_t cli_unsubscribe(QueueHandle_t q)
 {
     return cmdline_manager_unsubscribe(q);
+}
+
+/* the console's two queues: rx = output a command printed that the bridge's
+   queue did not take, tx = input a bridge handed over that found the
+   console's queue full */
+static int cli_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    uint32_t in = 0;
+    uint32_t outp = 0;
+
+    (void)q;
+    cmdline_manager_drops(&in, &outp);
+    return bep_losses_rx_tx(out, cap, outp, in);
 }
 
 /* ---- socket/WS slots: jacks under their CONFIGURED names ------------------------ *
@@ -135,6 +194,15 @@ static char s_ws_names[WEBSOCKET_MANAGER_MAX_CHANNELS][16];
     static esp_err_t sock##i##_unsub(QueueHandle_t q)                 \
     {                                                                  \
         return socket_manager_unsubscribe(s_sock_names[i], q);        \
+    }                                                                 \
+    static int sock##i##_losses(QueueHandle_t q, bridge_loss_t *out,  \
+                                int cap)                              \
+    {                                                                  \
+        socket_stats_t st = { 0 };                                    \
+                                                                      \
+        (void)q;                                                      \
+        (void)socket_manager_stats(s_sock_names[i], &st);             \
+        return bep_losses_rx_tx(out, cap, st.rx_drops, st.tx_drops);  \
     }
 
 SOCK_EP(0)
@@ -155,6 +223,15 @@ SOCK_EP(3)
     static esp_err_t ws##i##_unsub(QueueHandle_t q)                   \
     {                                                                  \
         return websocket_manager_unsubscribe(s_ws_names[i], q);       \
+    }                                                                 \
+    static int ws##i##_losses(QueueHandle_t q, bridge_loss_t *out,    \
+                              int cap)                                \
+    {                                                                  \
+        websocket_stats_t st = { 0 };                                 \
+                                                                      \
+        (void)q;                                                      \
+        (void)websocket_manager_stats(s_ws_names[i], &st);            \
+        return bep_losses_rx_tx(out, cap, st.rx_drops, st.tx_drops);  \
     }
 
 WS_EP(0)
@@ -167,20 +244,24 @@ WS_EP(5)
 
 static const bridge_endpoint_t SOCK_EPS[SOCKET_MANAGER_MAX_SERVERS] =
 {
-    { s_sock_names[0], sock0_send, sock0_sub, sock0_unsub },
-    { s_sock_names[1], sock1_send, sock1_sub, sock1_unsub },
-    { s_sock_names[2], sock2_send, sock2_sub, sock2_unsub },
-    { s_sock_names[3], sock3_send, sock3_sub, sock3_unsub },
+    { s_sock_names[0], sock0_send, sock0_sub, sock0_unsub,
+      .losses = sock0_losses },
+    { s_sock_names[1], sock1_send, sock1_sub, sock1_unsub,
+      .losses = sock1_losses },
+    { s_sock_names[2], sock2_send, sock2_sub, sock2_unsub,
+      .losses = sock2_losses },
+    { s_sock_names[3], sock3_send, sock3_sub, sock3_unsub,
+      .losses = sock3_losses },
 };
 
 static const bridge_endpoint_t WS_EPS[WEBSOCKET_MANAGER_MAX_CHANNELS] =
 {
-    { s_ws_names[0], ws0_send, ws0_sub, ws0_unsub },
-    { s_ws_names[1], ws1_send, ws1_sub, ws1_unsub },
-    { s_ws_names[2], ws2_send, ws2_sub, ws2_unsub },
-    { s_ws_names[3], ws3_send, ws3_sub, ws3_unsub },
-    { s_ws_names[4], ws4_send, ws4_sub, ws4_unsub },
-    { s_ws_names[5], ws5_send, ws5_sub, ws5_unsub },
+    { s_ws_names[0], ws0_send, ws0_sub, ws0_unsub, .losses = ws0_losses },
+    { s_ws_names[1], ws1_send, ws1_sub, ws1_unsub, .losses = ws1_losses },
+    { s_ws_names[2], ws2_send, ws2_sub, ws2_unsub, .losses = ws2_losses },
+    { s_ws_names[3], ws3_send, ws3_sub, ws3_unsub, .losses = ws3_losses },
+    { s_ws_names[4], ws4_send, ws4_sub, ws4_unsub, .losses = ws4_losses },
+    { s_ws_names[5], ws5_send, ws5_sub, ws5_unsub, .losses = ws5_losses },
 };
 
 /* ---- lifecycle ------------------------------------------------------------------ */
@@ -198,16 +279,20 @@ esp_err_t bridge_endpoints_init(void)
            (each gets a full copy) and serializes TX, the single-consumer
            rule doesn't apply, so TCP + USB passthrough can both be live */
         { "obd", obd_ep_send, obd_ep_subscribe, obd_ep_unsubscribe,
-          .multi_consumer = true },
-        { "ble", ble_ep_send, ble_ep_subscribe, ble_ep_unsubscribe },
+          .multi_consumer = true, .losses = obd_ep_losses },
+        { "ble", ble_ep_send, ble_ep_subscribe, ble_ep_unsubscribe,
+          .losses = ble_ep_losses },
         /* multi_consumer since 2026-07-26: the can pump fans RX chunks
            out to every subscribed bridge (slcan + mqtt_can together);
            TX serializes through can_manager_send. ONE jack-wide ingress
            filter (bep_can_set_filter). */
         { "can", bep_can_send, bep_can_subscribe, bep_can_unsubscribe,
-          .multi_consumer = true, .tx_ready = bep_can_tx_ready },
-        { "cli", cli_send, cli_subscribe, cli_unsubscribe },
-        { "usb_obd", bep_usb_send, bep_usb_subscribe, bep_usb_unsubscribe },
+          .multi_consumer = true, .tx_ready = bep_can_tx_ready,
+          .losses = bep_can_losses },
+        { "cli", cli_send, cli_subscribe, cli_unsubscribe,
+          .losses = cli_losses },
+        { "usb_obd", bep_usb_send, bep_usb_subscribe, bep_usb_unsubscribe,
+          .losses = bep_usb_losses },
     };
 
     log_manager_register(&LOG_DESC);
