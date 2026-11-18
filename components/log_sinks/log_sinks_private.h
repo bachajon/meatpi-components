@@ -86,6 +86,23 @@ void      ls_file_request_flush(void);
 void      ls_file_notify(void);          /* data arrived in the file ring   */
 uint32_t  ls_file_rotations(void);
 
+/* TCP tail half (log_sinks_tcp.c): the listener, the clients and what each
+ * has not taken yet. All of it runs in the network flusher task. */
+esp_err_t ls_tcp_open(uint16_t port);    /* the listener                    */
+void      ls_tcp_reset(void);            /* no client (before the task runs) */
+void      ls_tcp_poll(void);             /* accept, push what waits, drain   */
+bool      ls_tcp_waiting(void);          /* a client has lines waiting: poll
+                                            again within milliseconds       */
+void      ls_tcp_close_all(void);        /* the listener and every client    */
+uint32_t  ls_tcp_clients(void);
+
+/* the tcp ring lives in log_sinks.c next to the others. A batch is popped
+ * without a count, then counted once it is known where it went: `out` when
+ * every client took it (on the wire or waiting for it), `dropped` when a
+ * client that is behind did not get it */
+uint32_t ls_tcp_ring_pop(void *dst, uint32_t budget, uint32_t *lines_out);
+void     ls_tcp_ring_count(uint32_t out, uint32_t dropped);
+
 /* the file ring lives in log_sinks.c next to the others; the writer
  * drains it through these locked accessors */
 uint32_t ls_file_ring_pop_batch(void *dst, uint32_t budget,

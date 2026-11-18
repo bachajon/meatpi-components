@@ -26,7 +26,8 @@
  *        ring-copy only, never block, §9.5) and the network flusher task
  *        (PSRAM stack) serving the TCP tail server, the UDP collector
  *        push and the ws_log channel. The file half (internal-stack
- *        writer) lives in log_sinks_file.c.
+ *        writer) lives in log_sinks_file.c, the TCP tail's listener and
+ *        clients in log_sinks_tcp.c (2026-11-18).
  *
  * Recursion rule: NOTHING on the write-callback or per-batch flush path
  * may ESP_LOG, sink callbacks run inside the log task itself. Lifecycle
@@ -53,8 +54,12 @@
 static const char *TAG = "log_sinks";
 
 #define LS_WS_CHANNEL     "ws_log"
-#define LS_SEND_TIMEOUT_MS 200  /* stalled tail client = dead client      */
 #define LS_RESOLVE_BACKOFF_MS 5000
+
+/* The flusher's lap without a new line: 100 ms, and this while a TCP tail
+ * client has lines waiting for it (it is asked again on every lap). */
+#define LS_NET_IDLE_MS    100
+#define LS_NET_WAITING_MS 5
 
 typedef struct
 {
@@ -77,10 +82,6 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* internal: spinlock
 static volatile bool s_net_up;   /* net engine running (tcp/udp/ws)    */
 static volatile bool s_file_up;  /* file writer running                */
 static volatile bool s_running;
-
-static int s_listen_fd = -1;
-static int s_client_fd[LS_TCP_MAX_CLIENTS];
-static volatile int s_tcp_clients;
 
 static int s_udp_fd = -1;
 static struct sockaddr_storage s_udp_dest;
@@ -122,7 +123,7 @@ static void net_notify(void)
 
 static esp_err_t tcp_sink_write(const char *line, size_t len)
 {
-    if (s_net_up && s_tcp_clients > 0)
+    if (s_net_up && ls_tcp_clients() > 0)
     {
         sink_push(LOG_SINKS_TCP, line, len);
         net_notify();
@@ -205,102 +206,25 @@ uint32_t ls_file_ring_used(void)
     return used;
 }
 
-/* ---- TCP tail server ----------------------------------------------------------- */
+/* ---- the TCP ring, for log_sinks_tcp.c ------------------------------------------ */
 
-static void tcp_client_close(int slot)
+uint32_t ls_tcp_ring_pop(void *dst, uint32_t budget, uint32_t *lines_out)
 {
-    if (s_client_fd[slot] >= 0)
-    {
-        close(s_client_fd[slot]);
-        s_client_fd[slot] = -1;
-        s_tcp_clients--;
-        ESP_LOGD(TAG, "tcp tail client gone (%d left)", s_tcp_clients);
-    }
+    portENTER_CRITICAL(&s_lock);
+
+    uint32_t n = ls_ring_pop_batch(&s_ring[LOG_SINKS_TCP], dst, budget,
+                                   lines_out);
+
+    portEXIT_CRITICAL(&s_lock);
+    return n;
 }
 
-static void tcp_accept_poll(void)
+void ls_tcp_ring_count(uint32_t out, uint32_t dropped)
 {
-    if (s_listen_fd < 0)
-    {
-        return;
-    }
-
-    for (;;)
-    {
-        int fd = accept(s_listen_fd, NULL, NULL);
-
-        if (fd < 0)
-        {
-            return; /* EWOULDBLOCK: nobody waiting */
-        }
-
-        int slot = -1;
-
-        for (int i = 0; i < LS_TCP_MAX_CLIENTS; i++)
-        {
-            if (s_client_fd[i] < 0)
-            {
-                slot = i;
-                break;
-            }
-        }
-
-        if (slot < 0)
-        {
-            close(fd); /* table full: refuse quietly */
-            continue;
-        }
-
-        struct timeval tv = { .tv_usec = LS_SEND_TIMEOUT_MS * 1000 };
-        int one = 1;
-
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
-        s_client_fd[slot] = fd;
-        s_tcp_clients++;
-        ESP_LOGD(TAG, "tcp tail client attached (%d)", s_tcp_clients);
-    }
-}
-
-/** Whole-buffer send under SO_SNDTIMEO; false = dead/stalled client. */
-static bool send_all(int fd, const uint8_t *p, uint32_t n)
-{
-    while (n > 0)
-    {
-        int w = send(fd, p, n, 0);
-
-        if (w <= 0)
-        {
-            return false;
-        }
-
-        p += w;
-        n -= (uint32_t)w;
-    }
-
-    return true;
-}
-
-static void drain_tcp(void)
-{
-    while (s_tcp_clients > 0)
-    {
-        uint32_t n = ring_pop_batch(LOG_SINKS_TCP, s_batch, sizeof(s_batch),
-                                    NULL);
-
-        if (n == 0)
-        {
-            return;
-        }
-
-        for (int i = 0; i < LS_TCP_MAX_CLIENTS; i++)
-        {
-            if (s_client_fd[i] >= 0 && !send_all(s_client_fd[i], s_batch, n))
-            {
-                tcp_client_close(i);
-            }
-        }
-    }
+    portENTER_CRITICAL(&s_lock);
+    s_cnt[LOG_SINKS_TCP].out += out;
+    s_cnt[LOG_SINKS_TCP].dropped += dropped;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 /* ---- UDP collector push ---------------------------------------------------------- */
@@ -431,12 +355,14 @@ static void net_task(void *arg)
 
     while (s_running)
     {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        TickType_t lap = pdMS_TO_TICKS(ls_tcp_waiting() ? LS_NET_WAITING_MS
+                                                        : LS_NET_IDLE_MS);
+
+        ulTaskNotifyTake(pdTRUE, lap > 0 ? lap : 1);
 
         if (cfg->tcp_enabled)
         {
-            tcp_accept_poll();
-            drain_tcp();
+            ls_tcp_poll();
         }
 
         if (cfg->udp_enabled)
@@ -450,16 +376,7 @@ static void net_task(void *arg)
         }
     }
 
-    if (s_listen_fd >= 0)
-    {
-        close(s_listen_fd);
-        s_listen_fd = -1;
-    }
-
-    for (int i = 0; i < LS_TCP_MAX_CLIENTS; i++)
-    {
-        tcp_client_close(i);
-    }
+    ls_tcp_close_all();
 
     if (s_udp_fd >= 0)
     {
@@ -469,39 +386,6 @@ static void net_task(void *arg)
 
     s_net_task = NULL;
     vTaskDelete(NULL);
-}
-
-static esp_err_t tcp_listener_open(uint16_t port)
-{
-    struct sockaddr_in addr =
-    {
-        .sin_family = AF_INET,
-        .sin_addr.s_addr = htonl(INADDR_ANY),
-        .sin_port = htons(port),
-    };
-    int one = 1;
-
-    s_listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-
-    if (s_listen_fd < 0)
-    {
-        return ESP_FAIL;
-    }
-
-    setsockopt(s_listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    if (bind(s_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        listen(s_listen_fd, LS_TCP_MAX_CLIENTS) != 0)
-    {
-        close(s_listen_fd);
-        s_listen_fd = -1;
-        return ESP_FAIL;
-    }
-
-    /* non-blocking accepts: polled from the flusher lap */
-    fcntl(s_listen_fd, F_SETFL,
-          fcntl(s_listen_fd, F_GETFL, 0) | O_NONBLOCK);
-    return ESP_OK;
 }
 
 /* ---- bench/CLI line generator --------------------------------------------------------- */
@@ -549,10 +433,7 @@ esp_err_t log_sinks_start(void)
     ls_ring_init(&s_ring[LOG_SINKS_WS], s_ws_buf, sizeof(s_ws_buf));
     ls_ring_init(&s_ring[LOG_SINKS_FILE], s_file_buf, sizeof(s_file_buf));
 
-    for (int i = 0; i < LS_TCP_MAX_CLIENTS; i++)
-    {
-        s_client_fd[i] = -1;
-    }
+    ls_tcp_reset();
 
     s_running = true;
 
@@ -573,7 +454,7 @@ esp_err_t log_sinks_start(void)
     bool net_wanted = cfg->tcp_enabled || cfg->udp_enabled ||
                       cfg->ws_enabled;
 
-    if (cfg->tcp_enabled && tcp_listener_open(cfg->tcp_port) != ESP_OK)
+    if (cfg->tcp_enabled && ls_tcp_open(cfg->tcp_port) != ESP_OK)
     {
         ESP_LOGE(TAG, "tcp tail listener failed on port %u",
                  (unsigned)cfg->tcp_port);
@@ -647,7 +528,7 @@ esp_err_t log_sinks_stats(log_sinks_id_t id, log_sinks_stats_t *out)
     {
     case LOG_SINKS_TCP:
         out->enabled = cfg->tcp_enabled;
-        out->detail = (uint32_t)s_tcp_clients;
+        out->detail = ls_tcp_clients();
         break;
     case LOG_SINKS_UDP:
         out->enabled = cfg->udp_enabled;

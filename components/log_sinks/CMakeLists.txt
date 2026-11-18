@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "log_sinks.c"
+         "log_sinks_tcp.c"
          "log_sinks_core.c"
          "log_sinks_file.c"
          "log_sinks_settings.c"
@@ -12,6 +13,8 @@ idf_component_register(
     # (websocket_manager), and rotated files on the SD card
     # (external_storage mount-follow). Registers its sinks into
     # log_manager at start; settings gates all default false.
+    # tx_backlog + esp_timer: what a TCP tail client has not taken yet (the
+    # ring, the pool, the push that never blocks) and its stall clock.
     PRIV_REQUIRES log_manager settings_manager websocket_manager
-                  external_storage cmdline_manager lwip
+                  external_storage cmdline_manager lwip tx_backlog esp_timer
 )

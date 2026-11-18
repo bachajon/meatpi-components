@@ -33,7 +33,22 @@ Behavioral notes:
 - `tcp`/`ws` only buffer while a client is connected; `udp`/`file`
   buffer whenever enabled (the file ring absorbs card-absent windows,
   drop-oldest counted).
-- A TCP client that stalls past 200 ms is treated as dead and dropped.
+- **A TCP tail client that is behind (2026-11-18, `log_sinks_tcp.c`).**
+  A client's socket is non-blocking. What it does not take waits in a
+  backlog of its own (64 KB in PSRAM, the `tx_backlog` component, as the
+  TCP servers and the WebSocket channels); a batch of lines that no longer
+  fits is dropped whole for that client alone and counted in `dropped`
+  (one W line when it falls behind, one when it has caught up, with the
+  count); a client that took nothing for 10 s is closed with a W line. A
+  client that keeps up is not held back by one that does not, and neither
+  are the UDP and WebSocket sinks. Until then a send was blocking with a
+  200 ms limit and a send that did not finish closed the client with a D
+  line: with 20 KB unacknowledged the flusher stood in the send (lwIP looks
+  at the limit when an ACK arrives or once a second), the ring ran over,
+  and the other client lost lines with it. The flusher asks the listener
+  every 100 ms and a stalled client every 5 ms, not on every line: both
+  are round trips to the TCP/IP task, and the flusher has the log task's
+  priority.
 - `udp_host` is resolved lazily (5 s retry backoff) and then cached for
   the boot; a collector IP change needs a reboot or DHCP re-lease.
 - The sinks enumerate in `GET /api/logs/status` and toggle via
@@ -50,7 +65,7 @@ Behavioral notes:
 | `log_sinks_init()` | Register the `"log_sinks"` settings + log descriptors. |
 | `log_sinks_start()` | Register the four sinks with log_manager; bring up the gate-enabled engines. After `websocket_manager_start()` + `external_storage_start()`. |
 | `log_sinks_stop()` | Stop the network flusher (file writer parks on unmount). |
-| `log_sinks_stats(id, *out)` | Per-sink counters: `in` / `out` / `dropped` / `buffered` / `detail` (conservation: `in == out + dropped + buffered` once quiesced). |
+| `log_sinks_stats(id, *out)` | Per-sink counters: `in` / `out` / `dropped` / `buffered` / `detail` (conservation: `in == out + dropped + buffered` once quiesced). For `tcp`, `out` = lines every connected client took (on the wire or waiting in its backlog), `dropped` = ring evictions plus the lines a client that was behind did not get. |
 | `log_sinks_file_flush()` | Event-driven file flush now (§11-sanctioned; CLI `logsinks flush`). |
 
 ## CLI (`logsinks`, gated by the `cli` setting)
@@ -64,7 +79,8 @@ Behavioral notes:
 
 ## Dependencies
 
-`log_manager` (sink registration), `settings_manager`,
+`tx_backlog` and `esp_timer` (a tail client's backlog and its stall
+clock), `log_manager` (sink registration), `settings_manager`,
 `websocket_manager` (the `ws_log` channel, added to its defaults in
 settings v2 with a v1→v2 migration), `external_storage` (SD
 mount-follow), `cmdline_manager`, `lwip` (own TCP/UDP sockets: the
@@ -97,6 +113,7 @@ Boot order: `log_sinks_init()` after `settings_manager_init()`;
 |---|---|---|
 | Flash | code + rodata | 5.2 KiB |
 | PSRAM `.bss` | rings (8+4+8+16 KiB) + 2 KiB batch buffer + net-task stack (6 KiB) | **45,056 B** |
+| PSRAM `.bss` | the TCP tail's two client backlogs (64 KiB each) and its batch buffer (2 KiB), since 2026-11-18 | 133,120 B (the arrays' sizes) |
 | Internal static | TCBs, spinlock, flags | **1,041 B** |
 | Internal heap | file-writer stack (6 KiB) + 2 KiB DMA drain buffer, allocated ONLY when `file_enabled` | 8.2 KiB when on; 0 otherwise |
 | Flash writes | file sink only, batched (≥ `file_flush_s` or ring high-water), SD card only: internal NOR untouched | - |
@@ -117,3 +134,11 @@ Boot order: `log_sinks_init()` after `settings_manager_init()`;
   rotation + retention on the card, counter identity
   `in == out + dropped` per sink, restore + faults clean, zero-error
   budget.
+- **The TCP tail and a client that stalls
+  (`tools/testbench/system/log_tail_stall_bench.py`, on the PC with its
+  client on rpi001; `.\test.ps1 logtail`, `LOG TAIL STALL PASS`):** ACKs
+  late by 1.5 s (no close, no line lost), by 6 s (the client stays, the
+  loss counted and logged), a client that keeps up beside one that is
+  behind, a client that takes nothing for 10 s closed with its W line.
+  No host test: the ring, the pool and the stall clock are `tx_backlog`'s
+  and tested there.

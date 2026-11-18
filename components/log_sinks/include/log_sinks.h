@@ -70,7 +70,9 @@ typedef struct
     bool     enabled;   /* settings gate (engine configured at boot)     */
     uint32_t in;        /* lines accepted into the sink's ring           */
     uint32_t out;       /* lines handed to the wire/file                 */
-    uint32_t dropped;   /* ring evictions + laggard-client skips         */
+    uint32_t dropped;   /* ring evictions; tcp: also the lines a client
+                           that is behind by more than its backlog did
+                           not get (2026-11-18)                          */
     uint32_t buffered;  /* lines currently queued in the ring            */
     uint32_t detail;    /* tcp: connected clients; udp: send failures;
                            ws: connected clients; file: rotations        */
