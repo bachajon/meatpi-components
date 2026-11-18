@@ -1,5 +1,14 @@
 # wifi_manager: hardware-in-the-loop pytest suite
 
+> **Do not run this suite on the bench as it is (2026-11-18).** It was written for
+> the hotspot rig of July 2026. Since 2026-10-02 the bench's access point is the P4
+> board, and the suite's fixtures (`tools/testbench/lib/bench.py` in the firmware
+> repo) delete every `wican-*` NetworkManager profile on the Pi except the two old
+> hotspots, `wican-bench-usb` (the DUT's only network) among them, start hotspots on
+> the Pi's parked radios and switch them back to autoconnect at the end. The firmware
+> repo's `.\test.ps1 hil` refuses to run until the suite has been reworked for the P4
+> rig. The text below describes the suite as it was.
+
 Automated RF scenarios against the bench Pi's access point
 (`components/TESTBENCH.md`). The firmware app here exposes a serial command
 console (`SET {json}` / `RESTART` / `STATUS` / `SCAN`) so pytest can persist
