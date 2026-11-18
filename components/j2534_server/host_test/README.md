@@ -1,7 +1,7 @@
 # J2534 host tests
 
 From the firmware checkout: `.\test.ps1 host j2534_server`.
-Expected: `41 Tests 0 Failures 0 Ignored`.
+Expected: `47 Tests 0 Failures 0 Ignored`.
 
 The suite covers header/message codecs and bounds, filter matching, stream
 framing, ACK vectors, TCP exposure, baud checks, ISO15765 layouts and
@@ -18,6 +18,18 @@ the id alone acknowledged without effect, the answer a `GET_CONFIG` makes
 (the two it holds, the rest left out, an answer that does not fit), and
 the byte-exact bodies of the wire protocol's section 12. The bus half is
 the firmware's `.\test.ps1 j2534fc`.
+
+What a session's wire version decides (`j2534_proto_session.c`,
+`test_session.c`, six cases, 2026-11-18): the return codes against SAE
+J2534-1's numbers (on the header of the day before this case fails at its
+first line: `ERR_DEVICE_IN_USE` was 0x1A), the version a `HELLO` asks for
+(no payload, a short one, 0, 1, 2, a later one), every status in the
+numbers of version 1 and of version 2 with no two sharing a version 1
+number, the refusal of a second tester as each kind of client is
+answered, the `EVENT RX_LOST` frame of the wire protocol's section 13
+byte for byte, and what a loss counter gained since the last look (told
+once, a counter that started again). The bus half is the firmware's
+`.\test.ps1 j2534session`.
 
 The production READ_VBATT helper runs against a fake battery owner: voltage
 conversion and rounding, a valid zero, refusal without an open device, no

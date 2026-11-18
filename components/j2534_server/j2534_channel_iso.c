@@ -27,7 +27,10 @@
  *        the SAE J2534-1 message layout [4-byte id][payload] both ways,
  *        single frames without a session (functional addressing), and the
  *        TxDone and START_OF_MESSAGE indications. Every function runs with
- *        the channel lock held by j2534_channel.c.
+ *        the channel lock held by j2534_channel.c; j2534_iso_write alone
+ *        gives it up while the tester's own message is on the bus
+ *        (2026-11-18, j2534_channel_private.h says why and what keeps
+ *        that safe).
  *
  * 2026-10-19: a udsoncan tester's `10 03` reached the bus as the 6-byte
  * PDU `00 00 07 E0 10 03`, unpadded, because the device took the bare
@@ -289,8 +292,10 @@ static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
 
     if (next == c->ind_tail)
     {
-        /* the pump is behind: the oldest indication goes */
+        /* the pump is behind: the oldest indication goes, and the tester
+           is told one is missing (j2534_ch_take_lost) */
         c->ind_tail = (uint8_t)((c->ind_tail + 1) % J2534_CH_MAX_IND);
+        c->lost_pending++;
     }
 
     c->ind[c->ind_head].rx_status = rx_status;
@@ -334,7 +339,7 @@ static uint32_t send_timeout_ms(size_t len)
 }
 
 uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
-                         bool indicate_done)
+                         bool periodic)
 {
     uint32_t id;
     const uint8_t *pl;
@@ -375,6 +380,44 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
         return J2534_ERR_FAILED;
     }
 
+    j2534_iso_session_t *ss = (s >= 0) ? &c->sess[s] : NULL;
+
+    if (ss != NULL)
+    {
+        /* the tester's own write to this ECU is on the bus (only a periodic
+           message meets this: that write gave the lock up, see below). No
+           periodic message into a transfer to the same address, and nobody
+           reopens the session under it: not now. */
+        if (ss->tx_busy)
+        {
+            return J2534_ERR_BUFFER_FULL;
+        }
+
+        if (!pad_rebind(c, ss, pad))
+        {
+            return J2534_ERR_FAILED;
+        }
+    }
+
+    /* The tester's own write gives the channel lock up from here until the
+       message is on the bus: the wait for the gate (up to 3 s) and a
+       multi-frame transfer at the ECU's pace (up to 5.5 s). The RX pump
+       and the periodic messages take the lock meanwhile. What they may not
+       touch is this session (tx_busy); the channel itself stays, because
+       the task that closes channels is the one running here. */
+    can_isotp_session_t tp = (ss != NULL) ? ss->isotp : NULL;
+    bool yield_lock = !periodic;
+
+    if (yield_lock)
+    {
+        if (ss != NULL)
+        {
+            ss->tx_busy = true;
+        }
+
+        xSemaphoreGive(j2534_ch_lock);
+    }
+
     /* an ESP-side requester on the shared bus: hold the conversation gate
        from the request until the reply is delivered (or the hold expires)
        so the MIC chip does not interleave; fail-open (obd_gate.h) */
@@ -382,15 +425,9 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     esp_err_t err;
 
-    if (s >= 0)
+    if (ss != NULL)
     {
-        if (!pad_rebind(c, &c->sess[s], pad))
-        {
-            obd_gate_release(c);
-            return J2534_ERR_FAILED;
-        }
-
-        err = can_isotp()->send(c->sess[s].isotp, pl, n, send_timeout_ms(n));
+        err = can_isotp()->send(tp, pl, n, send_timeout_ms(n));
     }
     else
     {
@@ -399,6 +436,16 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
         uint8_t dlc = j2534_iso_single_frame(pl, n, pad, fr);
 
         err = can_manager_send(id, ext, false, fr, dlc);
+    }
+
+    if (yield_lock)
+    {
+        xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+
+        if (ss != NULL)
+        {
+            ss->tx_busy = false;
+        }
     }
 
     if (err != ESP_OK)
@@ -417,7 +464,7 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     j2534_ch_note_reflash(pl[0]); /* forwarded: counted on the status, never refused */
 
-    if (indicate_done)
+    if (!periodic)
     {
         indicate(c, J2534_RX_TX_MSG_TYPE | J2534_RX_TX_INDICATION, id, ext);
     }

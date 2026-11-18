@@ -13,7 +13,70 @@ receives bus traffic as unsolicited `RX_MSG` frames. One framed wire
 protocol runs over three transports: the TCP listener in this component
 (port 6809), USB CDC-ACM (`usb_cdc_device`) and BLE (`ble_j2534`, since
 2026-09-21). Exactly one tester at a time across all of them; a second one
-is answered `ERR_DEVICE_IN_USE`.
+is answered `ERR_DEVICE_IN_USE` (over TCP it is not answered while the
+first session lives, and is served when that one ends).
+
+**A session when something goes wrong beside it (2026-11-18).** Four
+defects found by reading the code, each shown on the bench first (the
+firmware checkout's `.\test.ps1 j2534session`, `testing/j2534session.md`):
+
+- *The PC vanishes.* A TCP tester that disappeared without closing (a
+  pulled cable, a laptop asleep) kept the one session until the unit
+  restarted: the send blocked for good and nothing asked whether the peer
+  was still there. The connection now carries TCP keepalive (the first
+  probe after 10 s of silence, one every 5 s, given up after 3) and a
+  send timeout of 5 s. An idle session whose peer is gone ends after
+  about 25 s, one the device is sending to after about 6 s
+  (`tx_timeouts` on `/api/j2534`), and the next connection is served. A
+  second connection while a session is ALIVE is still not served: a
+  second tool must never interrupt a flash in progress. A live tester
+  answers the probes in its TCP stack, so a session may be silent for
+  as long as it likes.
+- *Messages are lost.* A channel's receive queue holds 256 bus frames.
+  When the tester's link is slower than the bus, or the tester stops
+  reading, it runs over and drops the oldest frame for every new one.
+  The tester was never told. The loss is counted now (`rx_lost`), logged
+  at most once a second, and a tester that speaks wire version 2 is sent
+  an `EVENT RX_LOST` with the count in front of the first message behind
+  the gap (`j2534_channel_lost.c`, the pump's `tell_lost`). That is where
+  SAE J2534-1 has the application told: the Windows driver (1.10) returns
+  `ERR_BUFFER_OVERFLOW` from the `PassThruReadMsgs` that hands that
+  message over.
+- *A long ISO15765 write held everything up.* One mutex guards the
+  channel records, and the write held it from the first frame to the
+  last, seconds at an ECU's STmin. The RX pump waited on it: nothing
+  received on any channel reached the tester meanwhile, and what did not
+  fit a queue was lost. The tester's own ISO15765 write gives the
+  lock up while the message is on the bus (`j2534_iso_write`); the
+  session it uses is marked `tx_busy` so nobody reopens it under the
+  transfer. A TP2.0 and a J1850 write still hold the lock to their end
+  (the TP2.0 write reads the channel's queue itself).
+- *Periodic messages ran in the esp_timer task.* The timer's callback
+  sent the message, and a send waits: for that lock, for room in the CAN
+  driver, for the conversation gate. All that time no other software
+  timer of the unit fired, and afterwards the timer fired once for every
+  period it had missed, so the copies went out in one burst. The
+  callback now only marks the message due; a task of its own
+  (`j2534_per`, `j2534_server_periodic.c`) sends it. A message that is
+  still waiting when its next period comes goes once
+  (`periodic_skipped` counts those periods). `DISCONNECT` now stops the
+  periodic messages of its channel; they stayed in the table before and
+  went out again on the next channel that took the slot.
+
+**Return codes: SAE J2534-1's numbers (2026-11-18).** Seven codes were
+numbered wrong since the first version, here and in the Windows driver
+alike: `ERR_MSG_PROTOCOL_ID` to `ERR_INVALID_DEVICE_ID` one too low (0x14
+to 0x19, the standard has 0x15 to 0x1A) and `ERR_DEVICE_IN_USE` 0x1A (the
+standard: 0x0E). A standard application read "the bus runs at another bit
+rate" as `ERR_NOT_UNIQUE`. `j2534_proto.h` has the standard's numbers
+now. What goes on the wire follows the session (`j2534_proto_session.c`,
+pure): a client that asks for wire version 2 in its `HELLO` gets the
+standard's numbers and the `EVENT` frames; every other client (wire
+version 1: drivers up to 1.9, the benches, a phone application) gets the
+numbers it was written against and no `EVENT`, byte for byte as before.
+Driver 1.10 asks for version 2 and, on a firmware that answers 1, turns
+the old numbers into the standard's itself, so its application gets the
+right ones with any firmware. `J2534_WIRE_PROTOCOL.md` sections 5 and 13.
 
 `READ_VBATT` returns the battery monitor's latest calibrated, averaged voltage,
 rounded to millivolts, without a CAN channel or bus transaction. OPEN is required.
@@ -140,13 +203,16 @@ Layout (each file under the 700-line cap):
 | File | Role |
 |---|---|
 | `include/j2534_proto.h`, `j2534_proto.c` | PURE codec + constants: header/message encode/decode, filter match, status names, the transport-agnostic framer (`j2534_frame_read`), `j2534_ack_encode`, the TCP gate predicate. Host-tested |
-| `j2534_server.c` | core: lifecycle, request dispatch (`j2534_srv_handle_frame`), periodic messages, status, the Exclusive-bus hold |
-| `j2534_server_pump.c` | the RX pump (the `j2534_rx` task, its batch and scratch buffers). Out of the core on 2026-11-13: the core had grown to 743 lines, past the cap this table states; the code moved unchanged |
+| `j2534_proto_session.c` | PURE (2026-11-18): what a session's wire version decides: the version a `HELLO` asks for, a status in the numbers of that version, the `EVENT` frame, what a loss counter gained. Host-tested |
+| `j2534_server.c` | core: lifecycle, request dispatch (`j2534_srv_handle_frame`), status, the Exclusive-bus hold |
+| `j2534_server_periodic.c` | periodic messages (2026-11-18, out of the core): the table, one esp_timer per message that only marks it due, the `j2534_per` task that sends it |
+| `j2534_server_pump.c` | the RX pump (the `j2534_rx` task, its batch and scratch buffers). Out of the core on 2026-11-13: the core had grown to 743 lines, past the cap this table states. Since 2026-11-18 it tells the tester what a channel lost |
 | `j2534_server_voltage.c` | READ_VBATT: the battery owner and checked millivolt conversion; host-tested |
-| `j2534_server_transport.c` | the `j2534_transport_t` seam: session lock, send lock, coalesced frame writes, `j2534_server_serve_transport()`, the TCP listener + `allow_lan` gate, the legacy serial vtable adapter |
+| `j2534_server_transport.c` | the `j2534_transport_t` seam: session lock, send lock, the session's wire version, coalesced frame writes, `j2534_server_serve_transport()`, the TCP listener (keepalive, send timeout) + `allow_lan` gate, the legacy serial vtable adapter |
 | `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the bus-bitrate rule, the `reflash_seen` count (the content gate went 2026-10-27) |
 | `j2534_channel_filter.c` | the filter table: adding a PASS, BLOCK or FLOW_CONTROL filter, stopping one, clearing them, and the PASS/BLOCK verdict the receive paths ask for. Out of `j2534_channel.c` on 2026-11-18: it had grown to 801 lines, past the cap this table states; the code moved unchanged |
-| `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications |
+| `j2534_channel_lost.c` | what a channel lost on the way in (2026-11-18): its bus queue's drop count and the indications it had no room for, taken before a message is handed over |
+| `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications; the tester's write gives the channel lock up while it is on the bus |
 | `j2534_iso_cfg.c/.h` | PURE: the `SET_CONFIG` / `GET_CONFIG` lists of an ISO15765 channel (`ISO15765_BS`, `ISO15765_STMIN`): the ranges, a list taken whole or not at all, the answer a GET makes, the values a channel opens with. Host-tested |
 | `j2534_channel_legacy.c` | the J1850 VPW side (2026-10-19): the VPW init, header-cached WRITE through `obd_chip` (short payload as one frame, longer through `VTFullyRequestCk`), reply-line parsing with `7F xx 78` ridden out, a small PSRAM RX ring the pump drains; pure chip-command helpers live in `j2534_proto.c` |
 | `j2534_server_settings.c` / `_http.c` / `_cli.c` | descriptor, `/api/j2534`, the `j2534` command |
@@ -207,14 +273,14 @@ frames in one `PassThruWriteMsgs` 17 reached the bus before the call ended
 | What | Size |
 |---|---|
 | `s_req_payload` (request payload), `s_rx_wire`, `s_tx_frame` (one whole frame) | 4384 + 4160 + 4164 B |
-| `j2534_msg_t` scratch: RX pump 1, handler 4, periodic slots 4 (each ~4.2 KB) | ~38 KB |
+| `j2534_msg_t` scratch: RX pump 1, handler 4, periodic slots 4 and the one a START_PERIODIC is looked at in (each ~4.2 KB) | ~42 KB |
 | `s_pdu` (the ISO-TP reassembly scratch of the RX pump) | 4128 B |
 | channel records `j2534_ch_tbl` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
 | J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
 | ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (256 frames since 2026-11-17, 4 KB of PSRAM each: what the CAN node releases at once after a flash write; 32 before) | per open session |
 | a TP 2.0 channel while it is open: its state and, for each of the 4 connections, a reassembly buffer and a delivery buffer of 4092 B; taken from the heap at CONNECT, freed at DISCONNECT (not a PSRAM static yet: an open item against the standard) | ~33 KB heap |
-| tasks `j2534` (TCP listener) + `j2534_rx` (RX pump): 4 KB stacks each | 8 KB (+ 2 TCBs internal) |
-| mutexes (send, session, channels) | internal, ~270 B |
+| tasks `j2534` (TCP listener) + `j2534_rx` (RX pump) + `j2534_per` (periodic messages, since 2026-11-18): 4 KB stacks each | 12 KB (+ 3 TCBs internal) |
+| mutexes (send, session, channels, the periodic table) | internal, ~360 B |
 | READ_VBATT helper | measured compiler frame: 64 B; no heap or mutable static storage |
 
 **Never put a `j2534_msg_t` on a task stack** (three of them overflowed a
@@ -225,11 +291,17 @@ this component.
 
 `GET /api/j2534` (status incl. `transport`), `POST /api/j2534
 {"exclusive":bool}`; `j2534` prints the same. Documented in
-`components/HTTP_API.md` 6e13 and `cmdline_manager/README.md`.
+`components/HTTP_API.md` 6e13 and `cmdline_manager/README.md`. Since
+2026-11-18 the status carries four more fields, each loss with a name:
+`rx_lost` (received messages a channel's queue dropped before the tester
+got them), `tx_timeouts` (TCP sends the tester took nothing of for 5 s;
+each ended a session), `periodic_skipped` (periods of a periodic message
+that passed while its last copy was still waiting to go) and
+`wire_version` (the attached tester's, 1 or 2; 0 with none attached).
 
 ## Testing
 
-- Host: `host_test/` (41 Unity cases: codec round trips and bounds,
+- Host: `host_test/` (47 Unity cases: codec round trips and bounds,
   filter match, status names, the framer with partial / delayed /
   dropped / malformed / discarded input, the ACK vectors of
   `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate, the
@@ -244,7 +316,23 @@ this component.
   table, and the ISO15765 channel's lists: the two codings of the
   separation time, a list taken whole or refused whole, what is passed
   over, the answer a GET makes, and the byte-exact example of the wire
-  protocol's section 12).
+  protocol's section 12; since 2026-11-18 the session's wire version in
+  `test_session.c`: the return codes against SAE J2534-1's numbers (the
+  case that failed on the header of the day before), the version a
+  `HELLO` asks for, every status in both versions' numbers, the refusal
+  of a second tester as each kind of client gets it, the `EVENT RX_LOST`
+  vector of the wire protocol's section 13, the loss count).
+- A session when something goes wrong beside it: `.\test.ps1
+  j2534session` in the firmware checkout
+  (`tools/testbench/usb/j2534_session_bench.py` -> `J2534 SESSION PASS`):
+  a second connection while a session is alive, the return codes by wire
+  version, a 2 s ISO15765 write with two periodic messages and 500 frames
+  arriving on a second channel, a periodic message that must end with
+  its channel, a client that stops reading while 2400
+  frames arrive and is then told what is missing and where, a session
+  silent for 32 s, a peer whose packets are dropped (idle, and with the
+  device sending), and the driver DLL against fake devices of both wire
+  versions and against the unit.
 - ISO 15765 flow control: `.\test.ps1 j2534fc` in the firmware checkout
   (`tools/testbench/usb/j2534_flow_control_bench.py` -> `J2534 FLOW
   CONTROL PASS`): ECUs that follow ISO 15765-2, played by a PCAN, every

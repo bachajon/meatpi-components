@@ -376,7 +376,9 @@ bool j2534_channel_active(int slot)
 
 #define J2534_CAN_ROOM_WAIT_MS 100 /* a raw frame's wait for driver room */
 
-static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
+/* @p periodic: a periodic message, sent from the periodic task and without
+   a TxDone indication; else the tester's own write, from the session's task */
+static uint32_t write_common(int slot, const j2534_msg_t *msg, bool periodic)
 {
     if (slot < 0 || slot >= J2534_MAX_CHANNELS || !j2534_ch_tbl[slot].in_use)
     {
@@ -385,10 +387,15 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
 
     j2534_channel_t *c = &j2534_ch_tbl[slot];
     uint32_t st = J2534_STATUS_NOERROR;
+    bool indicate = !periodic;
 
     xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
 
-    if (c->protocol == J2534_PROT_CAN)
+    if (!c->in_use)
+    {
+        st = J2534_ERR_INVALID_CHANNEL_ID; /* closed while this waited */
+    }
+    else if (c->protocol == J2534_PROT_CAN)
     {
         /* raw CAN: whatever the tool sends goes out; no content gate
            (2026-10-27, see j2534_ch_note_reflash) */
@@ -428,7 +435,9 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
     }
     else if (c->protocol == J2534_PROT_ISO15765)
     {
-        st = j2534_iso_write(c, msg, indicate);
+        /* gives the lock up while the tester's own message is on the bus
+           and has it again when it returns (j2534_channel_private.h) */
+        st = j2534_iso_write(c, msg, periodic);
     }
     else if (c->protocol == J2534_PROT_TP2_0)
     {
@@ -449,7 +458,7 @@ static uint32_t write_common(int slot, const j2534_msg_t *msg, bool indicate)
 
 uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg)
 {
-    return write_common(slot, msg, true);
+    return write_common(slot, msg, false);
 }
 
 uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
@@ -458,21 +467,32 @@ uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
     if (slot >= 0 && slot < J2534_MAX_CHANNELS && j2534_ch_tbl[slot].in_use &&
         j2534_ch_tbl[slot].protocol == J2534_PROT_TP2_0)
     {
-        uint32_t st;
+        uint32_t st = J2534_ERR_INVALID_CHANNEL_ID;
 
         xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
-        st = j2534_tp20_write_periodic(&j2534_ch_tbl[slot], msg, tick);
+
+        if (j2534_ch_tbl[slot].in_use &&
+            j2534_ch_tbl[slot].protocol == J2534_PROT_TP2_0)
+        {
+            st = j2534_tp20_write_periodic(&j2534_ch_tbl[slot], msg, tick);
+        }
+
         xSemaphoreGive(j2534_ch_lock);
         return st;
     }
 
-    return write_common(slot, msg, false);
+    return write_common(slot, msg, true);
 }
 
 /* ---- rx poll ---------------------------------------------------------- */
 
-bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
+bool j2534_channel_poll_rx(int slot, j2534_msg_t *out, uint32_t *lost)
 {
+    if (lost != NULL)
+    {
+        *lost = 0;
+    }
+
     if (slot < 0 || slot >= J2534_MAX_CHANNELS)
     {
         return false;
@@ -486,6 +506,18 @@ bool j2534_channel_poll_rx(int slot, j2534_msg_t *out)
 
     bool got = false;
     xSemaphoreTake(j2534_ch_lock, portMAX_DELAY);
+
+    if (!c->in_use)
+    {
+        xSemaphoreGive(j2534_ch_lock);
+        return false; /* closed while this waited */
+    }
+
+    /* before a message is taken: what is lost is missing in front of it */
+    if (lost != NULL)
+    {
+        *lost = j2534_ch_take_lost(c);
+    }
 
     if (c->protocol == J2534_PROT_CAN && c->can_q != NULL)
     {

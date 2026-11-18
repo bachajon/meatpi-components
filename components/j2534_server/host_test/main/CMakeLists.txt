@@ -3,11 +3,14 @@
 # v1 -> v2 drops allow_reflash; cJSON via idf_component.yml).
 # 2026-11-17: the ISO15765 channel's SET_CONFIG / GET_CONFIG lists
 # (j2534_iso_cfg.c, pure).
+# 2026-11-18: what a session's wire version decides (j2534_proto_session.c,
+# pure): the status numbers, the EVENT frame, the loss count.
 set(comp_dir "${CMAKE_CURRENT_LIST_DIR}/../..")
 
 idf_component_register(
-    SRCS "test_main.c" "test_voltage.c" "test_iso_cfg.c"
+    SRCS "test_main.c" "test_voltage.c" "test_iso_cfg.c" "test_session.c"
          "${comp_dir}/j2534_proto.c"
+         "${comp_dir}/j2534_proto_session.c"
          "${comp_dir}/j2534_iso_cfg.c"
          "${comp_dir}/j2534_server_migrate.c"
          "${comp_dir}/j2534_server_voltage.c"

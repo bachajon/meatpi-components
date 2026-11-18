@@ -22,9 +22,10 @@
 
 /**
  * @file j2534_server.c
- * @brief J2534 PassThru server core: lifecycle, the session/channel state
- *        machine (request dispatch) and periodic messages. The RX pump
- *        that pushes RX_MSG frames is j2534_server_pump.c (2026-11-13).
+ * @brief J2534 PassThru server core: lifecycle and the session/channel
+ *        state machine (request dispatch). The RX pump that pushes RX_MSG
+ *        frames is j2534_server_pump.c (2026-11-13), the periodic messages
+ *        are j2534_server_periodic.c (2026-11-18).
  *        Transport-agnostic: every frame comes
  *        in and goes out through j2534_server_transport.c (TCP, CDC-ACM
  *        serial, BLE). Channels: j2534_channel (CAN via can_manager,
@@ -37,7 +38,6 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -57,21 +57,6 @@ static struct {
     bool device_open;
     bool ch_used[J2534_MAX_CHANNELS];
 } s_session;
-
-/* periodic messages (esp_timer -> j2534_channel_write) */
-#define J2534_MAX_PERIODIC 4
-typedef struct {
-    bool                in_use;
-    uint32_t            id;
-    int                 slot;      /* channel slot */
-    uint32_t            tick;      /* firings so far (0 = the one at START) */
-    esp_timer_handle_t  timer;
-    j2534_msg_t         msg;
-} periodic_t;
-/* PSRAM: each slot embeds a 4 KB j2534_msg_t - must not sit in internal
- * BSS (starves WiFi; §2 memory budget). */
-EXT_RAM_BSS_ATTR static periodic_t s_periodic[J2534_MAX_PERIODIC];
-static uint32_t s_next_periodic_id = 1;
 
 /* big scratch buffers - PSRAM (single tester, one task each owns them).
  * j2534_msg_t is ~4 KB; NEVER put one on a task stack (the listener/RX
@@ -162,6 +147,21 @@ void j2534_srv_count_reflash_seen(void)
     s_status.reflash_seen++;
 }
 
+void j2534_srv_count_tx_timeout(void)
+{
+    s_status.tx_timeouts++;
+}
+
+void j2534_srv_count_rx_lost(uint32_t n)
+{
+    s_status.rx_lost += n;
+}
+
+void j2534_srv_count_periodic_skipped(void)
+{
+    s_status.periodic_skipped++;
+}
+
 static uint32_t rd_u32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -174,32 +174,6 @@ static void wr_u32(uint8_t *p, uint32_t v)
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
-}
-
-/* ---- periodic messages (esp_timer -> channel write) ------------------- */
-
-static void periodic_cb(void *arg)
-{
-    periodic_t *pm = arg;
-
-    /* a periodic message raises no TxDone indication (SAE J2534-1) */
-    if (pm->in_use && j2534_channel_active(pm->slot))
-    {
-        (void)j2534_channel_write_periodic(pm->slot, &pm->msg, ++pm->tick);
-    }
-}
-
-static void periodic_clear_all(void)
-{
-    for (int i = 0; i < J2534_MAX_PERIODIC; i++)
-    {
-        if (s_periodic[i].in_use)
-        {
-            esp_timer_stop(s_periodic[i].timer);
-            esp_timer_delete(s_periodic[i].timer);
-            s_periodic[i].in_use = false;
-        }
-    }
 }
 
 /* ---- request dispatch ------------------------------------------------- */
@@ -347,101 +321,6 @@ static void handle_start_filter(const j2534_transport_t *t,
     ACK(st, st == J2534_STATUS_NOERROR ? &fid : NULL);
 }
 
-static void handle_start_periodic(const j2534_transport_t *t,
-                                  const j2534_hdr_t *h, const uint8_t *payload)
-{
-    int slot = (int)h->channel - 1;
-
-    /* payload: interval_ms u32, then one PASSTHRU_MSG */
-    if (h->length < 4 + 24 || !j2534_channel_active(slot) ||
-        !j2534_msg_decode(payload + 4, h->length - 4, &s_h_wmsg))
-    {
-        ACK(J2534_ERR_INVALID_MSG, NULL);
-        return;
-    }
-
-    int pi = -1;
-
-    for (int i = 0; i < J2534_MAX_PERIODIC; i++)
-    {
-        if (!s_periodic[i].in_use) { pi = i; break; }
-    }
-
-    if (pi < 0)
-    {
-        ACK(J2534_ERR_FAILED, NULL);
-        return;
-    }
-
-    uint32_t interval = rd_u32(payload);
-
-    if (interval < 5) interval = 5;
-
-    periodic_t *pm = &s_periodic[pi];
-
-    pm->slot = slot;
-    pm->msg = s_h_wmsg;
-    pm->id = s_next_periodic_id++;
-    pm->tick = 0;
-
-    esp_timer_create_args_t ta = { .callback = periodic_cb, .arg = pm,
-                                   .name = "j2534_per" };
-
-    if (esp_timer_create(&ta, &pm->timer) != ESP_OK)
-    {
-        ACK(J2534_ERR_FAILED, NULL);
-        return;
-    }
-
-    /* TP2_0_BROADCAST_MSG, the re-triggered broadcast (SAE J2534-2
-     * 19.3.2.3): the five telegrams go out now, from this task and before
-     * the timer runs, then one telegram per period on the timer. A message
-     * the channel refuses starts nothing. */
-    if ((pm->msg.tx_flags & J2534_TX_TP2_0_BROADCAST) != 0 &&
-        j2534_channel_is_tp20(slot))
-    {
-        uint32_t st = j2534_channel_write_periodic(slot, &pm->msg, 0);
-
-        if (st != J2534_STATUS_NOERROR)
-        {
-            esp_timer_delete(pm->timer);
-            ACK(st, NULL);
-            return;
-        }
-    }
-
-    if (esp_timer_start_periodic(pm->timer, (uint64_t)interval * 1000) != ESP_OK)
-    {
-        esp_timer_delete(pm->timer);
-        ACK(J2534_ERR_FAILED, NULL);
-        return;
-    }
-
-    pm->in_use = true;
-    ACK(J2534_STATUS_NOERROR, &pm->id);
-}
-
-static void handle_stop_periodic(const j2534_transport_t *t,
-                                 const j2534_hdr_t *h, const uint8_t *payload)
-{
-    uint32_t pid = (h->length >= 4) ? rd_u32(payload) : 0;
-    uint32_t st = J2534_ERR_INVALID_MSG;
-
-    for (int i = 0; i < J2534_MAX_PERIODIC; i++)
-    {
-        if (s_periodic[i].in_use && s_periodic[i].id == pid)
-        {
-            esp_timer_stop(s_periodic[i].timer);
-            esp_timer_delete(s_periodic[i].timer);
-            s_periodic[i].in_use = false;
-            st = J2534_STATUS_NOERROR;
-            break;
-        }
-    }
-
-    ACK(st, NULL);
-}
-
 /* PassThruIoctl payload, little-endian:
  *   u32 ioctl_id, u32 body_len, body[body_len]
  * body_len is a byte count. A 4-byte payload (the id alone) is body_len 0,
@@ -470,7 +349,7 @@ static void ack_status_body(const j2534_transport_t *t, const j2534_hdr_t *h,
         extra_len = (uint32_t)(sizeof(buf) - 4);
     }
 
-    wr_u32(buf, status);
+    wr_u32(buf, j2534_srv_wire_status(status));
 
     if (extra_len > 0 && extra != NULL)
     {
@@ -570,7 +449,7 @@ static void handle_ioctl(const j2534_transport_t *t, const j2534_hdr_t *h,
             j2534_channel_clear_filters(slot);
             break;
         case J2534_IOCTL_CLEAR_PERIODIC_MSGS:
-            periodic_clear_all();
+            j2534_srv_periodic_clear_all();
             break;
         case J2534_IOCTL_GET_CONFIG:
         case J2534_IOCTL_SET_CONFIG:
@@ -616,8 +495,14 @@ void j2534_srv_handle_frame(const j2534_transport_t *t, const j2534_hdr_t *h,
     {
         case J2534_MT_HELLO:
         {
-            /* reply with our wire version so the DLL can gate features */
-            uint32_t ver = J2534_WIRE_VERSION;
+            /* the session's wire version: what the client asks for, at most
+               ours; one that asks for nothing (all before 2026-11-18) is
+               version 1 and keeps the status numbers it knows. In force
+               from this ACK on. */
+            uint32_t ver = j2534_hello_version(payload, h->length);
+
+            j2534_srv_set_wire_version(ver);
+            s_status.wire_version = (uint8_t)ver;
             j2534_srv_send_ack(t, h->seq, 0, J2534_STATUS_NOERROR, &ver);
             break;
         }
@@ -632,7 +517,7 @@ void j2534_srv_handle_frame(const j2534_transport_t *t, const j2534_hdr_t *h,
         }
 
         case J2534_MT_CLOSE:
-            periodic_clear_all();
+            j2534_srv_periodic_clear_all();
             j2534_channel_reset_all();
             memset(&s_session, 0, sizeof(s_session));
             s_status.device_open = false;
@@ -650,6 +535,10 @@ void j2534_srv_handle_frame(const j2534_transport_t *t, const j2534_hdr_t *h,
 
             if (slot >= 0 && slot < J2534_MAX_CHANNELS && s_session.ch_used[slot])
             {
+                /* its periodic messages go with it (they stayed before and
+                   went out again on the slot's next channel); first, so
+                   none is being sent while the channel closes */
+                j2534_srv_periodic_clear_channel(slot);
                 j2534_channel_disconnect(slot);
                 s_session.ch_used[slot] = false;
                 if (s_status.channel_count > 0) s_status.channel_count--;
@@ -673,8 +562,12 @@ void j2534_srv_handle_frame(const j2534_transport_t *t, const j2534_hdr_t *h,
             ACK(st, NULL);
             break;
         }
-        case J2534_MT_START_PERIODIC: handle_start_periodic(t, h, payload); break;
-        case J2534_MT_STOP_PERIODIC:  handle_stop_periodic(t, h, payload); break;
+        case J2534_MT_START_PERIODIC:
+            j2534_srv_periodic_handle_start(t, h, payload);
+            break;
+        case J2534_MT_STOP_PERIODIC:
+            j2534_srv_periodic_handle_stop(t, h, payload);
+            break;
         case J2534_MT_IOCTL:          handle_ioctl(t, h, payload); break;
 
         default:
@@ -687,12 +580,13 @@ void j2534_srv_handle_frame(const j2534_transport_t *t, const j2534_hdr_t *h,
 
 void j2534_srv_session_begin(const char *transport_name)
 {
+    j2534_srv_periodic_clear_all(); /* before the channels they write to */
     j2534_channel_reset_all();
-    periodic_clear_all();
     memset(&s_session, 0, sizeof(s_session));
     s_status.client_connected = true;
     s_status.device_open = false;
     s_status.channel_count = 0;
+    s_status.wire_version = 1;      /* until the HELLO */
     strlcpy(s_status.transport, transport_name, sizeof(s_status.transport));
     ESP_LOGI(TAG, "tester connected (%s)", transport_name);
 
@@ -704,11 +598,12 @@ void j2534_srv_session_begin(const char *transport_name)
 
 void j2534_srv_session_end(void)
 {
-    periodic_clear_all();
+    j2534_srv_periodic_clear_all();
     j2534_channel_reset_all();
     s_status.client_connected = false;
     s_status.device_open = false;
     s_status.channel_count = 0;
+    s_status.wire_version = 0;
     diag_hold(false);
     ESP_LOGI(TAG, "tester disconnected (%s)", s_status.transport);
     strlcpy(s_status.transport, "none", sizeof(s_status.transport));
@@ -722,6 +617,7 @@ esp_err_t j2534_server_init(void)
 
     log_manager_register(&LOG_DESC);
     j2534_srv_transport_init();
+    j2534_srv_periodic_init();
     j2534_channel_init();
     return j2534_settings_register();
 }
@@ -757,10 +653,12 @@ esp_err_t j2534_server_start(void)
     esp_err_t err = j2534_srv_listener_start(cfg->port);
 
     esp_err_t pump = j2534_srv_pump_start();
+    esp_err_t per = j2534_srv_periodic_start();
 
     ESP_LOGI(TAG, "started (tcp/%u + serial + ble transports; CAN + ISO15765)",
              cfg->port);
-    return (err == ESP_OK && pump == ESP_OK) ? ESP_OK : ESP_ERR_NO_MEM;
+    return (err == ESP_OK && pump == ESP_OK && per == ESP_OK) ? ESP_OK
+                                                              : ESP_ERR_NO_MEM;
 }
 
 esp_err_t j2534_server_stop(void)

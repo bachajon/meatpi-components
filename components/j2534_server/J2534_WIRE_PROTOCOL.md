@@ -1,4 +1,4 @@
-# WiCAN Pro: J2534 PassThru wire protocol (version 1)
+# WiCAN Pro: J2534 PassThru wire protocol (versions 1 and 2)
 
 > The one contract shared by the Windows J2534 DLL (`wican-j2534-driver`),
 > the Python benches (`tools/testbench/usb/j2534_bench.py`,
@@ -13,7 +13,7 @@
 
 | | |
 |---|---|
-| Wire version | 1 (`HELLO` answers it) |
+| Wire version | 1 or 2, per session: the client asks in its `HELLO`, the device answers what holds (section 13). A client that asks for nothing is version 1, which is everything in this document but section 13 |
 | Transports | TCP (port 6809), USB CDC-ACM serial, BLE (stream channel FFF5/FFF6) |
 | Protocols | SAE J2534-1: `CAN` (5) and `ISO15765` (6) on the native controller, `J1850VPW` (1, GM Class 2) on the OBD chip; `J1850PWM`/`ISO9141`/`ISO14230` answer `ERR_NOT_SUPPORTED` (chip-wired, not built yet). SAE J2534-2: `TP2_0_PS` (0x800E, VW TP 2.0 as SAE J2819 describes it) on the native controller, section 11 |
 | Byte order | little-endian everywhere, EXCEPT the CAN id inside message data (big-endian, section 4) |
@@ -26,7 +26,7 @@ Every message is a frame: a 12-byte header, then `length` payload bytes.
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 2 | magic | `0x4A35` (`"5J"` on the wire: `35 4A`) |
-| 2 | 1 | version | `1` |
+| 2 | 1 | version | `1`: the framing, in a session of either wire version |
 | 3 | 1 | type | section 3 |
 | 4 | 2 | seq | tester's correlation id, echoed in the `ACK`; `0` in unsolicited frames |
 | 6 | 2 | channel | `0` for device-level messages, else the channel id (1..4) |
@@ -62,12 +62,22 @@ tester                                   device
   channel) and MAY arrive between a request and its `ACK`. A client
   reads frames continuously and routes by type.
 - Exactly ONE tester across TCP, USB and BLE. A second tester's first
-  frame is answered `ACK ERR_DEVICE_IN_USE (0x1A)` (with its `seq`), then
+  frame is answered `ACK ERR_DEVICE_IN_USE` (with its `seq`; `0x1A`, or
+  `0x0E` when that frame is a `HELLO` that asks for wire version 2), then
   that session ends (TCP: the socket closes; BLE/serial: nothing more is
   read on the link until it drops and comes back). Before 2026-09-21 the
-  device closed silently; the ACK is the superset.
+  device closed silently; the ACK is the superset. One case gets no
+  answer: a second TCP connection while a TCP session is alive. The
+  listener serves one connection at a time, so the second waits in its
+  queue and is served when the first session ends (a second tool can
+  never interrupt a flash in progress; a client gives up by its own
+  timeout).
 - A dropped link is an implicit `CLOSE`: channels, filters and periodic
   messages are torn down, the Exclusive-bus hold is released.
+- A TCP tester that vanishes without closing (a pulled cable, a PC
+  asleep) is given up by the device (section 8.1): its session ends
+  within about 25 s, at once for the next tester. Before 2026-11-18 such
+  a session was held until the unit restarted.
 - The device is `enabled` per the `j2534_server` settings (default off);
   a disabled server serves nothing on any transport.
 
@@ -77,7 +87,7 @@ Types 0x01..0x15 are tester to device; 0x80.. are device to tester.
 
 | Type | Name | Payload (tester) | ACK `result` |
 |---|---|---|---|
-| `0x01` | `HELLO` | none | `u32` wire version (1) |
+| `0x01` | `HELLO` | none, or `u32` the highest wire version the client speaks | `u32` the session's wire version: 1 for no payload, 0 or 1, else 2 (section 13) |
 | `0x02` | `OPEN` | none | `u32` device id (1) |
 | `0x03` | `CLOSE` | none | none; tears every channel/filter/periodic down |
 | `0x04` | `CONNECT` | `protocol u32, flags u32, baud u32 [, tx_id u32, rx_id u32]` | `u32` channel id (1..4), also in `hdr.channel` |
@@ -90,7 +100,7 @@ Types 0x01..0x15 are tester to device; 0x80.. are device to tester.
 | `0x15` | `IOCTL` | `ioctl_id u32` [, `body_len u32`, then `body_len` bytes] | `READ_VBATT`: millivolts `u32`; `GET_CONFIG` on a TP2.0 channel and `GET_DEVICE_INFO`: a list (section 11); `GET_CONFIG` on an ISO15765 channel: a list (section 12); otherwise none |
 | `0x80` | `ACK` | device: `status u32 [, result u32]` (payload 4 or 8 bytes; longer for the two list answers) | |
 | `0x81` | `RX_MSG` | device: one PASSTHRU_MSG; `seq 0`, `hdr.channel` = source channel | |
-| `0x82` | `EVENT` | reserved, never sent in v1 | |
+| `0x82` | `EVENT` | device: `event u32, value u32`; `seq 0`, `hdr.channel` = the channel it is about. Wire version 2 only (section 13); never sent in a version 1 session | |
 
 `CONNECT` details: the bus parameters come from `can_manager`, and since
 2026-10-03 `baud` is checked against them for CAN and ISO15765: a tester
@@ -231,29 +241,37 @@ Data conventions:
 
 ## 5. Status codes
 
-| Value | Name | WiCAN meaning |
-|---|---|---|
-| `0x00` | `NOERROR` | |
-| `0x01` | `ERR_NOT_SUPPORTED` | a protocol this firmware does not run (J1850 PWM, ISO9141, ISO14230); until 2026-10-27 also the reflash gate (section 6, gone) |
-| `0x02` | `ERR_INVALID_CHANNEL_ID` | `DISCONNECT`/data op on an unused channel |
-| `0x03` | `ERR_INVALID_PROTOCOL_ID` | |
-| `0x04` | `ERR_NULL_PARAMETER` | |
-| `0x05` | `ERR_INVALID_IOCTL_VALUE` | a TP2.0 IOCTL, `GET_DEVICE_INFO` or an ISO15765 channel's `SET_CONFIG` / `GET_CONFIG` with a malformed body, a value out of range, a teardown of an id with no connection |
-| `0x06` | `ERR_INVALID_FLAGS` | |
-| `0x07` | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
-| `0x08` | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
-| `0x09` | `ERR_TIMEOUT` | ISO-TP send/receive timed out |
-| `0x0A` | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id, extended addressing |
-| `0x0C` | `ERR_EXCEEDED_LIMIT` | the channel's filter table (8) or its ISO-TP sessions (4; 8 device-wide) are all in use |
-| `0x10`..`0x12` | `ERR_BUFFER_*` | |
-| `0x14` | `ERR_MSG_PROTOCOL_ID` | message protocol does not match the channel |
-| `0x15` | `ERR_INVALID_FILTER_ID` | |
-| `0x16` | `ERR_NO_FLOW_CONTROL` | an ISO15765 message longer than one frame to an id with no FLOW_CONTROL filter (session) |
-| `0x17` | `ERR_NOT_UNIQUE` | |
-| `0x18` | `ERR_INVALID_BAUDRATE` | `CONNECT` (CAN, ISO15765) with a baud the bus does not run at |
-| `0x19` | `ERR_INVALID_DEVICE_ID` | |
-| `0x1A` | `ERR_DEVICE_IN_USE` | a tester is attached on another transport |
-| `0x00010001` | `ERR_NO_CONNECTION_ESTABLISHED` | a TP2.0 message longer than one CAN frame to an id with no connection (SAE J2534-2 table 123: its own return values start at 0x10000) |
+Seven codes have two numbers. The second column is what a session of wire
+version 1 is answered: the numbers this protocol was born with, which
+were one too low against SAE J2534-1 from `ERR_MSG_PROTOCOL_ID` on (and
+`ERR_DEVICE_IN_USE` sat where the standard has `ERR_INVALID_DEVICE_ID`).
+The first column is SAE J2534-1's own number, what a session of wire
+version 2 is answered (section 13) and what `j2534_proto.h` defines since
+2026-11-18. Every other code is the same in both.
+
+| Version 2 (SAE) | Version 1 | Name | WiCAN meaning |
+|---|---|---|---|
+| `0x00` | | `NOERROR` | |
+| `0x01` | | `ERR_NOT_SUPPORTED` | a protocol this firmware does not run (J1850 PWM, ISO9141, ISO14230); until 2026-10-27 also the reflash gate (section 6, gone) |
+| `0x02` | | `ERR_INVALID_CHANNEL_ID` | `DISCONNECT`/data op on an unused channel |
+| `0x03` | | `ERR_INVALID_PROTOCOL_ID` | |
+| `0x04` | | `ERR_NULL_PARAMETER` | |
+| `0x05` | | `ERR_INVALID_IOCTL_VALUE` | a TP2.0 IOCTL, `GET_DEVICE_INFO` or an ISO15765 channel's `SET_CONFIG` / `GET_CONFIG` with a malformed body, a value out of range, a teardown of an id with no connection |
+| `0x06` | | `ERR_INVALID_FLAGS` | |
+| `0x07` | | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
+| `0x08` | | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
+| `0x09` | | `ERR_TIMEOUT` | ISO-TP send/receive timed out |
+| `0x0A` | | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id, extended addressing |
+| `0x0C` | | `ERR_EXCEEDED_LIMIT` | the channel's filter table (8) or its ISO-TP sessions (4; 8 device-wide) are all in use |
+| `0x0E` | `0x1A` | `ERR_DEVICE_IN_USE` | a tester is attached on another transport |
+| `0x10`..`0x12` | | `ERR_BUFFER_*` | not sent by the device. `ERR_BUFFER_OVERFLOW` is what the Windows driver returns from `PassThruReadMsgs` after an `EVENT RX_LOST` (section 13) |
+| `0x15` | `0x14` | `ERR_MSG_PROTOCOL_ID` | message protocol does not match the channel |
+| `0x16` | `0x15` | `ERR_INVALID_FILTER_ID` | |
+| `0x17` | `0x16` | `ERR_NO_FLOW_CONTROL` | an ISO15765 message longer than one frame to an id with no FLOW_CONTROL filter (session) |
+| `0x18` | `0x17` | `ERR_NOT_UNIQUE` | |
+| `0x19` | `0x18` | `ERR_INVALID_BAUDRATE` | `CONNECT` (CAN, ISO15765) with a baud the bus does not run at |
+| `0x1A` | `0x19` | `ERR_INVALID_DEVICE_ID` | |
+| `0x00010001` | | `ERR_NO_CONNECTION_ESTABLISHED` | a TP2.0 message longer than one CAN frame to an id with no connection (SAE J2534-2 table 123: its own return values start at 0x10000) |
 
 ## 6. Device behaviours
 
@@ -282,11 +300,27 @@ Data conventions:
   them (BS 8 / STmin 1 ms always, before 2026-11-17). N_Bs and N_Cr are
   1 s (ISO 15765-2). A multi-frame write waits for its last frame
   before the `ACK` (about 10 ms per frame at the ECU's STmin, capped at
-  5.5 s).
+  5.5 s). While it is on the bus the device goes on with everything
+  else: what any channel receives is pushed, periodic messages go out
+  (2026-11-18; before, both stood still for the length of the write, and
+  what a channel's queue could not hold meanwhile was lost). A TP2.0 and
+  a J1850 write still hold the other channels up to their end.
+- **Periodic messages** are sent by a task of their own (`j2534_per`),
+  each on its own clock. One that cannot go at its time (the bus is
+  busy, the channel is in a TP2.0 write) goes once when it can, not once
+  for every period it missed: copies do not pile up. On an ISO15765
+  channel a periodic message to an ECU the tester's own multi-frame
+  write is talking to waits for that transfer to end; one to another id
+  goes out between its frames. `DISCONNECT` stops the periodic messages
+  of its channel, `CLOSE` and `CLEAR_PERIODIC_MSGS` all of them.
 - Limits: 4 channels, 8 filters per channel, 4 periodic messages,
   periodic interval >= 5 ms. Received messages are pushed as soon as the
   RX pump sees them (no device-side queue beyond the channel's 256-frame
-  CAN queue): drain promptly.
+  CAN queue): drain promptly. A channel whose queue runs over (the link
+  to the tester is slower than the bus, or the tester does not read)
+  drops the oldest frame for every new one; the loss is counted
+  (`rx_lost` on `/api/j2534`) and a wire version 2 tester is told where
+  it is and how large (`EVENT RX_LOST`, section 13).
 - Interface exposure (TCP only): with `allow_lan` off the listener
   accepts connections that landed on loopback, WiCAN's own AP or the USB
   network link, and refuses the shop LAN (WiFi STA / USB-Ethernet).
@@ -339,7 +373,9 @@ A memory-transfer service: WRITE_MSGS ch 2, data 00 00 07 E0 34 00 44 00 00 00 0
                                                                           until 2026-10-27 the closed gate answered 01 00 00 00)
 
 Second tester's HELLO (seq 4) while one is attached
-  <- 35 4A 01 80 04 00 00 00 04 00 00 00 | 1A 00 00 00                   (ERR_DEVICE_IN_USE)
+  <- 35 4A 01 80 04 00 00 00 04 00 00 00 | 1A 00 00 00                   (ERR_DEVICE_IN_USE, to a version 1 client)
+The same to a client that asked for wire version 2 (HELLO seq 1, payload 02 00 00 00)
+  <- 35 4A 01 80 01 00 00 00 04 00 00 00 | 0E 00 00 00                   (ERR_DEVICE_IN_USE, SAE's number)
 
 CLOSE seq 9
   -> 35 4A 01 03 09 00 00 00 00 00 00 00
@@ -353,6 +389,18 @@ CLOSE seq 9
 Port `j2534_server.port` (6809), `TCP_NODELAY`. The peer closing the
 socket ends the session. Subject to the `allow_lan` gate (section 6).
 Reference client: `tools/testbench/usb/j2534_bench.py`.
+
+A peer that vanishes without closing is found out by the device
+(2026-11-18): the connection carries TCP keepalive (the first probe after
+10 s without a segment from the peer, then one every 5 s, given up after
+3 unanswered: 25 s), and a send the peer takes nothing of for 5 s ends
+the session (`tx_timeouts` on `/api/j2534`). A client that is alive
+answers the probes in its TCP stack, with no frame of this protocol and
+nothing to do: a session may be silent for as long as it likes. A client
+that stops READING for more than 5 s while the device has data for it is
+dropped like a dead one; what it missed before that is told in section
+13. While a session is alive a second connection is accepted by the TCP
+stack and not served (section 2).
 
 ### 8.2 USB CDC-ACM serial
 
@@ -388,18 +436,30 @@ Reference: `tools/testbench/ble/ble_j2534_pi.py` (bleak).
 ## 9. Observability
 
 `GET /api/j2534`: `enabled, port, listening, client_connected,
-device_open, channels, frames_rx, frames_tx, tx_refused, reflash_seen, allow_lan,
-exclusive, autopid_paused, transport, phase`. `POST /api/j2534
+device_open, channels, frames_rx, frames_tx, tx_refused, reflash_seen,
+rx_lost, tx_timeouts, periodic_skipped, wire_version, allow_lan,
+exclusive, autopid_paused, transport, phase`. `rx_lost`: received
+messages a channel's queue dropped before the tester got them.
+`tx_timeouts`: TCP sends the tester took nothing of for 5 s (each ended a
+session). `periodic_skipped`: periods of a periodic message that passed
+while its last copy was still waiting to go. `wire_version`: the attached
+tester's (1 or 2), 0 with none attached. `POST /api/j2534
 {"exclusive":bool}`. Console: `j2534`. Logs (tag `j2534_server`):
 `tester connected (ble)` / `tester disconnected (ble)` at I, refusals
-(`tester already attached on tcp; refusing ble`, `bad frame header`) at W.
+(`tester already attached on tcp; refusing ble`, `bad frame header`) and
+the two losses (`received message(s) lost`, at most one line a second;
+`the tester took nothing for 5 s`) at W.
 
 ## 10. Versioning
 
 `HELLO` returns the wire version; a client refuses to proceed on a
 version it does not know. Any change to the header, a payload layout or
-a status meaning bumps `J2534_WIRE_VERSION` in `j2534_proto.h` and this
-document together.
+a status meaning is a new wire version (`J2534_SESSION_VERSION` in
+`j2534_proto.h`, and this document with it), and the device speaks it
+only to a client that asked for it in its `HELLO`: a client is never
+answered a version it did not name, so one that was written against
+version 1 keeps getting version 1. The header's own version byte
+(`J2534_WIRE_VERSION`) is the framing and stays 1.
 
 2026-10-19, still version 1: the bytes of every frame and of the
 PASSTHRU_MSG head are unchanged; what changed is the meaning of an
@@ -426,6 +486,15 @@ defaults of SAE J2534-1, where the device sent BS 8 / STmin 1 ms before,
 so an ECU's long answer arrives in one go. A client finds out whether a
 device holds the two by asking: one that does answers `GET_CONFIG` with
 pairs, one that does not answers with its status alone and sends 8 / 1.
+
+2026-11-18, wire version 2 (section 13): the status numbers of SAE
+J2534-1 and the `EVENT` frame, for a client that asks for them in its
+`HELLO`. Nothing changes for a client that does not: a `HELLO` without a
+payload, or with the 1 that every driver up to 1.9 sends, is answered 1
+and served as before, number for number. The same day, in both versions:
+a TCP peer that vanishes is given up (section 8.1), a long ISO15765
+write no longer holds up what is received or the periodic messages, and
+the periodic messages have a task of their own (section 6).
 
 ## 11. TP2.0 (`TP2_0_PS`, protocol 0x800E)
 
@@ -626,3 +695,64 @@ the ECU), `ISO15765_WFT_MAX`. Reference client and proof: the stage
 15765-2 played by a PCAN, every flow control read off the bus;
 `testing/j2534fc.md`). The Windows DLL sends and reads the two since
 driver 1.9.
+
+## 13. Wire version 2: SAE's status numbers, and `EVENT`
+
+**Asking for it.** A `HELLO` whose payload is a `u32` of 2 or more asks
+for wire version 2; the ACK's result is the version the session runs at
+from that ACK on, 2. A `HELLO` with no payload, a payload shorter than
+four bytes, 0 or 1 is version 1, and so is a session that sends no
+`HELLO` at all. A device from before 2026-11-18 ignores the payload and
+answers 1: a client that asked for 2 and reads 1 is talking to such a
+device and gets version 1's numbers (the Windows driver from 1.10 turns
+them into SAE's itself, so its application never sees the difference).
+
+```
+HELLO seq 1, asking for version 2
+  -> 35 4A 01 01 01 00 00 00 04 00 00 00 | 02 00 00 00
+  <- 35 4A 01 80 01 00 00 00 08 00 00 00 | 00 00 00 00 | 02 00 00 00     (NOERROR, version 2)
+```
+
+**What changes in a version 2 session**, and nothing else does:
+
+1. The status of an `ACK` is SAE J2534-1's own number for the seven codes
+   of section 5 that have two (`ERR_DEVICE_IN_USE` 0x0E,
+   `ERR_MSG_PROTOCOL_ID` 0x15 up to `ERR_INVALID_DEVICE_ID` 0x1A).
+2. The device sends `EVENT` frames (type `0x82`, `seq 0`): payload
+   `event u32, value u32`, `hdr.channel` the channel the event is about.
+   A client skips an event it does not know.
+
+**`EVENT RX_LOST` (event 1)**: `value` received messages of the channel
+were lost in front of the channel's next `RX_MSG`. The channel's receive
+queue (256 bus frames) ran over, because the link to the tester is
+slower than the bus or the tester stopped reading; the queue keeps the
+newest frames, so the gap sits between what the tester already has and
+what it gets next. The event comes in the stream exactly there: every
+`RX_MSG` of the channel in front of it was received before the loss,
+the first one behind it is the first message after it. That is the
+place SAE J2534-1 has the application told at (its section on receive
+buffer overflow): the Windows driver returns `ERR_BUFFER_OVERFLOW` from
+the `PassThruReadMsgs` that hands that message over, with the message.
+The count is in bus frames: on a raw CAN channel a frame is a message
+(some of those lost may be frames a filter of the channel would have
+kept out); on an ISO15765 and a TP2.0 channel the queue carries what no
+ISO-TP session reassembles (the first frames behind the
+START_OF_MESSAGE indication, single-frame answers to a functional
+request, TP2.0 telegrams), and an indication the channel had no room
+for counts as one. A loss that happens while the device is taking a
+message out of the queue may be told one message late, never early.
+The device counts every loss on `/api/j2534` (`rx_lost`), also in a
+version 1 session, which is told nothing, as before.
+
+Byte-exact example (a host-test vector, `host_test/main/test_session.c`):
+channel 2 lost 909 frames (0x38D).
+
+```
+<- 35 4A 01 82 00 00 02 00 08 00 00 00 | 01 00 00 00 | 8D 03 00 00
+```
+
+Reference client and proof: the stage `j2534session` of the firmware
+repo (`tools/testbench/usb/j2534_session_bench.py`: a client that stops
+reading while 2400 frames arrive, the events against the gaps in what
+it then reads; the driver DLL against devices of both versions;
+`testing/j2534session.md`).

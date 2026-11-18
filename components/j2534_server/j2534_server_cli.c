@@ -61,6 +61,15 @@ static int cmd_j2534(int argc, char **argv)
                    (unsigned long)st.tx_refused);
     cmdline_printf("  reflash seen: %lu (UDS 0x34..0x37 requests forwarded)\n",
                    (unsigned long)st.reflash_seen);
+    cmdline_printf("  wire version: %u (the tester's; 2 = SAE's status numbers)\n",
+                   (unsigned)st.wire_version);
+    cmdline_printf("  rx lost     : %lu (a channel's queue ran over; the "
+                   "tester was told)\n", (unsigned long)st.rx_lost);
+    cmdline_printf("  tx timeouts : %lu (the tester took nothing for 5 s: "
+                   "session ended)\n", (unsigned long)st.tx_timeouts);
+    cmdline_printf("  per. skipped: %lu (periods of a periodic message that "
+                   "was still waiting)\n",
+                   (unsigned long)st.periodic_skipped);
     cmdline_printf("OK\n");
     return 0;
 }

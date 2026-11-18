@@ -90,9 +90,13 @@ void j2534_channel_disconnect(int slot);
 bool j2534_channel_active(int slot);
 
 /**
- * Send one PASSTHRU_MSG on the channel. J2534 status code. An ISO15765
- * transmit is followed by a TxDone indication (RX_MSG with rx_status
- * TX_MSG_TYPE | TX_INDICATION and the id as data).
+ * Send one PASSTHRU_MSG on the channel: the tester's own write, called
+ * from the session's task (the task that also closes channels). J2534
+ * status code. An ISO15765 transmit is followed by a TxDone indication
+ * (RX_MSG with rx_status TX_MSG_TYPE | TX_INDICATION and the id as data),
+ * and while it is on the bus the channel lock is free: the RX pump and the
+ * periodic messages go on (2026-11-18; a TP2.0 and a J1850 write still
+ * hold it to their end).
  */
 uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg);
 
@@ -101,6 +105,8 @@ uint32_t j2534_channel_write(int slot, const j2534_msg_t *msg);
  * @p tick counts the firings of that periodic message, 0 for the one sent
  * as it is started. Only a TP2.0 broadcast reads it (the re-triggered
  * broadcast sends five telegrams at tick 0 and one per tick after).
+ * J2534_ERR_BUFFER_FULL means "not now, try again": an ISO15765 message to
+ * an ECU the tester's own multi-frame write is talking to.
  */
 uint32_t j2534_channel_write_periodic(int slot, const j2534_msg_t *msg,
                                       uint32_t tick);
@@ -128,8 +134,13 @@ void j2534_channel_clear_filters(int slot);
  * uses a short internal timeout). Returns true and fills @p out when a
  * message passed the channel's filters. The server's RX pump calls this
  * across all active channels and pushes RX_MSG frames.
+ *
+ * @p lost (nullable) receives the received messages the channel lost
+ * since the last call (its bus queue ran over): they are missing in front
+ * of the message this call or a later one returns, so the pump tells the
+ * tester before it pushes that message (j2534_channel_lost.c).
  */
-bool j2534_channel_poll_rx(int slot, j2534_msg_t *out);
+bool j2534_channel_poll_rx(int slot, j2534_msg_t *out, uint32_t *lost);
 
 /** True when @p slot is an open TP2.0 channel (protocol 0x800E). */
 bool j2534_channel_is_tp20(int slot);

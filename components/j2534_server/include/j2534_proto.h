@@ -54,7 +54,12 @@ enum {
     J2534_PROT_TP2_0     = 0x800E,
 };
 
-/* ---- J2534 return/status codes ---------------------------------------- */
+/* ---- J2534 return/status codes ---------------------------------------- *
+ * SAE J2534-1's own numbers since 2026-11-18. Until then the seven from
+ * ERR_MSG_PROTOCOL_ID on were one too low (0x14 to 0x19) and
+ * ERR_DEVICE_IN_USE sat at 0x1A, here and in the Windows driver alike. A
+ * session of wire version 1 is still answered with those old numbers:
+ * j2534_status_wire(). */
 enum {
     J2534_STATUS_NOERROR              = 0x00,
     J2534_ERR_NOT_SUPPORTED           = 0x01,
@@ -68,16 +73,16 @@ enum {
     J2534_ERR_TIMEOUT                 = 0x09,
     J2534_ERR_INVALID_MSG             = 0x0A,
     J2534_ERR_EXCEEDED_LIMIT          = 0x0C, /* filter / session table full */
+    J2534_ERR_DEVICE_IN_USE           = 0x0E, /* WiCAN: second tester */
     J2534_ERR_BUFFER_EMPTY            = 0x10,
     J2534_ERR_BUFFER_FULL             = 0x11,
-    J2534_ERR_BUFFER_OVERFLOW         = 0x12,
-    J2534_ERR_MSG_PROTOCOL_ID         = 0x14,
-    J2534_ERR_INVALID_FILTER_ID       = 0x15,
-    J2534_ERR_NO_FLOW_CONTROL         = 0x16,
-    J2534_ERR_NOT_UNIQUE              = 0x17,
-    J2534_ERR_INVALID_BAUDRATE        = 0x18,
-    J2534_ERR_INVALID_DEVICE_ID       = 0x19,
-    J2534_ERR_DEVICE_IN_USE           = 0x1A, /* WiCAN: second tester */
+    J2534_ERR_BUFFER_OVERFLOW         = 0x12, /* the driver's, after RX_LOST */
+    J2534_ERR_MSG_PROTOCOL_ID         = 0x15,
+    J2534_ERR_INVALID_FILTER_ID       = 0x16,
+    J2534_ERR_NO_FLOW_CONTROL         = 0x17,
+    J2534_ERR_NOT_UNIQUE              = 0x18,
+    J2534_ERR_INVALID_BAUDRATE        = 0x19,
+    J2534_ERR_INVALID_DEVICE_ID       = 0x1A,
     /* SAE J2534-2 table 123: its own return values start at 0x10000. */
     J2534_ERR_NO_CONNECTION_ESTABLISHED = 0x00010001,
 };
@@ -163,7 +168,12 @@ enum {
 
 /* ---- wire framing ----------------------------------------------------- */
 #define J2534_MAGIC        0x4A35u   /* "J5" */
-#define J2534_WIRE_VERSION 1
+#define J2534_WIRE_VERSION 1         /* the header's version byte: the framing */
+/* The wire version of a SESSION, asked for in HELLO's payload and answered
+ * in its ACK (2026-11-18). Version 2: an ACK's status is SAE J2534-1's own
+ * number, and the device sends EVENT frames. Version 1 is every client
+ * before that day: the old status numbers, no EVENT. */
+#define J2534_SESSION_VERSION 2
 #define J2534_HDR_SIZE     12
 #define J2534_MAX_DATA     4128       /* SAE PASSTHRU_MSG data cap */
 
@@ -182,8 +192,20 @@ enum {
     J2534_MT_IOCTL          = 0x15,
     J2534_MT_ACK            = 0x80,
     J2534_MT_RX_MSG         = 0x81,
-    J2534_MT_EVENT          = 0x82,
+    J2534_MT_EVENT          = 0x82,   /* wire version 2: event u32, value u32 */
 };
+
+/* EVENT ids. The header's channel is the channel the event is about. */
+enum {
+    /* `value` received messages of the channel were lost in front of its
+     * next RX_MSG: a receive queue ran over (SAE J2534-1 on a receive
+     * buffer overflow; the Windows driver returns ERR_BUFFER_OVERFLOW from
+     * the PassThruReadMsgs that hands that message over). */
+    J2534_EVENT_RX_LOST     = 1,
+};
+
+/** One whole EVENT frame: the header and its two words. */
+#define J2534_EVENT_FRAME_SIZE (J2534_HDR_SIZE + 8)
 
 typedef struct {
     uint16_t magic;
@@ -403,6 +425,42 @@ j2534_frame_rc_t j2534_frame_read(j2534_read_fn rd, void *ctx,
 size_t j2534_ack_encode(uint8_t *buf, size_t cap, uint16_t seq,
                         uint16_t channel, uint32_t status,
                         const uint32_t *result);
+
+/* ---- the session's wire version (j2534_proto_session.c, 2026-11-18) ---- */
+
+/**
+ * The wire version a session runs at, from its HELLO: the payload's first
+ * word is the highest version the client speaks. No payload (the first
+ * clients), a short one, 0 or 1 give 1; anything higher gives
+ * J2534_SESSION_VERSION, the highest this device speaks. The answer is
+ * also what HELLO's ACK carries.
+ */
+uint32_t j2534_hello_version(const uint8_t *payload, uint32_t len);
+
+/**
+ * A status as it goes on the wire in a session of @p version. Version 2
+ * and up: the status itself (SAE J2534-1's numbers). Version 1: the
+ * numbers every client before 2026-11-18 was written against, where
+ * ERR_MSG_PROTOCOL_ID .. ERR_INVALID_DEVICE_ID were 0x14 .. 0x19 and
+ * ERR_DEVICE_IN_USE was 0x1A. Every other status is the same in both.
+ */
+uint32_t j2534_status_wire(uint32_t status, uint32_t version);
+
+/**
+ * Encode a complete EVENT frame (header, event u32, value u32) into
+ * @p buf. Returns J2534_EVENT_FRAME_SIZE, 0 when @p cap is too small.
+ */
+size_t j2534_event_encode(uint8_t *buf, size_t cap, uint16_t channel,
+                          uint32_t event, uint32_t value);
+
+/**
+ * What a loss counter gained since it was last looked at. @p drops_now is
+ * the counter (a channel's bus queue: the frames it dropped because it was
+ * full), @p seen what it read at the last look and is brought up to date.
+ * A counter that reads less than @p seen started again from zero (a new
+ * subscription): all of it is new.
+ */
+uint32_t j2534_lost_since(uint32_t drops_now, uint32_t *seen);
 
 /**
  * The TCP interface-exposure predicate: with allow_lan off, only

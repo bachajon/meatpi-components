@@ -13,8 +13,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-void run_voltage_tests(void);   /* test_voltage.c: its four cases */
-void run_iso_cfg_tests(void);   /* test_iso_cfg.c: its five cases */
+#include "test_suites.h"        /* the cases of the other test files */
 
 static void test_hdr_roundtrip(void)
 {
@@ -318,14 +317,14 @@ static void test_ack_encode_vectors(void)
                                            J2534_STATUS_NOERROR, &ver));
     TEST_ASSERT_EQUAL_MEMORY(HELLO_ACK, buf, 20);
 
-    /* refusal of a second tester (seq 4): 16 bytes, status 0x1A */
+    /* refusal of a second tester of wire version 1 (seq 4): status 0x1A */
     static const uint8_t IN_USE[] =
     {
         0x35, 0x4A, 0x01, 0x80, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
         0x1A, 0x00, 0x00, 0x00,
     };
     TEST_ASSERT_EQUAL(16, j2534_ack_encode(buf, sizeof(buf), 4, 0,
-                                           J2534_ERR_DEVICE_IN_USE, NULL));
+                          j2534_status_wire(J2534_ERR_DEVICE_IN_USE, 1), NULL));
     TEST_ASSERT_EQUAL_MEMORY(IN_USE, buf, 16);
 
     TEST_ASSERT_EQUAL(0, j2534_ack_encode(buf, 15, 1, 0, 0, NULL));
@@ -782,5 +781,6 @@ void app_main(void)
     RUN_TEST(test_migrate_v1_without_key_and_v2_untouched);
     run_voltage_tests();
     run_iso_cfg_tests();
+    run_session_tests();
     UNITY_END();
 }

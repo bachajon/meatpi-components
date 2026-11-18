@@ -72,6 +72,10 @@ typedef struct
     uint32_t            rx_id;
     bool                ext;
     bool                pad;    /* frames padded to 8 bytes (the message TxFlags) */
+    bool                tx_busy; /* the tester's write to this ECU is on the bus,
+                                    the channel lock given up meanwhile
+                                    (j2534_iso_write): nobody reopens the
+                                    session or sends on it until it is back */
     can_isotp_session_t isotp;
 } j2534_iso_session_t;
 
@@ -94,6 +98,9 @@ typedef struct j2534_channel
 
     QueueHandle_t can_q;             /* CAN: every frame on the bus; ISO15765:   */
     int           can_sub;           /* first-frame peeks + frames no session owns */
+    uint32_t      sub_drops_seen;    /* can_q's drop counter at the last look    */
+    uint32_t      lost_pending;      /* lost otherwise (an indication the ring
+                                        had no room for), not yet reported       */
 
     j2534_ch_filter_t filters[J2534_CH_MAX_FILTERS];
     int               n_filters;
@@ -136,6 +143,19 @@ extern SemaphoreHandle_t j2534_ch_lock;
 /** The CAN id a message's data begins with: 4 bytes, big-endian. */
 uint32_t j2534_ch_get_id_be(const uint8_t *p);
 
+/* ---- j2534_channel_lost.c -------------------------------------------- */
+
+/**
+ * The received messages the channel lost since the last call: what its bus
+ * queue dropped because it was full (the CAN node's count for that
+ * subscription) and what the channel dropped itself. They are missing in
+ * front of whatever the channel hands over next, so the caller asks BEFORE
+ * it takes a message: a loss is then never reported in front of a message
+ * that came before it (one that falls between this look and the take is
+ * reported at the next look, one message late).
+ */
+uint32_t j2534_ch_take_lost(j2534_channel_t *c);
+
 /* ---- j2534_channel_filter.c ------------------------------------------ */
 
 /** PASS/BLOCK verdict over a [4-byte id][frame] view. No PASS filter at
@@ -163,10 +183,28 @@ uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
 void j2534_iso_unbind(j2534_channel_t *c, int slot);
 void j2534_iso_unbind_all(j2534_channel_t *c);
 
-/** WRITE_MSGS on an ISO15765 channel (the J2534-1 layout). @p indicate =
- *  queue a TxDone indication on success (false for periodic messages). */
+/**
+ * WRITE_MSGS on an ISO15765 channel (the J2534-1 layout).
+ *
+ * @p periodic false, the tester's own write: a TxDone indication is queued
+ * on success, and THE CHANNEL LOCK IS GIVEN UP while the message is on the
+ * bus (the wait for the conversation gate, then a transfer that can take
+ * seconds at an ECU's STmin) and taken again before the return. Until
+ * 2026-11-18 it was held throughout: the RX pump waited on it, so nothing
+ * received on any channel reached the tester during a long write, what did
+ * not fit a channel's queue meanwhile was lost, and a periodic message
+ * waited too. That is safe because the task that writes is the session's
+ * own, the only one that closes sessions and channels; the one other
+ * writer, a periodic message, finds the session marked `tx_busy`.
+ *
+ * @p periodic true: no indication (SAE J2534-1), the lock stays held (a
+ * periodic message is a frame or two), and a message to an ECU whose
+ * session is `tx_busy` is not sent: J2534_ERR_BUFFER_FULL, "not now", for
+ * the periodic task to try again (no periodic message into a segmented
+ * transfer to the same address).
+ */
 uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
-                         bool indicate);
+                         bool periodic);
 
 /** One received message or indication, if any (the RX pump's poll). */
 bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out);

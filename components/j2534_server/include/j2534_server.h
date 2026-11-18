@@ -66,6 +66,15 @@ typedef struct {
                                  /* not talk yet (listening, mismatch)   */
     uint32_t reflash_seen;       /* UDS 0x34..0x37 requests forwarded    */
                                  /* (ISO15765, J1850): a count, no gate  */
+    uint32_t rx_lost;            /* received messages a channel's queue  */
+                                 /* dropped before the tester got them   */
+                                 /* (it was told: EVENT RX_LOST)         */
+    uint32_t tx_timeouts;        /* TCP sends the tester took nothing of */
+                                 /* for 5 s: its session was ended       */
+    uint32_t periodic_skipped;   /* periods of a periodic message that   */
+                                 /* passed while its last copy waited    */
+    uint8_t  wire_version;       /* the attached tester's (its HELLO): 1 */
+                                 /* or 2, 0 with none attached           */
     bool     allow_lan;          /* reachable on STA/USB-eth uplinks     */
     bool     exclusive;          /* runtime: autopid off the bus while a  */
                                  /* tester is attached (obd_gate hold)   */
