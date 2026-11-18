@@ -154,6 +154,47 @@ static void test_migrate_skips_when_name_or_path_taken(void)
     cJSON_Delete(b);
 }
 
+/* the header of a frame the server sends (2026-11-18: the send side builds
+   it itself): FIN set, never masked, the three length forms of RFC 6455 */
+static void test_frame_header_lengths(void)
+{
+    uint8_t h[WSM_FRAME_HEAD_MAX];
+
+    memset(h, 0xEE, sizeof(h));
+    TEST_ASSERT_EQUAL(2, wsm_frame_header(false, 0, h));
+    TEST_ASSERT_EQUAL_HEX8(0x82, h[0]);            /* FIN + binary */
+    TEST_ASSERT_EQUAL_HEX8(0x00, h[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xEE, h[2]);            /* nothing written past it */
+
+    TEST_ASSERT_EQUAL(2, wsm_frame_header(true, 5, h));
+    TEST_ASSERT_EQUAL_HEX8(0x81, h[0]);            /* FIN + text */
+    TEST_ASSERT_EQUAL_HEX8(0x05, h[1]);
+
+    TEST_ASSERT_EQUAL(2, wsm_frame_header(false, 125, h));
+    TEST_ASSERT_EQUAL_HEX8(125, h[1]);
+
+    /* 126 to 65535: the marker 126 and two bytes, big end first */
+    TEST_ASSERT_EQUAL(4, wsm_frame_header(false, 126, h));
+    TEST_ASSERT_EQUAL_HEX8(126, h[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, h[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x7E, h[3]);
+
+    TEST_ASSERT_EQUAL(4, wsm_frame_header(false, 1024, h));
+    TEST_ASSERT_EQUAL_HEX8(0x04, h[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, h[3]);
+
+    TEST_ASSERT_EQUAL(4, wsm_frame_header(true, 65535, h));
+    TEST_ASSERT_EQUAL_HEX8(0xFF, h[2]);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, h[3]);
+
+    /* above: the marker 127 and eight bytes; no mask bit in any form */
+    static const uint8_t WANT[10] = { 0x82, 127, 0, 0, 0, 0, 0, 0x01, 0x00, 0x00 };
+
+    TEST_ASSERT_EQUAL(10, wsm_frame_header(false, 65536, h));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(WANT, h, 10);
+    TEST_ASSERT_EQUAL_HEX8(0, h[1] & 0x80);
+}
+
 static void test_migrate_skips_full_table_and_v2(void)
 {
     /* full table: MAX_CHANNELS entries already */
@@ -199,5 +240,6 @@ void app_main(void)
     RUN_TEST(test_migrate_v1_appends_ws_log);
     RUN_TEST(test_migrate_skips_when_name_or_path_taken);
     RUN_TEST(test_migrate_skips_full_table_and_v2);
+    RUN_TEST(test_frame_header_lengths);
     UNITY_END();
 }

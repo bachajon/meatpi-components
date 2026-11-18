@@ -29,11 +29,26 @@ about what flows through it.
   queue. Per-client addressing: out of scope v1.
 - **max_clients** reached → the upgrade is refused **before the 101** (the
   excess client sees the handshake fail, counted in `refused`).
-- **Dead clients**: httpd auto-handles PING/CLOSE control frames
-  (`handle_ws_control_frames=false`); a closed fd stops reporting
-  `HTTPD_WS_CLIENT_WEBSOCKET` and is reaped on the next `send()`
-  (`tx_drops`) AND at every handshake (so a quiet channel can't fill with
-  ghosts and refuse legitimate clients); the channel keeps running.
+- **A client that is behind keeps its connection, and costs the others
+  nothing** (2026-11-18, see "A client that stalls" below): a frame is
+  pushed to each client's socket without waiting, what a client does not
+  take waits in a 64 KB backlog and leaves in order, a frame that finds the
+  backlog full is dropped whole and counted (`tx_drops`), and only a client
+  that took no byte for 10 s is closed.
+- **A client leaves the table when its session ends** (2026-11-18): in the
+  web server's session close hook, before the socket is closed. Until then
+  a client that left a quiet channel stayed listed until a send failed on
+  it, and the socket number, which is given out again at once, could by
+  then belong to a client of another channel or to a page request, which
+  was sent this channel's frames. The check at every handshake stays as a
+  second net.
+- **Control frames** (2026-11-18, `handle_ws_control_frames=true`): the
+  answer to a PING and the echo of a CLOSE go out through the client's own
+  send path, behind what waits for it; a PONG is read and dropped. The
+  server's own PONG was written from the server's task into a socket that
+  a bridge's task was sending frames on.
+- **Dead clients**: a client that sent CLOSE, or whose session the server
+  ended, is out of the table at once; the channel keeps running.
   Since 2026-10-21 a client whose handshake is still in flight is not a
   ghost: the pre-handshake hook registers the fd before the 101 goes out,
   and a fan-out send in that moment used to reap the newcomer (it then got
@@ -42,12 +57,19 @@ about what flows through it.
 - **TCP_NODELAY** is set on every client at handshake: httpd transmits a
   WS frame as two `send()`s (header, payload), with Nagle the payload
   stalls ~40 ms on the peer's delayed ACK (measured; see BENCHMARKS.md).
-- **TX never holds the lock across the network**: `send()` snapshots the
-  client list, sends outside `s_lock`, re-takes it for reap/stats, RX
-  starved measurably otherwise.
+- **TX holds the lock, and never waits under it**: every send on a
+  client's socket is a `send(MSG_DONTWAIT)` under `wsm_lock`, the lock the
+  close hook takes before a socket is closed. (Until 2026-11-18 the sends
+  were blocking and therefore made outside the lock, on a snapshot of the
+  client list.)
 - **RX never blocks the httpd worker**: frames are read into request-scoped
   PSRAM (cap 4 KB/frame), chunked into the subscriber queue with
-  `xQueueSend(..., 0)`, queue full → `rx_drops`.
+  `xQueueSend(..., 0)`, queue full → `rx_drops`. A message above 4 KB is
+  read off the socket and answered with close code 1009 since 2026-11-18
+  (it was a bare reset). Known and left as it is: a message that finds the
+  queue full is dropped chunk by chunk, so a part of it can go through. A
+  burst of 6000 slcan lines over the WiFi did not get there on the bench
+  (the link is slower than a 500 kbit/s bus), so nothing was changed.
 - **Reboot-to-apply** (standard §4.2): channels are registered once at
   `start()`.
 
@@ -91,15 +113,24 @@ maxItems went 4→6 in the same change (`WEBSOCKET_MANAGER_MAX_CHANNELS`,
 
 - `websocket_manager.c`: lifecycle, settings descriptor, name→index API.
 - `websocket_manager_ws.c`: the httpd layer: route registration,
-  `ws_pre_handshake` gate + client table, data-frame RX, async fan-out TX,
-  send-failure/fd-state reaping.
-- `websocket_manager_policy.c`: PURE parse/validate (host-testable).
+  `ws_pre_handshake` gate + client table, the session close hook, frame RX
+  (data and control).
+- `websocket_manager_tx.c`: the send side: one frame to every client of a
+  channel without waiting, the backlogs (`tx_backlog`), the `ws_tx` task
+  that pushes them, the 10 s rule.
+- `websocket_manager_internal.h`: what those two share (the channel table,
+  its lock); not for the host tests.
+- `websocket_manager_policy.c`: PURE parse/validate and the frame header
+  (host-testable).
 
 ## Tests
 
-- Host suite (`host_test/`, 5 tests on rpi001): parse defaults, text mode,
-  the `/ws/` namespace rule, duplicate names/paths, max_clients bounds.
-  Run: `tools/testbench/host_tests.sh websocket_manager`.
+- Host suite (`host_test/`, 9 tests on rpi001): parse defaults, text mode,
+  the `/ws/` namespace rule, duplicate names/paths, max_clients bounds, the
+  v1 to v2 migration, and since 2026-11-18 the frame header (FIN, no mask,
+  the three length forms). Run: `.\test.ps1 host websocket_manager`.
+- Bench (firmware repo, `.\test.ps1 slcan`, leg W): see "A client that
+  stalls".
 - Live (2026-07-04, DUT COM2030 + rpi001 via `ws://10.42.0.62/ws/obd`,
   bridge `br_obd = obd <-raw-> ws_obd`, live MIC3624 + ECU sim): `ATI` →
   `ELM327 v2.3`, `VTVERS` → `MIC3624 V2.3.22`, `0100` → `41 00 FF FF FF FF`;
@@ -108,6 +139,76 @@ maxItems went 4→6 in the same change (`WEBSOCKET_MANAGER_MAX_CHANNELS`,
 - Benchmarks (2026-07-04, `tools/testbench/ws_bench.py`): see
   `BENCHMARKS.md`, 128 B ~85 KB/s/direction (frame-rate-bound), 1 KB
   WS→TCP 359 KB/s, RTT p50 5.4 ms, OBD polls p50 54.5 ms.
+
+## What a client writes, and a client that only listens (2026-11-18)
+
+**What a client writes waits for the bridge.** A message goes into the subscriber's queue while
+that has room (`wsm_rx_deliver`, `websocket_manager_rx.c`; the server's task never waits). When
+it has none, the message waits in order in a buffer in external RAM and the flush task moves it
+on as the bridge takes it (`wsm_rx_feed`, on the 5 ms tick). One buffer of 128 KB is lent to the
+channel that needs it and goes back when the channel has caught up, so one channel can be behind
+at a time. It is not larger, and there is one, because the unit's free external RAM has a floor
+to keep: two buffers of 256 KB took its lowest point to 723 KB where the `live` stage's stack
+audit asks for 1 MB (with one of 128 KB the lowest point is 1,116 KB). A message that does not
+fit there is dropped whole, counted in `rx_drops` and said once in the log; the log says again
+when the channel has caught up, with the count. `rx_drops` counted chunks before, and there was
+nothing to wait in: what found the subscriber's queue of 64 chunks full was gone, in the middle
+of a message. Shown by the slcan stage's leg W6 (a burst of 6000 slcan lines over `/ws/can`):
+2,167 of 6,000 frames reached the bus before, 6,000 after. The leg had passed on the firmware of
+that morning for the wrong reason: the server's task was short of CPU and read the burst slower
+than the bus took it.
+
+**A client that only listens is in use.** The web server has seven places and, when another
+connection arrives, closes the one used longest ago; it counts a use only when a connection
+sends. A client of the CAN monitor, the log or the live values sends nothing after its
+handshake, so every plain request after it made it the oldest. Once a second a client that took
+data in the last 2 s is reported as in use (`httpd_sess_update_lru_counter`, called on the
+server's own task through `httpd_queue_work`). Leg W8: a reader of `/ws/can` beside eight plain
+connections was closed before; now it stays and the server closes two of the plain ones.
+
+## A client that stalls (2026-11-18)
+
+Found by reading after the same defect in `socket_manager`, then reproduced
+on the bench (firmware repo, `.\test.ps1 slcan`, leg W: a CAN bus at 1,100
+frames a second bridged to `/ws/can`, the clients on the Pi). A frame went
+out through `httpd_ws_send_frame_async()` in the bridge's own task, one
+client after the other, and each send could wait for the server's send
+timeout, 5 s:
+
+- beside one client that took nothing, a client that kept reading lost
+  11,367 to 13,419 of about 26,000 to 31,000 frames, with a hole of up to
+  6 s; the silent one was never closed and nothing was logged;
+- beside one client that took 2 KB a second, it got a third of its frames
+  (6,600 of 19,800);
+- of 750 lines written the other way meanwhile, 353 to 383 reached the bus:
+  the bridge's task serves both directions.
+
+What the send path does now (`websocket_manager_tx.c`):
+
+- The frame's header is built here and the frame is pushed to each client's
+  socket with `MSG_DONTWAIT` (the socket itself stays blocking: the web
+  server reads it). What a client does not take waits in its backlog, a
+  ring of 64 KB lent from a pool of four for as long as that client is
+  behind (the `tx_backlog` component, shared with the TCP servers), and
+  leaves in order, before anything newer.
+- A frame that finds the backlog full, or the pool empty, is dropped whole
+  and counted in `tx_drops`; a frame is never cut. The log says it once per
+  stall: `W <name>: a client is behind (N bytes waiting), what does not fit
+  is dropped`, then `W <name>: the client caught up, N frame(s) were dropped
+  meanwhile`.
+- A client that moved no byte for 10 s is closed: `W <name>: client dropped
+  (took no data for 10 s, ...)`. A slow client that still takes data stays.
+- The task `ws_tx` pushes the backlogs every 5 ms while one holds
+  something, so they leave on a quiet channel too.
+
+`tx_drops` therefore changed its meaning: it counted clients reaped on a
+failed send and counts frames dropped for a client that was behind.
+
+Memory: the pool is 4 x 64 KB = 256 KB of PSRAM `.bss`, the task's stack
+3 KB of PSRAM; 48 bytes of state per client slot. What clients write waits
+in another 128 KB of PSRAM `.bss` (one buffer, see above). Not a setting:
+external RAM is cheap, so it is sized with room instead, up to the floor
+of free external RAM the unit keeps.
 
 ## HTTP observability (endpoint reference: `components/HTTP_API.md` §6e3)
 

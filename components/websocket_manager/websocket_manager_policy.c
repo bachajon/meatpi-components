@@ -193,3 +193,31 @@ esp_err_t wsm_validate_channels(const cJSON *channels, char *err,
 
     return ESP_OK;
 }
+
+size_t wsm_frame_header(bool text, size_t len, uint8_t out[WSM_FRAME_HEAD_MAX])
+{
+    out[0] = (uint8_t)(0x80 | (text ? 0x01 : 0x02)); /* FIN + the opcode */
+
+    if (len < 126)
+    {
+        out[1] = (uint8_t)len;
+        return 2;
+    }
+
+    if (len <= 0xFFFF)
+    {
+        out[1] = 126;
+        out[2] = (uint8_t)(len >> 8);
+        out[3] = (uint8_t)len;
+        return 4;
+    }
+
+    out[1] = 127;
+
+    for (int i = 0; i < 8; i++)
+    {
+        out[2 + i] = (uint8_t)((uint64_t)len >> (8 * (7 - i)));
+    }
+
+    return 10;
+}

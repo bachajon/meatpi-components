@@ -2,6 +2,8 @@ idf_component_register(
     SRCS "websocket_manager.c"
          "websocket_manager_settings.c"
          "websocket_manager_ws.c"
+         "websocket_manager_tx.c"
+         "websocket_manager_rx.c"
          "websocket_manager_policy.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
@@ -9,6 +11,8 @@ idf_component_register(
     # http_server_manager (the one httpd; CONFIG_HTTPD_WS_SUPPORT=y in the
     # main config). Must NOT depend on bridge_manager: glue/main wraps
     # channels as endpoints. cJSON via managed dep (idf_component.yml).
+    # tx_backlog: what a client has not taken yet (the ring, the pool, the
+    # push that never blocks); lwip for MSG_DONTWAIT on the session's socket.
     PRIV_REQUIRES http_server_manager esp_http_server settings_manager
-                  log_manager
+                  log_manager tx_backlog lwip esp_timer
 )

@@ -86,7 +86,12 @@ esp_err_t websocket_manager_start(void)
 
     wsm_ws_reset();
 
-    esp_err_t err = wsm_ws_register_routes();
+    esp_err_t err = wsm_tx_start();
+
+    if (err == ESP_OK)
+    {
+        err = wsm_ws_register_routes();
+    }
 
     if (err == ESP_OK)
     {

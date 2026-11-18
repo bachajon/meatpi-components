@@ -82,7 +82,8 @@ typedef struct
     uint32_t bytes_in;
     uint32_t bytes_out;
     uint32_t rx_drops;   /* subscriber queue full                    */
-    uint32_t tx_drops;   /* client send failed -> client reaped     */
+    uint32_t tx_drops;   /* frames dropped for a client that was
+                            behind (2026-11-18; a reaped client before) */
     uint32_t refused;    /* upgrades refused at max_clients          */
 } websocket_stats_t;
 

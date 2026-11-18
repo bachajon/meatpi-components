@@ -62,6 +62,12 @@ esp_err_t wsm_validate_channels(const cJSON *channels, char *err,
  *  (skipped when the name/path is taken or the table is full). Pure. */
 esp_err_t wsm_migrate_channels(uint32_t from_version, cJSON *settings);
 
+/** The header of a frame the server sends (RFC 6455: FIN set, never
+ *  masked) for @p len payload bytes: 2, 4 or 10 bytes into @p out, their
+ *  number returned. Pure. */
+#define WSM_FRAME_HEAD_MAX 10
+size_t wsm_frame_header(bool text, size_t len, uint8_t out[WSM_FRAME_HEAD_MAX]);
+
 /* ---- settings (websocket_manager_settings.c) -------------------------------- */
 
 /** Register the "websocket_manager" descriptor with settings_manager. */
@@ -75,6 +81,7 @@ bool wsm_settings_is_configured(void); /* boot apply ran (standard §4.3)    */
 /* ---- ws layer (websocket_manager_ws.c): indexed like the config ----------- */
 
 esp_err_t wsm_ws_register_routes(void);
+esp_err_t wsm_tx_start(void);    /* the send side's flush task, once */
 void      wsm_ws_reset(void);
 esp_err_t wsm_ws_subscribe(int idx, void *queue);
 esp_err_t wsm_ws_unsubscribe(int idx, void *queue);
