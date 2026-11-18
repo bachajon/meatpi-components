@@ -24,6 +24,7 @@ then served locally on every later request. See `ARCHITECTURE.md` §8.
 - `esp_err_t http_server_manager_register_assets(const http_asset_t *table)`, sentinel-terminated asset table. **Pre-start only** (tables are read lock-free by the catch-all). Earlier tables win on conflicts.
 - `esp_err_t http_server_manager_set_asset_fetcher(http_asset_fetch_fn_t fn)`: inject the fetch-on-miss downloader (main wires the download component's ensure-present here). NULL disables; misses then 404 with `source_url` logged.
 - `esp_err_t http_server_manager_set_request_gate(http_request_gate_fn_t fn)`: a per-request admission gate `bool fn(int sockfd)`. Every registered route (incl. WS pre-handshake) is installed behind a trampoline that consults the gate first; `false` → 403 (WS: refuse before the 101), `true` → chain to the real handler. Content-agnostic: the manager knows nothing about *why*; main wires it to `wifi_manager_http_request_allowed` for the network-trust lockdown. NULL disables. The gate runs in httpd-task context: keep it fast + non-blocking.
+- `esp_err_t http_server_manager_register_close_hook(http_session_close_fn_t fn)`: a listener for the end of a session (2026-11-18), called on the server's task with the session's socket BEFORE that socket is closed (it is installed as the server's `close_fn`, which runs the listeners and then closes). For a component that sends on a session's socket from a task of its own (`websocket_manager`): it forgets the socket under its own lock, so it can never send on a socket that is closed or whose number a later connection took. The server frees a session's context only after closing the socket, which is too late for that. At most `HTTP_SERVER_MANAGER_CLOSE_HOOKS` (4, one in use); one more is refused with an E line. A hook must be short and must not call back into the server.
 - `void http_server_manager_capacity(size_t *used, size_t *cap)`: occupancy of the route table (2026-10-03): routes registered so far, WebSocket channels included, and the table's size (`HSM_MAX_BUFFERED_URIS`, 144). Main prints it as `WICAN CAPS http_routes=113/144` and latches `registry_headroom` below 2 free; `/api/status` carries it in `health.caps.http_routes`. The table had overflowed three times (80, 96, 112) with the last registration refused each time; the third was found by this getter on its first boot, at 112 of 112.
 - `httpd_handle_t http_server_manager_handle(void)`: escape hatch for APIs needing the raw handle (async WebSocket sends). Do not register handlers through it.
 
@@ -81,6 +82,20 @@ registered (the catch-all must be installed last).
 
 None. (The generic `/settings/*` routes belong to the `settings_http` glue
 component, not to this server, see ARCHITECTURE.md §9.)
+
+## The server's task runs on core 1 (2026-11-18)
+
+`httpd_start` is given `core_id = 1`. Left without a core, the task ended up
+pinned all the same, on core 0 in one boot and on core 1 in the next (the
+IDF pins a task that uses the FPU to the core it runs on at that moment,
+and a handler formats numbers). Core 0 has WiFi, Bluetooth, the timer task
+and the CAN receiver, all above the server's priority 5. With a full CAN
+bus streamed to a client that core is 80 to 98 % busy and core 1 has 40 to
+55 % to spare. On the bench (`canmax` stage, `/api/status/tasks` sampled
+every 2 s beside it): in a boot with the server on core 0 a plain request
+took up to 3 s during a tier; on core 1 the slowest was 0.56 s in every
+tier, and the task watchdog warnings for the idle task of core 0, seen in
+five of nine runs that day, did not appear.
 
 ## Constraints & limitations (read before registering)
 
@@ -184,7 +199,11 @@ secret). Reboot-to-apply.
 When enabled, EVERY inbound request (all routes, the UI catch-all, and
 WS pre-handshakes) must present the password at the same trampoline
 choke point as the network-trust gate (trust 403 wins first, then
-password 401):
+password 401). The frames of a WebSocket session that passed its
+handshake are not checked again (2026-11-18): a frame has no headers, and
+until then every data frame of an open session was answered with an HTTP
+401 written into the WebSocket stream, so no WebSocket channel worked
+with the password on. Bench: `.\test.ps1 httpauth` in the firmware repo.
 
 - `Authorization: Basic base64(any:password)`, any username; a stock
   browser needs ZERO UI code (401 + `WWW-Authenticate: Basic

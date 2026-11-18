@@ -148,6 +148,23 @@ void http_server_manager_capacity(size_t *used, size_t *cap);
  */
 httpd_handle_t http_server_manager_handle(void);
 
+/**
+ * A listener for the end of a session (2026-11-18): called on the server's
+ * task with the session's socket BEFORE that socket is closed. For a
+ * component that sends on a session's socket from a task of its own (the
+ * WebSocket channels): it forgets the socket here, under its own lock, so
+ * it can never send on a socket that is closed or whose number a later
+ * connection took. The server itself frees a session's context only AFTER
+ * it closed the socket, which leaves that window open.
+ *
+ * The hook must be short and must not call back into the server. At most
+ * HTTP_SERVER_MANAGER_CLOSE_HOOKS; one more is refused with
+ * ESP_ERR_NO_MEM and logged as an error.
+ */
+#define HTTP_SERVER_MANAGER_CLOSE_HOOKS 4
+typedef void (*http_session_close_fn_t)(int sockfd);
+esp_err_t http_server_manager_register_close_hook(http_session_close_fn_t fn);
+
 #ifdef __cplusplus
 }
 #endif

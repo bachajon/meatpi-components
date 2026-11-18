@@ -29,6 +29,7 @@
  * wildcard catch-all is installed last so specific routes always win.
  */
 #include <string.h>
+#include <unistd.h>
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
@@ -132,13 +133,24 @@ static esp_err_t auth_reject(httpd_req_t *req)
 static esp_err_t hsm_gate_trampoline(httpd_req_t *req)
 {
     const httpd_uri_t *orig = req->user_ctx;
+    int fd = httpd_req_to_sockfd(req);
 
-    if (s_gate != NULL && !s_gate(httpd_req_to_sockfd(req)))
+    /* A frame of an open WebSocket session. The session passed both gates
+       at its handshake (hsm_gate_ws_pre_handshake), a frame carries no HTTP
+       headers to look at, and an HTTP answer has no place in its stream.
+       Until 2026-11-18 the password check ran here for every frame, found
+       no Authorization header and wrote "HTTP/1.1 401 Unauthorized" into
+       the WebSocket stream of a client that had given the password. */
+    bool ws_frame = orig->is_websocket &&
+                    httpd_ws_get_fd_info(req->handle, fd) ==
+                        HTTPD_WS_CLIENT_WEBSOCKET;
+
+    if (s_gate != NULL && !s_gate(fd))
     {
-        return gate_reject(req);
+        return ws_frame ? ESP_FAIL : gate_reject(req); /* end it, no HTTP */
     }
 
-    if (!request_has_password(req))
+    if (!ws_frame && !request_has_password(req))
     {
         return auth_reject(req);
     }
@@ -331,6 +343,52 @@ esp_err_t http_server_manager_set_asset_fetcher(http_asset_fetch_fn_t fn)
     return ESP_OK;
 }
 
+/* ---- the end of a session -----------------------------------------------------
+ * Installed as the server's close_fn, which the server calls INSTEAD of
+ * close(): the listeners first, then the socket. */
+static http_session_close_fn_t s_close_hooks[HTTP_SERVER_MANAGER_CLOSE_HOOKS];
+
+esp_err_t http_server_manager_register_close_hook(http_session_close_fn_t fn)
+{
+    if (fn == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int i = 0; i < HTTP_SERVER_MANAGER_CLOSE_HOOKS; i++)
+    {
+        if (s_close_hooks[i] == fn)
+        {
+            return ESP_OK;
+        }
+
+        if (s_close_hooks[i] == NULL)
+        {
+            s_close_hooks[i] = fn;
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGE(TAG, "no room for one more session close hook (%d)",
+             HTTP_SERVER_MANAGER_CLOSE_HOOKS);
+    return ESP_ERR_NO_MEM;
+}
+
+static void session_close(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+
+    for (int i = 0; i < HTTP_SERVER_MANAGER_CLOSE_HOOKS; i++)
+    {
+        if (s_close_hooks[i] != NULL)
+        {
+            s_close_hooks[i](sockfd);
+        }
+    }
+
+    close(sockfd);
+}
+
 esp_err_t http_server_manager_start(void)
 {
     if (!s_inited || s_server != NULL)
@@ -343,6 +401,20 @@ esp_err_t http_server_manager_start(void)
     config.uri_match_fn     = httpd_uri_match_wildcard;
     config.max_uri_handlers = HSM_MAX_BUFFERED_URIS + 1;   /* + the catch-all */
     config.lru_purge_enable = true;
+    config.close_fn         = session_close;
+#if !CONFIG_FREERTOS_UNICORE
+    /* The server's task on core 1, always. Left without a core it ended up
+       pinned all the same: a task that uses the FPU is pinned by the IDF to
+       the core it runs on at that moment, and a handler formats numbers.
+       So it sat on core 0 in one boot and on core 1 in the next. Core 0 has
+       WiFi, Bluetooth, the timer task and the CAN receiver: with a full CAN
+       bus streamed to a client it is 80 to 98 % busy with tasks above the
+       server's priority, while core 1 has 40 to 55 % to spare (bench
+       2026-11-18, `/api/status/tasks` sampled during the canmax stage: a
+       plain request took up to 3 s in a boot where the server sat on core
+       0). */
+    config.core_id          = 1;
+#endif
     /* The IDF default 4 KB was MARGINAL for our handlers: API handlers
      * with a few hundred bytes of locals + littlefs/lfs + esp_flash
      * bounce-buffer + (with lwip core locking) an inline und_transmit
