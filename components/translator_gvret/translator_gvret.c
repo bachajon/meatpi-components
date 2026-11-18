@@ -26,15 +26,27 @@
  */
 #include "translator_gvret.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "bridge_manager.h"
 
+#include "translator_gvret_private.h"
+
 extern const bridge_translator_t translator_gvret_desc;
+
+/* the clock a TIME_SYNC answer carries: the one can_core stamps a received
+   frame with (ts_us: esp_timer in the CAN RX interrupt, its low 32 bits), so
+   the answer and the frame records are on one time line (2026-11-18) */
+static uint32_t gvret_clock_us(void)
+{
+    return (uint32_t)esp_timer_get_time();
+}
 
 esp_err_t translator_gvret_init(void)
 {
     esp_err_t err = bridge_manager_register_translator(&translator_gvret_desc);
     if (err == ESP_OK)
     {
+        gvret_clock_us_hook = gvret_clock_us;
         ESP_LOGI("translator_gvret", "registered 'gvret' codec");
     }
     return err;

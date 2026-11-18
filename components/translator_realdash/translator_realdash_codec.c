@@ -35,7 +35,16 @@
  *   44: 44 33 22 11 <id:4> <data:8 padded> <chksum8:1>    = 17 bytes
  * RealDash marks 29-bit ids by (id & 0x1FFFF800) != 0 (legacy behaviour).
  * Stateless per frame → no reply channel.
+ *
+ * What the codec REFUSES is reported (2026-11-18): decode/encode return
+ * RD_REFUSED for a chunk that carried input they dropped (bytes outside a
+ * frame, a header that is not 33 22 11, a frame whose CRC32 or checksum is
+ * wrong, bytes that are no wire frame), and the pump counts that call in
+ * the bridge's codec_errors (`/api/bridges`). The refused bytes alone are
+ * dropped: the frames around them in the same chunk still go out. Until
+ * that day every refusal returned ESP_OK and the counter stayed 0.
  */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -45,6 +54,9 @@
 
 #define RD66_LEN 20
 #define RD44_LEN 17
+
+/* what decode/encode return for a chunk that carried input they refused */
+#define RD_REFUSED ESP_ERR_INVALID_ARG
 
 typedef struct
 {
@@ -146,7 +158,9 @@ static esp_err_t rd_decode(void *ctx, const uint8_t *in, size_t len,
         off += consumed;
     }
 
-    return ESP_OK;
+    /* bytes that are no wire frame (a tail cut short, a dlc above 8: a
+       bridge row whose side `a` is not the can jack) */
+    return (off < len) ? RD_REFUSED : ESP_OK;
 }
 
 static esp_err_t rd_emit_one(const can_core_frame_t *fp,
@@ -175,8 +189,10 @@ static esp_err_t rd_emit_one(const can_core_frame_t *fp,
 
 /* ---- a completed frame in ctx->buf → CAN-wire -------------------------- */
 
+/* *bad = true for a frame whose CRC32 / checksum is wrong: dropped, the
+ * caller reports it */
 static esp_err_t rd_emit(realdash_ctx_t *c, bridge_sink_fn_t sink,
-                         void *sink_arg)
+                         void *sink_arg, bool *bad)
 {
     can_core_frame_t f;
     uint8_t wire[CAN_WIRE_MAX];
@@ -196,7 +212,8 @@ static esp_err_t rd_emit(realdash_ctx_t *c, bridge_sink_fn_t sink,
 
     if (!ok)
     {
-        return ESP_OK; /* bad checksum → drop, ctx already reset by caller */
+        *bad = true;   /* bad checksum → drop, the caller resets the ctx */
+        return ESP_OK;
     }
 
     memset(&f, 0, sizeof(f));
@@ -216,6 +233,7 @@ static esp_err_t rd_encode(void *vctx, const uint8_t *in, size_t len,
                            bridge_sink_fn_t sink, void *sink_arg)
 {
     realdash_ctx_t *c = vctx;
+    esp_err_t ret = ESP_OK;
 
     for (size_t i = 0; i < len; i++)
     {
@@ -226,7 +244,11 @@ static esp_err_t rd_encode(void *vctx, const uint8_t *in, size_t len,
         {
             if (byte == 0x66) { c->expected = RD66_LEN; }
             else if (byte == 0x44) { c->expected = RD44_LEN; }
-            else { continue; }
+            else
+            {
+                ret = RD_REFUSED;   /* a byte outside a frame */
+                continue;
+            }
             c->buf[c->len++] = byte;
             continue;
         }
@@ -236,6 +258,7 @@ static esp_err_t rd_encode(void *vctx, const uint8_t *in, size_t len,
             (c->len == 2 && byte != 0x22) ||
             (c->len == 3 && byte != 0x11))
         {
+            ret = RD_REFUSED;       /* what was buffered was no header */
             c->len = 0; /* bad magic → resync from scratch */
             /* the current byte might itself be a header start */
             if (byte == 0x66) { c->expected = RD66_LEN; c->buf[c->len++] = byte; }
@@ -247,14 +270,25 @@ static esp_err_t rd_encode(void *vctx, const uint8_t *in, size_t len,
 
         if (c->len >= c->expected)
         {
-            esp_err_t err = rd_emit(c, sink, sink_arg);
+            bool bad = false;
+            esp_err_t err = rd_emit(c, sink, sink_arg, &bad);
+
             c->len = 0;
             c->expected = 0;
-            if (err != ESP_OK) return err;
+
+            if (err != ESP_OK)
+            {
+                return err;
+            }
+
+            if (bad)
+            {
+                ret = RD_REFUSED;
+            }
         }
     }
 
-    return ESP_OK;
+    return ret;
 }
 
 const bridge_translator_t translator_realdash_desc =

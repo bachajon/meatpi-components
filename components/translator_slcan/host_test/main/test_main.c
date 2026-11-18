@@ -4,7 +4,9 @@
  *        encode (ASCII→CAN-wire) and decode (CAN-wire→ASCII) round-trips for
  *        11/29-bit, RTR, dlc 0..8; input fragmented at every byte boundary;
  *        one chunk carrying several frames; malformed input rejected with a
- *        clean ctx; control commands absorbed.
+ *        clean ctx; control commands absorbed; what the codec refuses is
+ *        reported to the caller (the bridge's codec_errors); a line longer
+ *        than a line can be is dropped up to its CR.
  */
 #include <string.h>
 
@@ -276,6 +278,144 @@ void test_roundtrip_encode_decode(void)
     TEST_ASSERT_EQUAL_HEX8(0xEF, g_frames[0].data[3]);
 }
 
+/* ---- what the codec refuses is reported -------------------------------- */
+
+/* feed a whole string to encode through one fresh ctx: what encode returned */
+static esp_err_t enc_rc(const char *s)
+{
+    uint8_t ctx[64];
+
+    translator_slcan_desc.ctx_init(ctx);
+    return translator_slcan_desc.encode(ctx, (const uint8_t *)s, strlen(s),
+                                        frame_sink, NULL);
+}
+
+void test_encode_reports_a_refused_line(void)
+{
+    /* the pump counts a codec call that does not return ESP_OK in the
+       bridge's codec_errors. Until 2026-11-18 every refusal returned
+       ESP_OK and the counter stayed 0 whatever arrived */
+    reset();
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc("t1001AA\r"));
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc("C\rS6\r\rO\r")); /* python-can's open */
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc("V\rN\rZ1\rM00000000\r"));
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc("t2001"));        /* not ended yet     */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("t10\r"));     /* no dlc  */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("tZZ01AA\r")); /* id      */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("t1009AA\r")); /* dlc 9   */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("t1002AA\r")); /* short   */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("t1001AZ\r")); /* data    */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc("\x01\x02\r")); /* no slcan */
+    TEST_ASSERT_EQUAL(1, g_nframes);
+}
+
+void test_encode_a_refused_line_keeps_its_neighbours(void)
+{
+    /* one bad line in a chunk: the chunk is reported, and the good lines
+       before and behind it still reach the bus */
+    reset();
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      enc_rc("t1001AA\rtZZ01AA\rt2001BB\r"));
+    TEST_ASSERT_EQUAL(2, g_nframes);
+    TEST_ASSERT_EQUAL_HEX32(0x100, g_frames[0].id);
+    TEST_ASSERT_EQUAL_HEX32(0x200, g_frames[1].id);
+}
+
+void test_decode_reports_a_malformed_chunk(void)
+{
+    /* bytes that are no wire frame (a bridge row whose side `a` is not the
+       can jack): reported, and the frames in front of them still go out */
+    can_core_frame_t a = { .id = 0x100, .dlc = 1, .data = { 0x11 } };
+    uint8_t wire[2 * CAN_WIRE_MAX];
+    uint8_t ctx[64];
+    size_t n = can_wire_encode(&a, wire);
+
+    translator_slcan_desc.ctx_init(ctx);
+    reset();
+    TEST_ASSERT_EQUAL(ESP_OK, translator_slcan_desc.decode(ctx, wire, n,
+                                                           ascii_sink, NULL));
+    TEST_ASSERT_EQUAL_STRING("t100111\r", g_ascii);
+
+    reset();
+    memset(wire + n, 0xFF, 5);          /* a tail shorter than a header */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      translator_slcan_desc.decode(ctx, wire, n + 5,
+                                                   ascii_sink, NULL));
+    TEST_ASSERT_EQUAL_STRING("t100111\r", g_ascii);
+
+    reset();
+    wire[5] = 9;                        /* a dlc no CAN frame has       */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      translator_slcan_desc.decode(ctx, wire, n, ascii_sink,
+                                                   NULL));
+    TEST_ASSERT_EQUAL_STRING("", g_ascii);
+}
+
+/* ---- a line longer than a line can be ---------------------------------- */
+
+void test_encode_overlong_line_dropped_to_its_cr(void)
+{
+    /* 48 characters and then, in the SAME line, what reads as a frame
+       line. Until 2026-11-18 the codec forgot the line at character 48 and
+       read what followed as a line of its own: frame 0x100 went to the bus
+       though the client never wrote that line */
+    char big[48 + 16];
+    uint8_t ctx[64];
+    esp_err_t rc;
+
+    memset(big, 'A', 48);
+    strcpy(big + 48, "t1001AA\r");
+
+    reset();
+    translator_slcan_desc.ctx_init(ctx);
+    rc = translator_slcan_desc.encode(ctx, (const uint8_t *)big, strlen(big),
+                                      frame_sink, NULL);
+    TEST_ASSERT_EQUAL(0, g_nframes);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, rc);
+
+    /* the line behind that CR is a line again, in the same ctx */
+    rc = translator_slcan_desc.encode(ctx, (const uint8_t *)"t2001BB\r", 8,
+                                      frame_sink, NULL);
+    TEST_ASSERT_EQUAL(ESP_OK, rc);
+    TEST_ASSERT_EQUAL(1, g_nframes);
+    TEST_ASSERT_EQUAL_HEX32(0x200, g_frames[0].id);
+}
+
+void test_encode_overlong_line_across_chunks(void)
+{
+    /* the same line one byte per chunk, its CR in a chunk of its own: a
+       chunk is reported when a byte of it was dropped, never before the
+       line is too long, and nothing of the line reaches the bus */
+    char big[60 + 16];
+    uint8_t ctx[64];
+    size_t len;
+
+    memset(big, 'A', 60);
+    strcpy(big + 60, "t1001AA");
+    len = strlen(big);
+
+    reset();
+    translator_slcan_desc.ctx_init(ctx);
+
+    for (size_t i = 0; i < len; i++)
+    {
+        esp_err_t rc = translator_slcan_desc.encode(
+            ctx, (const uint8_t *)&big[i], 1, frame_sink, NULL);
+
+        TEST_ASSERT_EQUAL((i < 47) ? ESP_OK : ESP_ERR_INVALID_ARG, rc);
+    }
+
+    TEST_ASSERT_EQUAL(ESP_OK, translator_slcan_desc.encode(
+                                  ctx, (const uint8_t *)"\r", 1, frame_sink,
+                                  NULL));
+    TEST_ASSERT_EQUAL(0, g_nframes);
+    TEST_ASSERT_EQUAL(ESP_OK, translator_slcan_desc.encode(
+                                  ctx, (const uint8_t *)"t2001BB\r", 8,
+                                  frame_sink, NULL));
+    TEST_ASSERT_EQUAL(1, g_nframes);
+    TEST_ASSERT_EQUAL_HEX32(0x200, g_frames[0].id);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -292,5 +432,10 @@ void app_main(void)
     RUN_TEST(test_decode_coalesced_chunk);
     RUN_TEST(test_decode_ext_and_rtr);
     RUN_TEST(test_roundtrip_encode_decode);
+    RUN_TEST(test_encode_reports_a_refused_line);
+    RUN_TEST(test_encode_a_refused_line_keeps_its_neighbours);
+    RUN_TEST(test_decode_reports_a_malformed_chunk);
+    RUN_TEST(test_encode_overlong_line_dropped_to_its_cr);
+    RUN_TEST(test_encode_overlong_line_across_chunks);
     UNITY_END();
 }

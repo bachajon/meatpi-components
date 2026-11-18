@@ -34,13 +34,24 @@
  *
  * Bus params in replies are advertised as 500 kbit/s enabled (the bus is
  * really owned by can_manager settings; SETUP_CANBUS is parsed + absorbed).
+ *
+ * What the codec REFUSES is reported (2026-11-18): decode/encode return
+ * GVRET_REFUSED for a chunk that carried input they dropped (bytes outside
+ * a command other than F1, E7 and 00, a command byte GVRET does not have,
+ * bytes that are no wire frame), and the pump counts that call in the
+ * bridge's codec_errors (`/api/bridges`). The refused bytes alone are
+ * dropped: the commands around them in the same chunk still run. Until
+ * that day every refusal returned ESP_OK and the counter stayed 0.
  */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "bridge_manager.h"
 #include "can_frame_wire.h"
+
+#include "translator_gvret_private.h"
 
 /* GVRET command bytes (subset we act on) */
 enum { PROTO_BUILD_FRAME = 0, PROTO_TIME_SYNC = 1, PROTO_DIG_IN = 2,
@@ -55,6 +66,9 @@ enum { S_IDLE = 0, S_CMD, S_BUILD, S_SETUP_CANBUS, S_ECHO, S_ABSORB };
 #define GVRET_BUILD_NUM 618
 #define GVRET_BUS_SPEED 500000u
 
+/* what decode/encode return for a chunk that carried input they refused */
+#define GVRET_REFUSED ESP_ERR_INVALID_ARG
+
 typedef struct
 {
     bridge_reply_hdr_t reply;   /* filled by the pump (wants_reply)          */
@@ -63,7 +77,8 @@ typedef struct
     uint16_t step;
     uint8_t  absorb_left;       /* bytes to swallow for absorbed commands    */
     can_core_frame_t frame;
-    uint32_t ts;                /* monotonic-ish timestamp for decode records*/
+    uint32_t ts;                /* DECODE ctx only: the synthetic clock of
+                                   the records of frames without a time  */
 } gvret_ctx_t;
 
 /* ---- ctx_init ---------------------------------------------------------- */
@@ -99,7 +114,9 @@ static esp_err_t gvret_decode(void *vctx, const uint8_t *in, size_t len,
         off += consumed;
     }
 
-    return ESP_OK;
+    /* bytes that are no wire frame (a tail cut short, a dlc above 8: a
+       bridge row whose side `a` is not the can jack) */
+    return (off < len) ? GVRET_REFUSED : ESP_OK;
 }
 
 static esp_err_t gvret_emit_one(gvret_ctx_t *c, const can_core_frame_t *fp,
@@ -147,6 +164,10 @@ static esp_err_t gvret_emit_one(gvret_ctx_t *c, const can_core_frame_t *fp,
     return sink(sink_arg, buf, (size_t)n);
 }
 
+/* ---- the device clock (translator_gvret_private.h) --------------------- */
+
+uint32_t (*gvret_clock_us_hook)(void) = NULL;
+
 /* ---- reply helpers (to the client via the reply channel) --------------- */
 
 static esp_err_t reply(gvret_ctx_t *c, const uint8_t *b, size_t n)
@@ -155,11 +176,13 @@ static esp_err_t reply(gvret_ctx_t *c, const uint8_t *b, size_t n)
     return c->reply.reply(c->reply.reply_arg, b, n);
 }
 
-static esp_err_t handle_command(gvret_ctx_t *c, uint8_t cmd,
-                                bridge_sink_fn_t sink, void *sink_arg)
+/* the byte behind F1. *known = false for a byte that is no GVRET command:
+ * nothing is answered, the caller reports it */
+static esp_err_t handle_command(gvret_ctx_t *c, uint8_t cmd, bool *known)
 {
     uint8_t r[24];
-    (void)sink; (void)sink_arg;
+
+    *known = true;
 
     switch (cmd)
     {
@@ -168,10 +191,22 @@ static esp_err_t handle_command(gvret_ctx_t *c, uint8_t cmd,
         memset(&c->frame, 0, sizeof(c->frame));
         return ESP_OK;
     case PROTO_TIME_SYNC:
-        r[0] = 0xF1; r[1] = 1;
-        r[2] = (uint8_t)c->ts; r[3] = (uint8_t)(c->ts >> 8);
-        r[4] = (uint8_t)(c->ts >> 16); r[5] = (uint8_t)(c->ts >> 24);
-        c->state = S_IDLE; return reply(c, r, 6);
+    {
+        /* the clock the frame records carry (translator_gvret_private.h).
+           Until 2026-11-18 this read c->ts, which only a DECODE ctx
+           advances and this is the encode ctx: 0 at every request */
+        uint32_t now = (gvret_clock_us_hook != NULL) ? gvret_clock_us_hook()
+                                                     : 0;
+
+        r[0] = 0xF1;
+        r[1] = 1;
+        r[2] = (uint8_t)now;
+        r[3] = (uint8_t)(now >> 8);
+        r[4] = (uint8_t)(now >> 16);
+        r[5] = (uint8_t)(now >> 24);
+        c->state = S_IDLE;
+        return reply(c, r, 6);
+    }
     case PROTO_DIG_IN:
         r[0] = 0xF1; r[1] = 2; r[2] = 0; r[3] = 0; /* checksum of {} */
         c->state = S_IDLE; return reply(c, r, 4);
@@ -210,7 +245,9 @@ static esp_err_t handle_command(gvret_ctx_t *c, uint8_t cmd,
     case PROTO_SET_EXT_BUSES:
         c->state = S_ABSORB; c->absorb_left = 12; return ESP_OK;
     default:
-        c->state = S_IDLE; return ESP_OK;
+        *known = false;
+        c->state = S_IDLE;
+        return ESP_OK;
     }
 }
 
@@ -220,6 +257,7 @@ static esp_err_t gvret_encode(void *vctx, const uint8_t *in, size_t len,
                               bridge_sink_fn_t sink, void *sink_arg)
 {
     gvret_ctx_t *c = vctx;
+    esp_err_t ret = ESP_OK;
 
     for (size_t i = 0; i < len; i++)
     {
@@ -228,14 +266,38 @@ static esp_err_t gvret_encode(void *vctx, const uint8_t *in, size_t len,
         switch (c->state)
         {
         case S_IDLE:
-            if (b == 0xF1) c->state = S_CMD;
-            /* 0xE7 (binary mode) and console bytes are ignored */
+            if (b == 0xF1)
+            {
+                c->state = S_CMD;
+            }
+            else if (b != 0xE7 && b != 0x00)
+            {
+                /* absorbed: 0xE7 (binary mode: SavvyCAN sends it twice on
+                   connect) and 0x00 (SavvyCAN ends SETUP_CANBUS and
+                   SET_EXT_BUSES with a zero where a checksum would be,
+                   and the 8 / 12 bytes taken here leave it over: from
+                   reading its source, no capture yet). Any other byte
+                   outside a command is no GVRET (the text console the
+                   original firmware gave these bytes to is not here):
+                   dropped and reported */
+                ret = GVRET_REFUSED;
+            }
             break;
 
         case S_CMD:
         {
-            esp_err_t err = handle_command(c, b, sink, sink_arg);
-            if (err != ESP_OK) return err;
+            bool known;
+            esp_err_t err = handle_command(c, b, &known);
+
+            if (err != ESP_OK)
+            {
+                return err;
+            }
+
+            if (!known)
+            {
+                ret = GVRET_REFUSED;
+            }
             break;
         }
 
@@ -310,7 +372,7 @@ static esp_err_t gvret_encode(void *vctx, const uint8_t *in, size_t len,
         }
     }
 
-    return ESP_OK;
+    return ret;
 }
 
 const bridge_translator_t translator_gvret_desc =

@@ -3,7 +3,8 @@
  * @brief Host suite for the pure RealDash codec: decode (CAN→66) format +
  *        CRC32, encode (66 & 44 → CAN) with checksum validation, fragmentation
  *        at every byte boundary, bad-checksum reject, resync after garbage,
- *        and 29-bit id detection.
+ *        29-bit id detection, and what the codec refuses reported to the
+ *        caller (the bridge's codec_errors).
  */
 #include <string.h>
 
@@ -153,6 +154,94 @@ void test_encode_resync_after_garbage(void)
     TEST_ASSERT_EQUAL_HEX32(0x321, g_frames[0].id);
 }
 
+/* ---- what the codec refuses is reported -------------------------------- */
+
+/* feed bytes to encode through one fresh ctx: what encode returned */
+static esp_err_t enc_rc(const uint8_t *b, size_t n)
+{
+    uint8_t ctx[32];
+
+    translator_realdash_desc.ctx_init(ctx);
+    return translator_realdash_desc.encode(ctx, b, n, frame_sink, NULL);
+}
+
+void test_encode_reports_what_it_refuses(void)
+{
+    /* the pump counts a codec call that does not return ESP_OK in the
+       bridge's codec_errors. Until 2026-11-18 every refusal returned
+       ESP_OK and the counter stayed 0 whatever arrived */
+    static const uint8_t noise[] = { 0x00, 0xFF, 0x12 };
+    static const uint8_t magic[] = { 0x66, 0x33, 0x99 };
+    uint8_t frame[32];
+    uint8_t d[8] = { 0xAA, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t f44[17] = { 0x44, 0x33, 0x22, 0x11, 0x50, 0x00, 0x00, 0x00,
+                        0xC0, 0xFF, 0xEE, 0, 0, 0, 0, 0, 0 };
+    unsigned sum = 0;
+    size_t n = make66(frame, 0x200, d, 1);
+
+    for (int i = 0; i < 16; i++)
+    {
+        sum += f44[i];
+    }
+
+    f44[16] = (uint8_t)sum;
+
+    reset();
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc(frame, n));
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc(f44, sizeof(f44)));
+    TEST_ASSERT_EQUAL(ESP_OK, enc_rc(frame, 10));       /* not ended yet */
+    TEST_ASSERT_EQUAL(2, g_nframes);
+
+    reset();
+    frame[19] ^= 0xFF;                                  /* CRC32 */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc(frame, n));
+    f44[16] ^= 0xFF;                                    /* checksum */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc(f44, sizeof(f44)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc(noise, sizeof(noise)));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc(magic, sizeof(magic)));
+    TEST_ASSERT_EQUAL(0, g_nframes);
+}
+
+void test_encode_refused_bytes_keep_the_frame_behind_them(void)
+{
+    /* a frame with a bad CRC and a good one in ONE chunk: the chunk is
+       reported and the good frame still reaches the bus */
+    uint8_t stream[40];
+    uint8_t d[8] = { 0x9, 0, 0, 0, 0, 0, 0, 0 };
+    size_t n = make66(stream, 0x200, d, 1);
+
+    stream[19] ^= 0xFF;
+    n += make66(stream + n, 0x321, d, 1);
+
+    reset();
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, enc_rc(stream, n));
+    TEST_ASSERT_EQUAL(1, g_nframes);
+    TEST_ASSERT_EQUAL_HEX32(0x321, g_frames[0].id);
+}
+
+void test_decode_reports_a_malformed_chunk(void)
+{
+    /* bytes that are no wire frame (a bridge row whose side `a` is not the
+       can jack): reported, and the frame in front of them still goes out */
+    can_core_frame_t f = { .id = 0x100, .dlc = 1, .data = { 0x11 } };
+    uint8_t wire[2 * CAN_WIRE_MAX];
+    uint8_t ctx[32];
+    size_t n = can_wire_encode(&f, wire);
+
+    translator_realdash_desc.ctx_init(ctx);
+    reset();
+    TEST_ASSERT_EQUAL(ESP_OK, translator_realdash_desc.decode(ctx, wire, n,
+                                                              raw_sink, NULL));
+    TEST_ASSERT_EQUAL(20, g_olen);
+
+    reset();
+    memset(wire + n, 0xFF, 5);          /* a tail shorter than a header */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      translator_realdash_desc.decode(ctx, wire, n + 5,
+                                                      raw_sink, NULL));
+    TEST_ASSERT_EQUAL(20, g_olen);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -162,5 +251,8 @@ void app_main(void)
     RUN_TEST(test_encode_66_bad_crc_rejected);
     RUN_TEST(test_encode_44);
     RUN_TEST(test_encode_resync_after_garbage);
+    RUN_TEST(test_encode_reports_what_it_refuses);
+    RUN_TEST(test_encode_refused_bytes_keep_the_frame_behind_them);
+    RUN_TEST(test_decode_reports_a_malformed_chunk);
     UNITY_END();
 }
