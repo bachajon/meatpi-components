@@ -5,6 +5,8 @@ set(root "${comp_dir}/..")
 
 idf_component_register(
     SRCS "test_main.c"
+         "test_steps.c"
+         "test_publish.c"
          "${comp_dir}/mqtt_can_codec.c"
     INCLUDE_DIRS
         "${comp_dir}/include"

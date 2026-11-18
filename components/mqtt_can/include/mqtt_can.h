@@ -55,6 +55,19 @@ typedef struct
     uint32_t dropped_tx_gate; /* messages refused: allow_tx=false       */
     uint32_t dropped_q_full;  /* inbound chunks lost to a full bridge q */
     uint32_t parse_errors;    /* malformed tx objects                   */
+    /* appended 2026-11-18 (API change: the struct grew, nothing moved).
+       The codec counted the second all along and nothing read it; the
+       other two were lost without a count */
+    uint32_t tx_cut;          /* tx objects dropped: a new message began
+                                 before they closed (a message cut short,
+                                 a chunk lost to a full bridge queue)   */
+    uint32_t tx_oversize;     /* tx objects dropped: above 1024 bytes
+                                 (MC_TXBUF_MAX)                         */
+    uint32_t dropped_rx_frames; /* bus frames of a batch that did not fit
+                                 its JSON buffer: 0 by sizing           */
+    uint32_t pub_refused;     /* rx messages mqtt_manager did not take:
+                                 its queue was full, or no broker (one
+                                 message is one batch of frames)        */
 } mqtt_can_stats_t;
 
 void mqtt_can_stats(mqtt_can_stats_t *out);

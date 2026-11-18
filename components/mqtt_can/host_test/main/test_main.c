@@ -28,39 +28,7 @@
 #include "can_frame_wire.h"
 #include "mqtt_can_codec.h"
 
-/* ---- helpers ---------------------------------------------------------------- */
-
-static can_core_frame_t mk_frame(uint32_t id, uint8_t dlc, bool ext,
-                                 bool rtr)
-{
-    can_core_frame_t f;
-
-    memset(&f, 0, sizeof(f));
-    f.id = id;
-    f.dlc = dlc;
-    f.ext = ext;
-    f.rtr = rtr;
-
-    for (uint8_t i = 0; i < dlc; i++)
-    {
-        f.data[i] = (uint8_t)(i + 1);
-    }
-
-    return f;
-}
-
-static size_t wire_chunk(const can_core_frame_t *frames, int n,
-                         uint8_t *out)
-{
-    size_t w = 0;
-
-    for (int i = 0; i < n; i++)
-    {
-        w += can_wire_encode(&frames[i], out + w);
-    }
-
-    return w;
-}
+#include "test_frames.h"
 
 /* ---- rx: batch -> legacy JSON ---------------------------------------------- */
 
@@ -70,10 +38,12 @@ void test_batch_json_legacy_exact(void)
     uint8_t chunk[64];
     char json[MC_JSON_MAX];
     can_core_frame_t f = mk_frame(123, 8, false, false);
+    size_t len = wire_chunk(&f, 1, chunk);
+    int added = 0;
 
     mc_batch_init(&b, 4);
-    TEST_ASSERT_EQUAL(1, mc_batch_add_chunk(&b, chunk,
-                                            wire_chunk(&f, 1, chunk)));
+    TEST_ASSERT_EQUAL(len, mc_batch_add_chunk(&b, chunk, len, &added));
+    TEST_ASSERT_EQUAL(1, added);
     TEST_ASSERT_FALSE(mc_batch_ready(&b));
 
     size_t n = mc_batch_json(&b, 34610, json, sizeof(json));
@@ -98,10 +68,12 @@ void test_batch_json_multi_ext_rtr(void)
         mk_frame(0x1ABCDEF0, 2, true, false),
         mk_frame(0x100, 0, false, true),
     };
+    size_t len = wire_chunk(fr, 2, chunk);
+    int added = 0;
 
     mc_batch_init(&b, 2);
-    TEST_ASSERT_EQUAL(2, mc_batch_add_chunk(&b, chunk,
-                                            wire_chunk(fr, 2, chunk)));
+    TEST_ASSERT_EQUAL(len, mc_batch_add_chunk(&b, chunk, len, &added));
+    TEST_ASSERT_EQUAL(2, added);
     TEST_ASSERT_TRUE(mc_batch_ready(&b));
 
     (void)mc_batch_json(&b, 7, json, sizeof(json));
@@ -113,8 +85,12 @@ void test_batch_json_multi_ext_rtr(void)
         "\"data\":[]}]}", json);
 }
 
-void test_batch_overflow_counted(void)
+void test_batch_full_takes_no_more_and_drops_nothing(void)
 {
+    /* until 2026-11-18 a frame past MC_BATCH_MAX was dropped here and
+       counted in a counter nothing read. Now a full batch takes nothing:
+       the frame stays in the chunk, the caller drains the batch and feeds
+       the rest again (mc_batch_feed) */
     mc_batch_t b;
     uint8_t chunk[CAN_WIRE_MAX];
     can_core_frame_t f = mk_frame(1, 8, false, false);
@@ -124,11 +100,15 @@ void test_batch_overflow_counted(void)
 
     for (int i = 0; i < MC_BATCH_MAX + 5; i++)
     {
-        mc_batch_add_chunk(&b, chunk, len);
+        int added = -1;
+        size_t used = mc_batch_add_chunk(&b, chunk, len, &added);
+
+        TEST_ASSERT_EQUAL((i < MC_BATCH_MAX) ? len : 0, used);
+        TEST_ASSERT_EQUAL((i < MC_BATCH_MAX) ? 1 : 0, added);
     }
 
     TEST_ASSERT_EQUAL(MC_BATCH_MAX, b.n);
-    TEST_ASSERT_EQUAL(5, b.dropped);    /* nothing vanishes uncounted   */
+    TEST_ASSERT_EQUAL(0, b.dropped);
 
     char json[MC_JSON_MAX];
     size_t n = mc_batch_json(&b, 1, json, sizeof(json));
@@ -150,7 +130,7 @@ void test_batch_worstcase_fits(void)
 
     for (int i = 0; i < MC_BATCH_MAX; i++)
     {
-        mc_batch_add_chunk(&b, chunk, wire_chunk(&f, 1, chunk));
+        mc_batch_add_chunk(&b, chunk, wire_chunk(&f, 1, chunk), NULL);
     }
 
     size_t n = mc_batch_json(&b, 9223372036854775807LL, json,
@@ -246,6 +226,33 @@ void test_txasm_oversize_discarded_counted(void)
 
 /* ---- tx: parse -------------------------------------------------------------- */
 
+/* mc_tx_parse hands every frame over: the first @p max are kept here */
+typedef struct
+{
+    can_core_frame_t *out;
+    size_t max;
+    size_t n;
+} tx_keep_t;
+
+static void tx_keep_cb(void *arg, const can_core_frame_t *f)
+{
+    tx_keep_t *k = arg;
+
+    if (k->n < k->max)
+    {
+        k->out[k->n] = *f;
+    }
+
+    k->n++;
+}
+
+static int tx_parse(const char *msg, can_core_frame_t *out, size_t max)
+{
+    tx_keep_t k = { .out = out, .max = max, .n = 0 };
+
+    return mc_tx_parse(msg, strlen(msg), tx_keep_cb, &k);
+}
+
 void test_tx_parse_legacy_exact(void)
 {
     /* the documented legacy tx example (legacy main/mqtt.c:212) */
@@ -256,7 +263,7 @@ void test_tx_parse_legacy_exact(void)
         "\"rtr\":false,\"extd\":true,"
         "\"data\":[1,2,3,4,5,6,7,8]}]}";
     can_core_frame_t out[4];
-    int n = mc_tx_parse(msg, strlen(msg), out, 4);
+    int n = tx_parse(msg, out, 4);
 
     TEST_ASSERT_EQUAL(2, n);
     TEST_ASSERT_EQUAL_HEX32(123, out[0].id);
@@ -275,7 +282,7 @@ void test_tx_parse_fuel_level_example(void)
         "[{\"id\":2016,\"dlc\":8,\"rtr\":false,\"extd\":false,"
         "\"data\":[2,1,47,170,170,170,170,170]}]}";
     can_core_frame_t out[1];
-    int n = mc_tx_parse(msg, strlen(msg), out, 1);
+    int n = tx_parse(msg, out, 1);
 
     TEST_ASSERT_EQUAL(1, n);
     TEST_ASSERT_EQUAL_HEX32(2016, out[0].id);
@@ -290,43 +297,48 @@ void test_tx_parse_rejects(void)
     /* wrong type */
     const char *rx = "{\"type\":\"rx\",\"frame\":[]}";
 
-    TEST_ASSERT_EQUAL(-1, mc_tx_parse(rx, strlen(rx), out, 4));
+    TEST_ASSERT_EQUAL(-1, tx_parse(rx, out, 4));
 
     /* dlc out of range */
     const char *dlc =
         "{\"type\":\"tx\",\"frame\":[{\"id\":1,\"dlc\":9,\"data\":[]}]}";
 
-    TEST_ASSERT_EQUAL(-1, mc_tx_parse(dlc, strlen(dlc), out, 4));
+    TEST_ASSERT_EQUAL(-1, tx_parse(dlc, out, 4));
 
     /* id beyond 29 bits */
     const char *id =
         "{\"type\":\"tx\",\"frame\":[{\"id\":536870912,\"dlc\":0}]}";
 
-    TEST_ASSERT_EQUAL(-1, mc_tx_parse(id, strlen(id), out, 4));
+    TEST_ASSERT_EQUAL(-1, tx_parse(id, out, 4));
 
     /* not JSON at all */
-    TEST_ASSERT_EQUAL(-1, mc_tx_parse("junk", 4, out, 4));
+    TEST_ASSERT_EQUAL(-1, tx_parse("junk", out, 4));
 
     /* empty frame array is VALID (0 frames) */
     const char *empty = "{\"type\":\"tx\",\"frame\":[]}";
 
-    TEST_ASSERT_EQUAL(0, mc_tx_parse(empty, strlen(empty), out, 4));
+    TEST_ASSERT_EQUAL(0, tx_parse(empty, out, 4));
 }
 
-void test_tx_parse_array_cap_and_implicit_ext(void)
+void test_tx_parse_every_frame_and_implicit_ext(void)
 {
-    /* 3 frames into a 2-slot array: keep what fits; id > 0x7FF gets
-       ext even without an "extd" key */
+    /* the parser hands over EVERY frame of the object, however many (it
+       stopped at the room its caller gave until 2026-11-18); id > 0x7FF
+       gets ext even without an "extd" key */
     const char *msg =
         "{\"type\":\"tx\",\"frame\":[{\"id\":2047,\"dlc\":0},"
         "{\"id\":2048,\"dlc\":0},{\"id\":3,\"dlc\":0}]}";
-    can_core_frame_t out[2];
-    int n = mc_tx_parse(msg, strlen(msg), out, 2);
+    can_core_frame_t out[3];
+    int n = tx_parse(msg, out, 3);
 
-    TEST_ASSERT_EQUAL(2, n);
+    TEST_ASSERT_EQUAL(3, n);
     TEST_ASSERT_FALSE(out[0].ext);      /* 0x7FF still standard        */
     TEST_ASSERT_TRUE(out[1].ext);       /* 0x800 implies extended      */
+    TEST_ASSERT_EQUAL_HEX32(3, out[2].id);
 }
+
+extern void run_step_tests(void);
+extern void run_publish_tests(void);    /* test_publish.c: mc_pub_each */
 
 void app_main(void)
 {
@@ -334,7 +346,7 @@ void app_main(void)
 
     RUN_TEST(test_batch_json_legacy_exact);
     RUN_TEST(test_batch_json_multi_ext_rtr);
-    RUN_TEST(test_batch_overflow_counted);
+    RUN_TEST(test_batch_full_takes_no_more_and_drops_nothing);
     RUN_TEST(test_batch_worstcase_fits);
 
     RUN_TEST(test_txasm_fragmented);
@@ -344,7 +356,10 @@ void app_main(void)
     RUN_TEST(test_tx_parse_legacy_exact);
     RUN_TEST(test_tx_parse_fuel_level_example);
     RUN_TEST(test_tx_parse_rejects);
-    RUN_TEST(test_tx_parse_array_cap_and_implicit_ext);
+    RUN_TEST(test_tx_parse_every_frame_and_implicit_ext);
+
+    run_step_tests();
+    run_publish_tests();
 
     UNITY_END();
 }

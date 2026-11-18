@@ -122,6 +122,14 @@ static int cmd_mqtt_can(int argc, char **argv)
                    (unsigned long)s_stats.dropped_tx_gate,
                    (unsigned long)s_stats.dropped_q_full,
                    (unsigned long)s_stats.parse_errors);
+    /* a line of its own (2026-11-18): the bench reads the two above by
+       their shape */
+    cmdline_printf("lost: tx-cut %lu  tx-oversize %lu  rx-batch %lu  "
+                   "pub-refused %lu\n",
+                   (unsigned long)s_stats.tx_cut,
+                   (unsigned long)s_stats.tx_oversize,
+                   (unsigned long)s_stats.dropped_rx_frames,
+                   (unsigned long)s_stats.pub_refused);
     return 0;
 }
 
@@ -213,13 +221,10 @@ static char s_sub_full[160];            /* static: handler filters must
                                            outlive the firmware          */
 static bool s_handler_registered;
 
-static esp_err_t ep_send(const uint8_t *d, size_t l)
+/* one MQTT message */
+static esp_err_t ep_publish(void *arg, const uint8_t *d, size_t l)
 {
-    if (!s_allow_rx)
-    {
-        s_stats.dropped_rx_gate++;
-        return ESP_OK;          /* gate is policy, not an error storm    */
-    }
+    (void)arg;
 
     esp_err_t err = mqtt_manager_publish_async(s_pub_full, d, l, s_qos,
                                                false);
@@ -228,13 +233,81 @@ static esp_err_t ep_send(const uint8_t *d, size_t l)
     {
         s_stats.batches++;
     }
+    else
+    {
+        s_stats.pub_refused++;
+    }
 
     return err;
 }
 
+/* What the bridge hands over in one send() is what the codec emitted during
+   one pass of the pump: one rx object as a rule, several back to back with
+   a small batch_frames on a busy bus (bridge_manager gathers a translator's
+   output since 2026-11-17). Published as it came, that was one MQTT message
+   with several JSON objects, which no JSON parser takes: bench 2026-11-18,
+   batch_frames 1, 115 of 4878 messages. So each object is a message of its
+   own (mc_pub_each). */
+static esp_err_t ep_send(const uint8_t *d, size_t l)
+{
+    esp_err_t err = ESP_OK;
+
+    if (!s_allow_rx)
+    {
+        s_stats.dropped_rx_gate++;
+        return ESP_OK;          /* gate is policy, not an error storm    */
+    }
+
+    (void)mc_pub_each(d, l, ep_publish, NULL, &err);
+    return err;
+}
+
+/* bridge_endpoint_t.losses: every loss counter of this component, on the
+   bridge row that uses mqtt0 (`/api/bridges`, 2026-11-18; the console
+   command was the only place until then). The codec's counters are here
+   too: one component owns the jack and the translator. */
+static int ep_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
+{
+    /* The MQTT client's own queue is behind this jack: a message it took
+       and then dropped (its queue was full, or the broker was away when
+       the message's turn came) is lost to this bridge with every counter
+       above at rest. The two numbers are the client's, for all it
+       publishes, and nothing else showed them (2026-11-18). */
+    mqtt_manager_stats_t mq = { 0 };
+
+    (void)mqtt_manager_stats(&mq);
+
+    const bridge_loss_t all[] =
+    {
+        { "dropped_rx_gate", s_stats.dropped_rx_gate },
+        { "dropped_tx_gate", s_stats.dropped_tx_gate },
+        { "dropped_q_full", s_stats.dropped_q_full },
+        { "parse_errors", s_stats.parse_errors },
+        { "tx_cut", s_stats.tx_cut },
+        { "tx_oversize", s_stats.tx_oversize },
+        { "dropped_rx_frames", s_stats.dropped_rx_frames },
+        { "pub_refused", s_stats.pub_refused },
+        { "mqtt_dropped_full", mq.dropped_full },
+        { "mqtt_dropped_offline", mq.dropped_offline },
+    };
+    int n = 0;
+
+    (void)q;
+
+    while (n < cap && n < (int)(sizeof(all) / sizeof(all[0])))
+    {
+        out[n] = all[n];
+        n++;
+    }
+
+    return n;
+}
+
 /** esp-mqtt event task: keep short, gate, split into bridge chunks,
- *  queue. The canmqtt encode ctx reassembles fragments (its normal
- *  stream model), so chunk boundaries are free. */
+ *  queue. The canmqtt encode ctx reassembles the chunks; where a chunk
+ *  ends is the codec's call (mc_tx_chunk_len: only the first chunk of a
+ *  message may begin with '{', which is how the reassembler knows a new
+ *  message, 2026-11-18). The bytes and their order are the message's. */
 static void sub_handler(const char *topic, const uint8_t *data,
                         size_t len, void *arg)
 {
@@ -252,24 +325,28 @@ static void sub_handler(const char *topic, const uint8_t *data,
         return;
     }
 
-    for (size_t off = 0; off < len; off += BRIDGE_MANAGER_CHUNK_SIZE)
+    size_t off = 0;
+
+    while (off < len)
     {
         bridge_chunk_t c;
-        size_t n = len - off;
-
-        if (n > BRIDGE_MANAGER_CHUNK_SIZE)
-        {
-            n = BRIDGE_MANAGER_CHUNK_SIZE;
-        }
+        size_t n = mc_tx_chunk_len(data + off, len - off,
+                                   BRIDGE_MANAGER_CHUNK_SIZE);
 
         memcpy(c.data, data + off, n);
         c.len = (uint16_t)n;
 
         if (xQueueSend(s_bridge_q, &c, 0) != pdTRUE)
         {
+            /* the rest of the message is gone: the reassembler drops the
+               part that got in when the next message begins (tx_cut).
+               Until 2026-11-18 it did not, and no later message reached
+               the bus before a restart */
             s_stats.dropped_q_full++;
-            return;             /* partial object: reassembler resyncs  */
+            return;
         }
+
+        off += n;
     }
 }
 
@@ -334,73 +411,39 @@ static esp_err_t tr_ctx_init(void *vctx)
     return ESP_OK;
 }
 
-static esp_err_t emit_batch(canmqtt_ctx_t *ctx, bridge_sink_fn_t sink,
-                            void *sink_arg)
-{
-    size_t n = mc_batch_json(&ctx->batch, esp_timer_get_time() / 1000,
-                             ctx->json, sizeof(ctx->json));
-
-    if (n == 0)
-    {
-        return ESP_OK;
-    }
-
-    return sink(sink_arg, (const uint8_t *)ctx->json, n);
-}
+/* Both steps are the codec's (mc_batch_feed, mc_tx_feed: pure and
+   host-tested since 2026-11-18, when the loss at the batch boundary, the
+   cut message and the eight frame cap were found in the lines that stood
+   here); this file adds the clock and the counters. */
 
 static esp_err_t tr_decode(void *vctx, const uint8_t *in, size_t len,
                            bridge_sink_fn_t sink, void *sink_arg)
 {
     canmqtt_ctx_t *ctx = vctx;
+    uint32_t lost = ctx->batch.dropped;
+    int added = 0;
+    esp_err_t err = mc_batch_feed(&ctx->batch, in, len,
+                                  esp_timer_get_time() / 1000, ctx->json,
+                                  sizeof(ctx->json), sink, sink_arg,
+                                  &added);
 
-    s_stats.frames_rx += (uint32_t)mc_batch_add_chunk(&ctx->batch, in,
-                                                      len);
-
-    if (mc_batch_ready(&ctx->batch))
-    {
-        return emit_batch(ctx, sink, sink_arg);
-    }
-
-    return ESP_OK;
-}
-
-typedef struct
-{
-    bridge_sink_fn_t sink;
-    void *sink_arg;
-} tx_emit_t;
-
-static void tx_obj_cb(void *arg, const char *json, size_t len)
-{
-    tx_emit_t *e = arg;
-    can_core_frame_t frames[8];
-    int n = mc_tx_parse(json, len, frames, 8);
-
-    if (n < 0)
-    {
-        s_stats.parse_errors++;
-        return;
-    }
-
-    for (int i = 0; i < n; i++)
-    {
-        uint8_t wire[CAN_WIRE_MAX];
-        size_t w = can_wire_encode(&frames[i], wire);
-
-        if (e->sink(e->sink_arg, wire, w) == ESP_OK)
-        {
-            s_stats.frames_tx++;
-        }
-    }
+    s_stats.frames_rx += (uint32_t)added;
+    s_stats.dropped_rx_frames += ctx->batch.dropped - lost;
+    return err;
 }
 
 static esp_err_t tr_encode(void *vctx, const uint8_t *in, size_t len,
                            bridge_sink_fn_t sink, void *sink_arg)
 {
     canmqtt_ctx_t *ctx = vctx;
-    tx_emit_t e = { .sink = sink, .sink_arg = sink_arg };
+    uint32_t cut = ctx->txasm.cut;
+    uint32_t oversize = ctx->txasm.oversize;
 
-    (void)mc_txasm_feed(&ctx->txasm, in, len, tx_obj_cb, &e);
+    s_stats.frames_tx += (uint32_t)mc_tx_feed(&ctx->txasm, in, len, sink,
+                                              sink_arg,
+                                              &s_stats.parse_errors);
+    s_stats.tx_cut += ctx->txasm.cut - cut;
+    s_stats.tx_oversize += ctx->txasm.oversize - oversize;
     return ESP_OK;
 }
 
@@ -408,10 +451,21 @@ static esp_err_t tr_flush(void *vctx, bridge_sink_fn_t sink,
                           void *sink_arg)
 {
     canmqtt_ctx_t *ctx = vctx;
+    uint32_t lost = ctx->batch.dropped;
 
     /* the encode-direction ctx never accumulates a batch: this is a
        no-op there by construction */
-    return emit_batch(ctx, sink, sink_arg);
+    size_t n = mc_batch_json(&ctx->batch, esp_timer_get_time() / 1000,
+                             ctx->json, sizeof(ctx->json));
+
+    s_stats.dropped_rx_frames += ctx->batch.dropped - lost;
+
+    if (n == 0)
+    {
+        return ESP_OK;
+    }
+
+    return sink(sink_arg, (const uint8_t *)ctx->json, n);
 }
 
 /* ---- registration ------------------------------------------------------------ */
@@ -442,6 +496,7 @@ esp_err_t mqtt_can_start(void)
         .subscribe = ep_subscribe,
         .unsubscribe = ep_unsubscribe,
         .multi_consumer = false,
+        .losses = ep_losses,
     };
 
     static bridge_translator_t TR =
