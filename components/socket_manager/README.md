@@ -71,6 +71,17 @@ of the clients that are behind for writability and pushes their backlog, so
 it leaves on a quiet bus too, and it closes a client that took nothing for
 10 s on its 200 ms tick.
 
+A second, small task (`socket_pace`, `socket_manager_pace.c`, 3 KB PSRAM
+stack, since 2026-11-18) sends what waits for a client that does take
+data: a stream's units are sent together every 3 ms and not one by one
+(the pace of `tx_backlog`, its README has the measurement). It sleeps
+while nothing waits; a send that leaves something in a backlog wakes it.
+It is not the net task because that one sits in `select()` for up to
+200 ms and nothing wakes a `select()` from another task, and a socket
+that takes data is writable all the time, so the write set cannot be the
+clock. The net task's write set keeps only the clients whose socket takes
+nothing.
+
 ## Settings (`"socket_manager"`, version 1)
 
 Field-table bounded-array schema (`socket_manager_settings.c`, standard
@@ -111,12 +122,11 @@ glue/main wraps servers as endpoints.
 
 ## Tests
 
-- **Host (`host_test/`, 14 tests)**: pure policy, backoff progression + cap,
+- **Host (`host_test/`, 10 tests)**: pure policy, backoff progression + cap,
   accept/reject at max_clients, config parse defaults, name charset, unique
-  names/ports, disabled-port parking, max_clients bounds; since 2026-11-17
-  the backlog (order kept around the end of the storage, many laps without
-  a byte lost or repeated, a chunk taken whole or not at all, the stall
-  clock). **Green on rpi001 2026-11-18.**
+  names/ports, disabled-port parking, max_clients bounds. The four tests of
+  the backlog went to `tx_backlog/host_test` with the code (10 tests there).
+  **Green on rpi001 2026-11-18.**
 - **Bench (`.\test.ps1 slcan`, leg S)**: the stalls on the real WiFi path
   with 1,100 CAN frames a second, see "A client that stalls".
 - **Target (`test_apps/`)**: lwIP-loopback suite (TCP RX/TX, 2-client
@@ -167,8 +177,10 @@ bytes: `TCP_SND_QUEUELEN` is 57 unacknowledged writes, 52 ms of that bus.
 So 52 + 100 ms without an ACK ended the session, and a phone's radio is
 away that long many times an hour (a scan, power save, a weak link).
 
-What the send path does now (`socket_manager_tx.c`, the pure part in
-`socket_manager_policy.c`):
+What the send path does now (`socket_manager_tx.c`, on the `tx_backlog`
+component: the ring, the pool and the push that never blocks were written
+here and moved there on 2026-11-18, when the WebSocket channels needed the
+same):
 
 - The sockets stay non-blocking. What a client's socket does not take
   waits in a backlog, a ring of 64 KB (32 KB until 2026-11-18: the unit's

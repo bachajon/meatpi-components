@@ -26,10 +26,11 @@
  *        a short stall, never cut a chunk.
  *
  * The sockets are non-blocking. What a client's socket does not take waits
- * in a backlog (pure logic: socket_manager_policy.c) whose storage is lent
- * from a small PSRAM pool for as long as the client is behind. A chunk that
- * finds the backlog full, or no buffer left in the pool, is dropped whole
- * and counted. A client that moved no byte for SM_STALL_CLOSE_MS is gone.
+ * in a backlog (the tx_backlog component: the ring, the pool that lends its
+ * storage, the push that never blocks) for as long as the client is behind.
+ * A chunk that finds the backlog full, or no buffer left in the pool, is
+ * dropped whole and counted. A client that moved no byte for
+ * SM_STALL_CLOSE_MS is gone.
  *
  * Why (a field report of 2026-11-17, reproduced on the bench): until then a
  * send was blocking with a 100 ms limit and a send that did not finish
@@ -40,13 +41,9 @@
  *
  * Every function here runs under the net lock of socket_manager_net.c.
  */
-#include <errno.h>
-#include <string.h>
-
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "lwip/sockets.h"
 
 #include "socket_manager.h"
 #include "socket_manager_private.h"
@@ -68,142 +65,70 @@ static const char *TAG = "socket_manager";
  * network sends no FIN): its slot and its buffer are wanted back. */
 #define SM_STALL_CLOSE_MS 10000
 
-static uint8_t s_pool[SM_BACKLOG_POOL][SM_BACKLOG_BYTES] EXT_RAM_BSS_ATTR;
-static bool s_pool_used[SM_BACKLOG_POOL] EXT_RAM_BSS_ATTR;
+static uint8_t s_pool_mem[SM_BACKLOG_POOL * SM_BACKLOG_BYTES] EXT_RAM_BSS_ATTR;
+
+/* internal: 24 bytes, and an initialised object cannot sit in PSRAM .bss */
+static tx_backlog_pool_t s_pool =
+{
+    .mem = s_pool_mem,
+    .buf_bytes = SM_BACKLOG_BYTES,
+    .count = SM_BACKLOG_POOL,
+    .pace_us = SM_PACE_GAP_US,
+    .pace_after = SM_PACE_AFTER,
+};
 
 uint32_t sm_tx_buffer_bytes(void)
 {
     return SM_BACKLOG_BYTES;
 }
 
-static void pool_lend(smp_backlog_t *b)
+void sm_tx_reset(tx_backlog_t *b)
 {
-    for (int i = 0; i < SM_BACKLOG_POOL && b->buf == NULL; i++)
-    {
-        if (!s_pool_used[i])
-        {
-            s_pool_used[i] = true;
-            b->buf = s_pool[i];
-            b->cap = SM_BACKLOG_BYTES;
-        }
-    }
+    tx_backlog_return(&s_pool, b);
+    tx_backlog_clear(b);
 }
 
-static void pool_return(smp_backlog_t *b)
-{
-    for (int i = 0; i < SM_BACKLOG_POOL; i++)
-    {
-        if (b->buf == s_pool[i])
-        {
-            s_pool_used[i] = false;
-        }
-    }
-
-    b->buf = NULL;
-    b->cap = 0;
-}
-
-void sm_tx_reset(smp_backlog_t *b)
-{
-    pool_return(b);
-    smp_backlog_clear(b);
-}
-
-/** A send's result as bytes moved: >= 0, or -1 for an error that ends the
- *  connection. "Would block" is 0 bytes, not an error. */
-static int send_some(int fd, const uint8_t *data, size_t len)
-{
-    int n = send(fd, data, len, 0);
-
-    if (n >= 0)
-    {
-        return n;
-    }
-
-    return (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS ||
-            errno == ENOMEM || errno == EINTR) ? 0 : -1;
-}
-
-bool sm_tx_push(int fd, smp_backlog_t *b, const uint8_t *data, size_t len,
+bool sm_tx_push(int fd, tx_backlog_t *b, const uint8_t *data, size_t len,
                 const char *name, uint32_t *bytes_out, uint32_t *tx_drops)
 {
-    const uint8_t *head;
-    size_t waiting;
-    bool moved = false;
-    bool refused = false;
+    uint32_t dropped_before = b->dropped;
+    tx_backlog_result_t r =
+        tx_backlog_sock_push(fd, 0, b, &s_pool, NULL, 0, data, len,
+                             esp_timer_get_time(), bytes_out);
 
-    /* what waits goes first, or the stream would leave out of order */
-    while (!refused && (waiting = smp_backlog_peek(b, &head)) > 0)
+    if (r == TX_BACKLOG_ERROR)
     {
-        int n = send_some(fd, head, waiting);
-
-        if (n < 0)
-        {
-            return false;
-        }
-
-        smp_backlog_took(b, (size_t)n);
-        *bytes_out += (uint32_t)n;
-        moved = moved || n > 0;
-        refused = (size_t)n < waiting;
+        return false;
     }
 
-    if (len > 0 && !refused)
+    /* a chunk cut on the wire (the pool was empty while this client fell
+       behind) is counted like a dropped one: slcan and the other line
+       protocols resync at the next line end */
+    if (r == TX_BACKLOG_DROPPED || r == TX_BACKLOG_CUT)
     {
-        int n = send_some(fd, data, len);
-
-        if (n < 0)
+        if (dropped_before == 0)
         {
-            return false;
+            ESP_LOGW(TAG, "%s: a client is behind (%lu bytes waiting), "
+                     "what does not fit is dropped", name,
+                     (unsigned long)b->len);
         }
 
-        *bytes_out += (uint32_t)n;
-        moved = moved || n > 0;
-        refused = (size_t)n < len;
-        data += n;
-        len -= (size_t)n;
+        (*tx_drops)++;
     }
 
-    if (len > 0)
+    if (b->len == 0 && b->dropped > 0)
     {
-        if (b->buf == NULL)
-        {
-            pool_lend(b);
-        }
-
-        if (!smp_backlog_put(b, data, len))
-        {
-            if (b->dropped == 0)
-            {
-                ESP_LOGW(TAG, "%s: a client is behind (%lu bytes waiting), "
-                         "what does not fit is dropped", name,
-                         (unsigned long)b->len);
-            }
-
-            b->dropped++;
-            (*tx_drops)++;
-        }
+        ESP_LOGW(TAG, "%s: the client caught up, %lu chunk(s) were "
+                 "dropped meanwhile", name, (unsigned long)b->dropped);
+        b->dropped = 0;
     }
 
-    if (b->len == 0)
-    {
-        if (b->dropped > 0)
-        {
-            ESP_LOGW(TAG, "%s: the client caught up, %lu chunk(s) were "
-                     "dropped meanwhile", name, (unsigned long)b->dropped);
-            b->dropped = 0;
-        }
-
-        pool_return(b);
-    }
-
-    smp_backlog_attempt(b, moved, refused, esp_timer_get_time());
     return true;
 }
 
-bool sm_tx_gone(const smp_backlog_t *b, const char *name)
+bool sm_tx_gone(const tx_backlog_t *b, const char *name)
 {
-    if (!smp_backlog_expired(b, esp_timer_get_time(), SM_STALL_CLOSE_MS))
+    if (!tx_backlog_expired(b, esp_timer_get_time(), SM_STALL_CLOSE_MS))
     {
         return false;
     }

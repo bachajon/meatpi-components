@@ -66,7 +66,7 @@ typedef struct
 {
     int    fd;                 /* listener (TCP) or bound socket (UDP); -1 */
     int    clients[SOCKET_MANAGER_MAX_CLIENTS];
-    smp_backlog_t backlog[SOCKET_MANAGER_MAX_CLIENTS];
+    tx_backlog_t backlog[SOCKET_MANAGER_MAX_CLIENTS];
     struct sockaddr_in last_peer;
     bool   has_peer;
     QueueHandle_t sub;
@@ -325,6 +325,15 @@ static void client_push(sm_server_t *srv, const smp_server_cfg_t *cfg, int c,
     {
         ESP_LOGW(TAG, "%s: client dropped (send error)", cfg->name);
         close_client(srv, c);
+        return;
+    }
+
+    /* something waits (for the pace, or the socket did not take it all):
+       the pace task sends it. A client whose socket takes nothing is
+       also watched by the net task's select(), whichever is first */
+    if (srv->backlog[c].len > 0)
+    {
+        sm_pace_kick();
     }
 }
 
@@ -338,6 +347,41 @@ static void reap_stalled(sm_server_t *srv, const smp_server_cfg_t *cfg)
             close_client(srv, c);
         }
     }
+}
+
+/* ---- the pace task's push (socket_manager_pace.c) ---------------------------- */
+
+bool sm_net_pace_push(void)
+{
+    bool waiting = false;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    for (int i = 0; sm_core_config(i) != NULL; i++)
+    {
+        const smp_server_cfg_t *cfg = sm_core_config(i);
+        sm_server_t *srv = &s_srv[i];
+
+        if (!cfg->enabled || cfg->is_udp || srv->fd < 0)
+        {
+            continue;
+        }
+
+        for (int c = 0; c < SOCKET_MANAGER_MAX_CLIENTS; c++)
+        {
+            if (srv->clients[c] < 0 || srv->backlog[c].len == 0)
+            {
+                continue;
+            }
+
+            client_push(srv, cfg, c, NULL, 0);
+            waiting = waiting || (srv->clients[c] >= 0 &&
+                                  srv->backlog[c].len > 0);
+        }
+    }
+
+    xSemaphoreGive(s_lock);
+    return waiting;
 }
 
 /* ---- the net task ------------------------------------------------------------ */
@@ -415,9 +459,13 @@ static void net_task(void *arg)
                     max_fd = (srv->clients[c] > max_fd) ? srv->clients[c]
                                                         : max_fd;
 
-                    if (srv->backlog[c].len > 0)
+                    if (srv->backlog[c].len > 0 && srv->backlog[c].stalled)
                     {
-                        /* behind: wake when its socket takes data again */
+                        /* behind, its socket takes nothing: wake when it
+                           takes data again. What waits for a client
+                           that does take data is the pace task's: its
+                           socket is writable all the time, so select()
+                           would return at once for ever */
                         FD_SET(srv->clients[c], &wfds);
                     }
                 }
@@ -509,12 +557,20 @@ esp_err_t sm_net_start(void)
     s_task = xTaskCreateStatic(net_task, "socket_net",
                                sizeof(s_stack) / sizeof(s_stack[0]), NULL,
                                10, s_stack, &s_tcb);
-    return (s_task != NULL) ? ESP_OK : ESP_FAIL;
+
+    if (s_task == NULL)
+    {
+        return ESP_FAIL;
+    }
+
+    return sm_pace_start();
 }
 
 void sm_net_stop(void)
 {
     s_running = false;
+
+    sm_pace_stop();
 
     for (int i = 0; i < 25 && s_task != NULL; i++)
     {

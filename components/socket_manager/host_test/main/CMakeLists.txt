@@ -7,6 +7,7 @@ idf_component_register(
          "test_policy.c"
          "${comp_dir}/socket_manager_policy.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"
+                 "${comp_dir}/../tx_backlog/include"
     # cJSON comes from the espressif/cjson managed dep (idf_component.yml).
     REQUIRES unity
 )
