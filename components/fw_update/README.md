@@ -88,6 +88,18 @@ protection; (b) reaches units flashed over USB from now on, where one crash
 before the confirm already falls back. `GET /api/fw_update` says which
 bootloader runs (`rollback.bootloader_version` 2 = with the option).
 
+**An image installed without a job is confirmed at the same milestone
+(2026-11-18).** A firmware file sent to `POST /api/ota/upload` (the web
+page's manual install, the benches) goes through `ota_manager` and leaves
+no update record, and the milestone only looked at a record: such an image
+stayed `PENDING_VERIFY` until the next planned restart, however long it had
+run, and a power cut, a reset or a crash before that made the bootloader
+start the old image again (seen on the bench twice, once after hours on the
+new image). `milestone_tick()` now also confirms when the running image is
+pending with no record and the run has settled. Bench (firmware repo):
+`.\test.ps1 uploadconfirm`, red on the build before (still `pending_verify`
+676 s after the upload), green after.
+
 ## API (`include/fw_update.h`)
 
 | Call | Behavior |

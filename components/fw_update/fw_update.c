@@ -354,10 +354,28 @@ static void schedule_tick(void)
 
 static void milestone_tick(void)
 {
-    if (FWU->rec_valid && FWU->rec.state == FW_JOB_REBOOTING &&
-        restart_tracker_settle(false))
+    bool job = FWU->rec_valid && FWU->rec.state == FW_JOB_REBOOTING;
+
+    /* An image installed without an update job (a file sent to
+       POST /api/ota/upload, the web page's manual install) leaves no record.
+       Until 2026-11-18 nothing confirmed it at this milestone: it stayed
+       pending until the next planned restart, and a power cut, a reset or a
+       crash before that made the bootloader fall back to the old image
+       (seen twice on the bench, once on a unit that had run the new image
+       for hours). The same milestone now confirms it by the same rule. */
+    bool uploaded = !job && FWU->slots.pending_verify;
+
+    if ((job || uploaded) && restart_tracker_settle(false))
     {
         fwu_verify_now("the run settled");
+
+        /* said once: a confirm that did not get through is tried again at
+           the next tick, without a line each time */
+        if (uploaded && !FWU->slots.pending_verify)
+        {
+            ESP_LOGI(TAG, "the running image was installed by upload and has "
+                     "settled: confirmed");
+        }
     }
 }
 
