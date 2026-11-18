@@ -39,6 +39,7 @@
 #include "freertos/queue.h"
 
 #include "can_core.h"
+#include "can_tx_slots.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,7 +78,11 @@ typedef struct
                             re-queues the frame: CAN_DRV_TX_RETRIES_ARB times
                             after a lost arbitration, CAN_DRV_TX_RETRIES after
                             an error)                                        */
-    uint32_t tx_lost;   /* frames given up on after the retries              */
+    uint32_t tx_lost;   /* frames given up on after the retries; since
+                           2026-11-18 also the frame inside the controller
+                           at a bus-off (it gets no tx_done) and the frames
+                           in flight when the node is stopped, so at rest
+                           tx = tx_done + tx_lost                            */
     uint32_t tx_done;   /* frames the controller reported sent               */
     uint32_t rx_storms; /* receive-error storms that masked the controller's
                            interrupts (can_on_error); each ends with a bounce */
@@ -148,8 +153,8 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
  *  wait); another task may take the slot in between. */
 bool can_drv_tx_room(void);
 
-#define CAN_DRV_TX_SLOTS       16 /* frames in flight (internal RAM, the ISR
-                                     and the HAL read them)               */
+#define CAN_DRV_TX_SLOTS       CAN_TXS_SLOTS /* 16 frames in flight (internal
+                                     RAM, the ISR and the HAL read them)  */
 #define CAN_DRV_TX_RETRIES     3  /* attempts after the first, on an error  */
 #define CAN_DRV_TX_RETRIES_ARB 16 /* ... after a lost arbitration: at 50 %
                                      bus load of higher-priority frames the

@@ -173,6 +173,25 @@ its tx_done counts as an error, the safe side. One budget of 3 for both lost
 the retry (sdkconfig.defaults). Counters `tx_done`, `tx_retries`, `tx_lost`
 on `/api/can` and `can`.
 
+**A bus-off, a restart of the node, and the slots (2026-11-18).** Which of
+the 16 slots is taken, and which frame the controller holds, is a table of
+its own (`can_tx_slots.c`, pure, host-tested). The frame inside the
+controller when it goes bus-off gets no tx_done: the IDF node driver sends
+what its queue holds after the recovery and forgets the frame it had
+handed to the hardware. Until then that slot stayed taken until the node
+was next restarted, and the frame was in `tx` and in neither `tx_done` nor
+`tx_lost`: one slot and one unaccounted frame with every bus-off, and after
+sixteen bus-offs without a restart of the node (a line fault that gives
+only bit errors) nothing was transmitted any more. The state-change
+interrupt now gives the slot of the frame the controller held back (the
+taken slot that was handed over first: `can_drv_transmit()` hands the
+frames over in the order it takes the slots, one task at a time) and counts
+the frame in `tx_lost`; the frames behind it are still in the driver's
+queue and go out after the recovery. The frames in flight when a node is
+stopped are counted in `tx_lost` as well, so at rest `tx` = `tx_done` +
+`tx_lost`. The bench: the firmware repo's `tools/testbench/can/
+can_busoff_slots_bench.py` (`CAN BUSOFF SLOTS PASS`), 18 real bus-offs.
+
 ## Receive-error storms and the interrupt watchdog (`rx_storms`, 2026-10-03)
 
 A controller listening at a bitrate CLOSE to the bus's (83.3 against 95.2
@@ -224,6 +243,19 @@ reset nobody could explain in the EU truck bench's first run (2026-10-03
 status from a task that is not the one bouncing it (it may wait a few
 milliseconds for a bounce; false while the node is down). `can_drv_quiesce()`
 (the restart path, which may not block) gives a bounce in flight 50 ms.
+**A node is deleted only after the timer task has run what the node's
+interrupt handed it (2026-11-18).** The IDF node driver sets an event bit
+from its interrupt whenever its transmit queue runs empty and at a recovery
+from bus-off; FreeRTOS hands that to the timer task (priority 1) with the
+event group's handle, and `twai_node_delete()` frees the event group. A
+bounce right behind a transmission (the link policy demotes a talking node
+within milliseconds) left the timer task setting a bit in freed memory:
+on the bench it then waited with interrupts off for a lock that was no
+longer one and the interrupt watchdog reset the unit (`Tmr Svc` in
+`vEventGroupSetBitsCallback`, the eleventh bounce of the bus-off bench).
+`can_drv_stop()` now hands the timer task a marker between the disable and
+the delete and waits until it ran (500 ms at most, one W line when the
+timer task did not run in that time).
 Transmits have their own gate (`tx_open` / `tx_users`, `can_core_link.c`);
 the recovery calls run on the task that bounces. A new reader of node state
 from another task goes through `can_drv_node_info()` or takes the same lock.
@@ -308,8 +340,17 @@ counters and traffic after recovery).
 
 ## Tests
 
-- Host: `.\test.ps1 host can_manager` (44 tests: filters, recovery policy,
-  the listen-before-talk policy, the bit timing).
+- Host: `.\test.ps1 host can_manager` (53 tests: filters, recovery policy,
+  the listen-before-talk policy, the bit timing, and since 2026-11-18 the
+  transmit slots, `test_tx_slots.c`, 7 tests: full and free again, which
+  frame the controller holds, a bus-off gives that frame's slot back and
+  leaves the ones behind it, 64 bus-offs with a frame in the controller
+  cost no slot, the order across a wrap of its counter, the frames in
+  flight counted before a restart).
+- Bench: `tools/testbench/can/can_busoff_slots_bench.py` → `CAN BUSOFF
+  SLOTS PASS` (`.\test.ps1 canbusoff`): 18 real bus-offs made with the PCAN,
+  every frame sent or counted lost after each, 20 frames on the bus after
+  the last, no reset of the unit.
 - Bench: `tools/testbench/can/can_autobaud_bench.py` → `CAN AUTOBAUD PASS`
   (`.\test.ps1 autobaud`). The PCAN adapter keeps a bus alive and is the
   judge: zero error frames on the wire at the right bitrate, at the wrong

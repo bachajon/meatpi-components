@@ -16,6 +16,8 @@
 /* test_autobaud.c: the listen-before-talk policy (can_autobaud_core.c) */
 void run_autobaud_tests(void);
 void run_timing_tests(void);
+/* test_tx_slots.c: the driver's transmit slots and a bus-off (can_tx_slots.c) */
+void run_tx_slots_tests(void);
 
 /* ---- filter / mask match ------------------------------------------------ */
 
@@ -297,6 +299,7 @@ void app_main(void)
 
     run_autobaud_tests();
     run_timing_tests();
+    run_tx_slots_tests();
 
     UNITY_END();
 }

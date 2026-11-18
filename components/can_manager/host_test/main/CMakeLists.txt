@@ -11,10 +11,13 @@ idf_component_register(
     SRCS "test_main.c"
          "test_autobaud.c"
          "test_timing.c"
+         "test_tx_slots.c"
          "${comp_dir}/can_core_filter.c"
          "${comp_dir}/can_core_recovery.c"
          "${comp_dir}/can_autobaud_core.c"
          "${comp_dir}/can_timing_core.c"
-    INCLUDE_DIRS "${comp_dir}/include"
+         "${comp_dir}/can_tx_slots.c"
+    # the component's own directory: can_tx_slots.h is private to it
+    INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"
     REQUIRES unity
 )

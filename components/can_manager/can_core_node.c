@@ -52,6 +52,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 
 static const char *TAG = "can_core";
 
@@ -63,6 +64,78 @@ static const char *TAG = "can_core";
    serialized by its callers); a reader that finds none has no node to read. */
 static SemaphoreHandle_t s_node_mtx;
 static StaticSemaphore_t s_node_mtx_buf;   /* internal: FreeRTOS object */
+
+/* ---- the node driver's deferred event, and a node that goes -----------------
+ * The IDF node driver sets an event bit from its interrupt whenever its
+ * transmit queue runs empty and at a recovery from bus-off
+ * (esp_twai_onchip.c: xEventGroupSetBitsFromISR). FreeRTOS does not set an
+ * event bit in an interrupt: it hands the call to the timer task with the
+ * event group's handle, and that task has the lowest priority there is.
+ * twai_node_delete() frees the event group. A bounce that follows a
+ * transmission closely (the link policy takes a talking node off a bus that
+ * turned unreadable within milliseconds) therefore had the timer task set
+ * a bit in freed memory. Bench 2026-11-18, the eleventh such bounce of the
+ * bus-off bench: the timer task waited, interrupts off, for a lock that was
+ * no longer one, and the interrupt watchdog reset the unit ("Tmr Svc" in
+ * vEventGroupSetBitsCallback).
+ *
+ * So between the disable (no interrupt of the node from there on) and the
+ * delete, the timer task is handed a marker behind the calls it still
+ * holds, and the bounce waits until the marker ran. */
+#define CAN_NODE_TIMER_WAIT_MS 500 /* far above what the timer task needs;
+                                      a bounce is rare and never urgent  */
+
+static SemaphoreHandle_t s_timer_sem;
+static StaticSemaphore_t s_timer_sem_buf;  /* internal: FreeRTOS object */
+static volatile uint32_t s_timer_seen;     /* the last marker that ran  */
+static uint32_t s_timer_gen;               /* under the node lock       */
+
+static void node_timer_marker(void *arg, uint32_t gen)
+{
+    s_timer_seen = gen;
+    xSemaphoreGive((SemaphoreHandle_t)arg);
+}
+
+/** Wait until the timer task has run every call the node's interrupt
+ *  deferred to it. The caller holds the node lock and has disabled the
+ *  node. */
+static void node_timer_drain(void)
+{
+    if (s_timer_sem == NULL)
+    {
+        s_timer_sem = xSemaphoreCreateBinaryStatic(&s_timer_sem_buf);
+    }
+
+    if (xTaskGetCurrentTaskHandle() == xTimerGetTimerDaemonTaskHandle())
+    {
+        return; /* a timer callback stops the node: it cannot wait for itself */
+    }
+
+    uint32_t gen = ++s_timer_gen;
+    TickType_t wait = pdMS_TO_TICKS(CAN_NODE_TIMER_WAIT_MS);
+
+    if (s_timer_sem == NULL ||
+        xTimerPendFunctionCall(node_timer_marker, s_timer_sem, gen,
+                               wait) != pdPASS)
+    {
+        ESP_LOGW(TAG, "the timer task took no marker: the node is deleted "
+                 "without the wait for its deferred events");
+        return;
+    }
+
+    /* a marker of an earlier wait that ran late gives the semaphore too:
+       only this one counts */
+    while (s_timer_seen != gen)
+    {
+        if (xSemaphoreTake(s_timer_sem, wait) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "the timer task did not run for %d ms: the node "
+                     "is deleted without the wait for its deferred events",
+                     CAN_NODE_TIMER_WAIT_MS);
+            return;
+        }
+    }
+}
 
 bool can_drv_node_info(twai_node_status_t *info, twai_node_record_t *rec)
 {
@@ -173,6 +246,7 @@ void can_drv_stop(can_core_handle_t *handle)
        cleared */
     xSemaphoreTake(s_node_mtx, portMAX_DELAY);
     (void)twai_node_disable(can_drv_node);
+    node_timer_drain();
 
     esp_err_t ret = twai_node_delete(can_drv_node);
 

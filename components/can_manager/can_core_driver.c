@@ -120,18 +120,28 @@ static volatile bool s_storm_masked; /* the interrupts are masked right now */
  * _node_queue_tx) and formats the frame into the hardware when it comes
  * free. INTERNAL RAM: the HAL reads the buffer from the interrupt, and a
  * flash write has the cache (PSRAM too) disabled meanwhile. A slot is busy
- * from the transmit call to the tx_done that ends its attempts. */
+ * from the transmit call to the tx_done that ends its attempts, or to the
+ * bus-off that ends the frame inside the controller without a tx_done
+ * (can_tx_slots.h: which slot is taken and which one the controller holds;
+ * until 2026-11-18 that slot stayed taken, one gone with every bus-off). */
 typedef struct
 {
     twai_frame_t     f;
     uint8_t          buf[8];
-    volatile uint8_t tries;      /* 0 = free; attempts made otherwise      */
     uint32_t         arb_at;     /* s_isr.arb_lost when the attempt went out:
                                     moved = the attempt lost arbitration    */
 } can_drv_tx_slot_t;
 
 static can_drv_tx_slot_t s_tx[CAN_DRV_TX_SLOTS];
+static can_txs_t         s_txs;  /* internal: the interrupt reads it */
 static portMUX_TYPE      s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* One task at a time between "slot taken" and "frame handed to the node
+ * driver": the driver's queue then holds the frames in the order the slots
+ * were taken, which is how can_tx_slots tells the frame inside the
+ * controller from the ones behind it. */
+static SemaphoreHandle_t s_tx_order;
+static StaticSemaphore_t s_tx_order_buf;          /* internal: FreeRTOS */
 
 static bool IRAM_ATTR can_on_rx_done(twai_node_handle_t node,
                                      const twai_rx_done_event_data_t *e,
@@ -231,7 +241,7 @@ static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
     {
         can_drv_tx_slot_t *slot = &s_tx[i];
 
-        if (ev->done_tx_frame != &slot->f || slot->tries == 0)
+        if (ev->done_tx_frame != &slot->f || s_txs.tries[i] == 0)
         {
             continue;
         }
@@ -239,14 +249,14 @@ static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
         if (ev->is_tx_success)
         {
             s_isr.tx_done++;
-            slot->tries = 0;
+            can_txs_release(&s_txs, i);
             break;
         }
 
         bool arb = (s_isr.arb_lost != slot->arb_at);
         uint8_t budget = arb ? CAN_DRV_TX_RETRIES_ARB : CAN_DRV_TX_RETRIES;
 
-        if (slot->tries <= budget)
+        if (s_txs.tries[i] <= budget)
         {
             slot->arb_at = s_isr.arb_lost;
 
@@ -261,14 +271,14 @@ static bool IRAM_ATTR can_on_tx_done(twai_node_handle_t node,
 
             if (twai_node_transmit(node, &slot->f, 0) == ESP_OK)
             {
-                slot->tries++;
+                s_txs.tries[i]++;
                 s_isr.tx_retries++;
                 break;
             }
         }
 
         s_isr.tx_lost++;
-        slot->tries = 0;
+        can_txs_release(&s_txs, i);
         break;
     }
 
@@ -285,6 +295,20 @@ static bool IRAM_ATTR can_on_state_change(
     if (e->new_sta == TWAI_ERROR_BUS_OFF)
     {
         can_drv_evt_bus_off = true;
+
+        /* The frame inside the controller is ended by the bus-off and the
+           node driver forgets it without a tx_done (esp_twai_onchip.c: at
+           the recovery it sends what its queue holds and overwrites or
+           clears the frame it had handed to the hardware). Its slot comes
+           back here, counted as a lost frame. The frames behind it are
+           still in the driver's queue and go out after the recovery, each
+           with its own tx_done: their slots stay taken. Should the
+           hardware report this frame after all, in this same interrupt,
+           tx_done finds the slot free and leaves it alone. */
+        if (can_txs_bus_off(&s_txs) >= 0)
+        {
+            s_isr.tx_lost++;
+        }
     }
     else if (e->old_sta == TWAI_ERROR_BUS_OFF)
     {
@@ -402,30 +426,26 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
 {
     can_drv_tx_slot_t *slot = NULL;
 
-    if (can_drv_node == NULL)
+    if (can_drv_node == NULL || s_tx_order == NULL)
     {
         return ELM327_ERR_CAN;
     }
 
+    /* held from the slot to the hand-over: see s_tx_order */
+    xSemaphoreTake(s_tx_order, portMAX_DELAY);
     portENTER_CRITICAL(&s_tx_lock);
 
-    for (int i = 0; i < CAN_DRV_TX_SLOTS; i++)
-    {
-        if (s_tx[i].tries == 0)
-        {
-            slot = &s_tx[i];
-            slot->tries = 1;
-            break;
-        }
-    }
+    int idx = can_txs_take(&s_txs);
 
     portEXIT_CRITICAL(&s_tx_lock);
 
-    if (slot == NULL)
+    if (idx < 0)
     {
+        xSemaphoreGive(s_tx_order);
         return ELM327_ERR_BUSY;   /* CAN_DRV_TX_SLOTS frames in flight */
     }
 
+    slot = &s_tx[idx];
     memset(&slot->f, 0, sizeof(slot->f));
     slot->arb_at = s_isr.arb_lost;
     slot->f.header.id  = frame->id;
@@ -445,7 +465,13 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
 
     if (ret != ESP_OK)
     {
-        slot->tries = 0;          /* never queued: no tx_done will come   */
+        can_txs_release(&s_txs, idx); /* never queued: no tx_done will come */
+    }
+
+    xSemaphoreGive(s_tx_order);
+
+    if (ret != ESP_OK)
+    {
         return (ret == ESP_ERR_TIMEOUT) ? ELM327_ERR_BUSY : ELM327_ERR_CAN;
     }
 
@@ -455,15 +481,7 @@ elm327_err_t can_drv_transmit(const can_core_frame_t *frame,
 bool can_drv_tx_room(void)
 {
     /* plain reads of bytes the interrupt clears and can_drv_transmit sets */
-    for (int i = 0; i < CAN_DRV_TX_SLOTS; i++)
-    {
-        if (s_tx[i].tries == 0)
-        {
-            return true;
-        }
-    }
-
-    return false;
+    return can_txs_room(&s_txs);
 }
 
 void can_drv_rx_reset(void)
@@ -473,6 +491,11 @@ void can_drv_rx_reset(void)
         can_drv_rx_q = xQueueCreateStatic(CAN_CORE_RXQ_DEPTH,
                                     sizeof(can_rx_raw_t), s_rxq_store,
                                     &s_rxq_buf);
+    }
+
+    if (s_tx_order == NULL)
+    {
+        s_tx_order = xSemaphoreCreateMutexStatic(&s_tx_order_buf);
     }
 
     xQueueReset(can_drv_rx_q);
@@ -620,10 +643,11 @@ elm327_err_t can_drv_create(can_core_handle_t *handle, uint32_t baud_kbps,
 
     /* a node that comes up finds no frame in flight (a bounce ends the
        attempts of whatever was queued; the counters stay) */
-    for (int i = 0; i < CAN_DRV_TX_SLOTS; i++)
-    {
-        s_tx[i].tries = 0;
-    }
+    /* Counted: until 2026-11-18 the frames a bounce ended were in `tx`
+       and in neither `tx_done` nor `tx_lost`. No node is enabled here, so
+       no interrupt writes the counter meanwhile. */
+    s_isr.tx_lost += (uint32_t)can_txs_in_flight(&s_txs);
+    can_txs_reset(&s_txs);
 
     s_isr_listen = listen_only;        /* before the first interrupt */
     handle->node_listen = listen_only;
