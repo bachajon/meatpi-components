@@ -48,7 +48,7 @@
 extern "C" {
 #endif
 
-#define ISOTP_MAX_SESSIONS   9    /* 1 uds_manager + 8 J2534 flow-control
+#define ISOTP_MAX_SESSIONS   12   /* 1 uds_manager + up to 11 J2534 flow-control
                                      sessions (4 channels x up to 4 each,
                                      2026-10-19); each takes a can_manager
                                      subscriber slot while open           */

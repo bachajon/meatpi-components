@@ -52,7 +52,10 @@
 #include "j2534_proto.h"
 
 #define J2534_CH_MAX_FILTERS  10  /* SAE minimum; a TP2.0 link takes one */
-#define J2534_CH_MAX_SESSIONS 4   /* ISO-TP sessions (ECUs) per channel */
+#define J2534_CH_MAX_SESSIONS 10  /* ISO-TP sessions (ECUs) per channel; a
+                                     tester that opens an engine ECU filters
+                                     the whole OBD-II functional response set
+                                     (0x7E8..0x7EF) on one channel */
 
 void j2534_channel_init(void);          /* one-time: mutex, the bus queues */
 void j2534_channel_reset_all(void);     /* tester disconnected: tear down */
