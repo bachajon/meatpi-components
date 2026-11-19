@@ -97,7 +97,7 @@ enum {
 /* ---- TxFlags / RxStatus bits ------------------------------------------ */
 enum {
     J2534_TX_ISO15765_FRAME_PAD = 0x00000040,
-    J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: not supported */
+    J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: single-frame TX (j2534_iso_write) */
     J2534_TX_CAN_29BIT_ID       = 0x00000100,
     J2534_TX_WAIT_P3_MIN_ONLY   = 0x00000200,
     J2534_TX_TP2_0_BROADCAST    = 0x00010000, /* TP2_0_BROADCAST_MSG */

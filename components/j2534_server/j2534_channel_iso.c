@@ -344,14 +344,36 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
     uint32_t id;
     const uint8_t *pl;
     size_t n;
+    bool    has_ae = false;   /* ISO 15765-2 extended/mixed addressing */
+    uint8_t ae = 0;           /* the address-extension byte            */
 
-    if (!j2534_iso_split(msg, &id, &pl, &n))
+    /* Extended addressing: the SAE J2534-1 message is
+       [4-byte CAN id][1-byte address extension][payload], and every CAN
+       frame is led by that address-extension byte, so a single frame holds
+       6 payload bytes (not 7). Toyota's central gateway (0x750/0x758) speaks
+       this for SecurityAccess, TesterPresent and ReadDataByIdentifier -- all
+       single-frame -- and the stock tools (Techstream, CUW, PCMflash) cannot
+       reach an engine ECU behind the gateway without it. The esp_isotp
+       session stack is standard-addressing only, so an extended-addressed
+       single frame is built and sent directly on the functional path below;
+       multi-frame extended-addressed transfers are not handled (none of the
+       gateway flows this enables use one). */
+    if ((msg->tx_flags & J2534_TX_ISO15765_ADDR_TYPE) != 0)
     {
-        if ((msg->tx_flags & J2534_TX_ISO15765_ADDR_TYPE) != 0)
+        if (msg->data_size < 5 || msg->data_size > (uint32_t)J2534_MAX_DATA)
         {
-            ESP_LOGW(TAG, "ISO15765 extended addressing is not supported");
+            return J2534_ERR_INVALID_MSG;
         }
 
+        id = ((uint32_t)msg->data[0] << 24) | ((uint32_t)msg->data[1] << 16) |
+             ((uint32_t)msg->data[2] << 8) | (uint32_t)msg->data[3];
+        ae = msg->data[4];
+        pl = msg->data + 5;
+        n  = (size_t)msg->data_size - 5u;
+        has_ae = true;
+    }
+    else if (!j2534_iso_split(msg, &id, &pl, &n))
+    {
         return J2534_ERR_INVALID_MSG;
     }
 
@@ -365,7 +387,17 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
     id &= ext ? 0x1FFFFFFFu : 0x7FFu;
 
     bool pad = (msg->tx_flags & J2534_TX_ISO15765_FRAME_PAD) != 0;
-    int s = find_by_tx(c, id, ext);
+
+    /* extended addressing here is single-frame only (the AE byte costs one of
+       the 8 CAN bytes, so at most 6 UDS payload bytes fit) */
+    if (has_ae && n > 6)
+    {
+        ESP_LOGW(TAG, "ISO15765 ext-addr: %u B needs multi-frame (not supported)",
+                 (unsigned)n);
+        return J2534_ERR_NO_FLOW_CONTROL;
+    }
+
+    int s = has_ae ? -1 : find_by_tx(c, id, ext);
 
     if (s < 0 && n > 7)
     {
@@ -431,9 +463,28 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
     }
     else
     {
-        /* functional addressing: one frame, no session */
+        /* functional addressing, or an extended-addressed single frame:
+           one frame, no session */
         uint8_t fr[8];
-        uint8_t dlc = j2534_iso_single_frame(pl, n, pad, fr);
+        uint8_t dlc;
+
+        if (has_ae)
+        {
+            fr[0] = ae;            /* address extension leads the frame      */
+            fr[1] = (uint8_t)n;    /* single-frame PCI 0x0n (AE not counted) */
+            memcpy(fr + 2, pl, n);
+            dlc = (uint8_t)(2u + n);
+
+            if (pad && dlc < 8)
+            {
+                memset(fr + dlc, 0xAA, (size_t)(8 - dlc));
+                dlc = 8;
+            }
+        }
+        else
+        {
+            dlc = j2534_iso_single_frame(pl, n, pad, fr);
+        }
 
         err = can_manager_send(id, ext, false, fr, dlc);
     }
