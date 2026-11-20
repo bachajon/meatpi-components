@@ -129,7 +129,11 @@ green afterwards). What changed, and what to keep doing:
   `when[].value:"${...}"`), **Then** (an action picker over
   `/api/events/actions` with friendly forms: group + rate for
   `autopid.group`, colour + mode for the LED, topic/payload with the
-  template hint; registered actions the vocabulary does not know get a
+  template hint, and since 2026-11-21 "Send a CAN frame" for `can.send`
+  (issue #1072): Bus (the car's OBD protocol, MS, single-wire or CH CAN,
+  WiCAN's CAN controller), ID and Data in hex; a wake-up frame or a
+  sequence is a script's job, the form shows one frame; registered actions
+  the vocabulary does not know get a
   generic form from their `params_schema`), the **Undo** switch (only for
   `undoable` actions: a while-rule that reverses when the conditions stop
   holding), a preview sentence, and **Edit as JSON** (round-trips with the
