@@ -963,6 +963,28 @@ open bubble would lose its button under the reader.
 
 Probe: `tools/webui_preview/probe_faults.mjs` (`FAULTS PROBE PASS`).
 
+## J2534 over the USB cable: where the page says it (2026-11-20)
+
+A contributor could not get J2534 to work over the USB cable. Nothing was
+broken: the connector ships in the Host role, where a PC sees only the
+board's console ports, and the cable needs "Connector role" Device and
+"USB device class" CDC serial on the USB page. The J2534 page did not say
+so, and the USB page spoke of a network alone. Three small changes, no new
+text on a page:
+
+- the J2534 page has one info bubble in its header that names the two
+  settings by the words of the USB page. In the header, not beside the
+  status chips: the status block repaints every 4 s (the rule above), and
+  the first version of this change lost its button there
+- the role's help and its choice say "network or serial port" (`HELP.role`,
+  the option label)
+- the device class has a help text (`HELP.device_class`): what each class
+  is to the PC, and that CDC serial is the COM port for a J2534 tool
+
+Probe: `tools/webui_preview/probe_j2534_usb.mjs` (`J2534 USB PROBE PASS`,
+12 checks; it keeps a bubble open across a repaint). The transport itself:
+the firmware checkout's `tools/testbench/usb/j2534_serial_test.py`.
+
 ## The new-car bar (2026-10-26)
 
 Ali set a device up on the simulator (two standard PIDs chosen), took it to
