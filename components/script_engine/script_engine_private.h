@@ -59,7 +59,9 @@ void se_check_budget(bvm *vm);
 uint32_t se_bind_id_arg(bvm *vm, int idx);
 
 /* The bindings of script_engine_bind_can.c, listed in bind.c's table, and
- * the globals they read and set (can_rx_*, HIGH, LOW, CAN_TX, CAN_RX). */
+ * the globals they read and set (can_rx_*, can_send_error, HIGH, LOW,
+ * CAN_TX, CAN_RX). */
+int se_b_can_send(bvm *vm);
 int se_b_can_start(bvm *vm);
 int se_b_can_stop(bvm *vm);
 int se_b_can_rx(bvm *vm);

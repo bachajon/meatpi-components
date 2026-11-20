@@ -878,6 +878,7 @@ static const struct
     { "uds",               b_uds },
     { "uds_ext",           b_uds_ext },
     { "can_tx",            b_can_tx },
+    { "can_send",          se_b_can_send },
     { "can_start",         se_b_can_start },
     { "can_stop",          se_b_can_stop },
     { "can_rx",            se_b_can_rx },

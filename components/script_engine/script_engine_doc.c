@@ -129,6 +129,17 @@ static const se_bind_doc_t BIND_DOCS[] =
       "ext = 1 for a 29-bit id). Needs the CAN bus setting on and the bus running; "
       "false when it is off or nobody acknowledged.",
       "can_tx(0x7DF, 0, '02 01 0C')" },
+    { "can_send", "can_send(bus, id, hexbytes[, wake[, ext]])", "can",
+      "true when the frame is on the bus",
+      "Send one raw frame on a bus of the OBD connector. bus: 'obd' = the car's "
+      "OBD protocol through the OBD chip (works with the CAN bus setting off; on a "
+      "car before CAN the id is the three header bytes), 'ms', 'sw', 'ch' = MS, "
+      "single-wire and CH CAN through the chip, 'can' = WiCAN's own CAN controller. "
+      "An id above 0x7FF is a 29-bit one (pass ext = 1 for a small one). wake = 1 on "
+      "'sw' sends the frame as a high-voltage wake-up (GMLAN). About 0.4 s through "
+      "the chip. false with the reason in can_send_error when nobody acknowledged "
+      "or the chip is busy (an app, a scan).",
+      "can_send('sw', 0x1024E097, '80 01 FF')" },
     { "can_start", "can_start()", "can", "true when the bus is running",
       "Start the CAN controller and transceiver from the CAN settings. False when "
       "CAN is disabled in settings. A script that stopped the bus is restarted at "
@@ -217,6 +228,7 @@ static const struct
     { "uds_pending", "How many 0x78 responsePending replies the last obd_request() waited through." },
     { "uds_xfer_crc", "CRC-32 of the data the last obd_transfer_file() sent." },
     { "uds_xfer_blocks", "Blocks the last obd_transfer_file() sent." },
+    { "can_send_error", "Why the last can_send() returned false ('' when it sent)." },
     { "can_rx_id", "Id of the last frame can_rx() returned." },
     { "can_rx_ext", "1 when that frame used a 29-bit id." },
     { "can_rx_dlc", "Data length of that frame." },

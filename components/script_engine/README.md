@@ -71,7 +71,7 @@ short.
 |---|---|
 | `script_engine.c` | VM lifecycle, runner task, run/check/kill, stored-script loader (internal-stack marshal) |
 | `script_engine_bind.c` | the device bindings + the function table |
-| `script_engine_bind_can.c` | the bindings on the CAN controller itself: `can_rx`, `can_start`, `can_stop`, `digitalWrite`, `digitalPWM`, and the epilogue of every run |
+| `script_engine_bind_can.c` | the bindings on the CAN controller itself: `can_rx`, `can_start`, `can_stop`, `digitalWrite`, `digitalPWM`, and the epilogue of every run; `can_send` (2026-11-21), a raw frame on any bus of the OBD connector |
 | `script_engine_gpio.c` / `.h` | the pin rule and the pulse sender of `digitalWrite` / `digitalPWM` (the rule and the pulse plan are pure) |
 | `script_engine_doc.c` / `.h` | the reference tables + JSON builders, the engine limits (pure) |
 | `script_engine_examples.c` | the built-in examples (pure) |
@@ -83,6 +83,30 @@ short.
 
 Host suite: `./test.ps1 host script_engine` (name guard, obd core, reflash
 streamer, reference + examples, the pin rule and the pulse plan).
+
+## A raw frame on any bus: `can_send` (2026-11-21, GitHub issue #1072)
+
+`can_tx(id, ext, hexbytes)` reaches WiCAN's own CAN controller, which is on
+pins 6 and 14 and off as shipped. `can_send(bus, id, hexbytes[, wake[,
+ext]])` is autopid's can.send (`autopid_can_send()`, the autopid README,
+"can.send"): `'obd'` = the car's OBD protocol through the OBD chip, `'ms'`,
+`'sw'`, `'ch'` = MS, single-wire and CH CAN through the chip, `'can'` =
+that controller. One frame a call; a sequence is several calls with
+`sleep_ms()` between them (each call through the chip takes the chip to the
+bus and home again, 0.25 to 0.6 s).
+
+- An id above `0x7FF` is a 29-bit one; `ext = 1` makes a small id one.
+  `wake = 1` on `'sw'` sends the frame in the single-wire transceiver's
+  high-voltage wake mode.
+- Returns true when the frame is on the bus (CAN: acknowledged). False with
+  the reason in the global `can_send_error` when nobody acknowledged, the
+  chip is with an app or another job, or the CAN controller is off. A
+  malformed call (a bus that does not exist, bad hex) raises `can_error`
+  with the sentence.
+- The script's own Exclusive bus hold does not stop it (the rule action
+  `can.send` is the one a diagnostic hold stops).
+
+Bench: the `script` leg of `.\test.ps1 cansend` in the firmware repo.
 
 ## Raw CAN receive, bus stop / start, the CAN_TX pulse (2026-11-17)
 

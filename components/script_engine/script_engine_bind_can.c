@@ -29,6 +29,9 @@
  *
  *   can_rx(id, timeout_ms[, ext])  -> the frame's bytes as hex, or nil;
  *                                     sets can_rx_id / can_rx_ext / can_rx_dlc
+ *   can_send(bus, id, hexbytes[, wake[, ext]]) -> bool; sets can_send_error
+ *                                     (any bus of the OBD connector: autopid's
+ *                                     can.send, 2026-11-21, issue #1072)
  *   can_start() / can_stop()       -> bool
  *   digitalWrite(pin, value)       -> nil (the pin rule: script_engine_gpio.c)
  *   digitalPWM(pin, on_ms, off_ms[, rounds[, idle]]) -> nil
@@ -44,7 +47,9 @@
 #include "freertos/task.h"
 
 #include "berry.h"
+#include "cJSON.h"
 
+#include "autopid.h"
 #include "can_manager.h"
 
 #include "script_engine_doc.h"
@@ -369,8 +374,80 @@ int se_b_digital_pwm(bvm *vm)
     be_return_nil(vm);
 }
 
+static void set_str_global(bvm *vm, const char *name, const char *v)
+{
+    be_pushstring(vm, v);
+    be_setglobal(vm, name);
+    be_pop(vm, 1);
+}
+
+/** An optional flag argument: true, or an integer that is not 0. */
+static bool flag_arg(bvm *vm, int idx)
+{
+    if (be_top(vm) < idx || be_isnil(vm, idx))
+    {
+        return false;
+    }
+
+    return be_isbool(vm, idx) ? be_tobool(vm, idx)
+                              : (be_isint(vm, idx) && be_toint(vm, idx) != 0);
+}
+
+/* can_send(bus, id, hexbytes[, wake[, ext]]): one raw frame on any bus of
+   the OBD connector, through autopid's can.send (the OBD chip for 'obd',
+   'ms', 'sw' and 'ch', WiCAN's own controller for 'can'). true when the
+   frame is on the bus (CAN: acknowledged). A request that is malformed
+   raises; one that cannot be served right now, or a frame nobody
+   acknowledged, returns false with the reason in can_send_error. */
+int se_b_can_send(bvm *vm)
+{
+    se_check_budget(vm);
+
+    if (be_top(vm) < 3 || !be_isstring(vm, 1) || !be_isstring(vm, 3) ||
+        !(be_isint(vm, 2) || be_isstring(vm, 2)))
+    {
+        be_raise(vm, "can_error", "can_send(bus, id, hexbytes[, wake[, ext]])");
+    }
+
+    cJSON *req = cJSON_CreateObject();
+
+    if (req == NULL)
+    {
+        be_raise(vm, "can_error", "no memory");
+    }
+
+    cJSON_AddStringToObject(req, "bus", be_tostring(vm, 1));
+    cJSON_AddNumberToObject(req, "id", (double)se_bind_id_arg(vm, 2));
+    cJSON_AddStringToObject(req, "data", be_tostring(vm, 3));
+
+    if (flag_arg(vm, 4))
+    {
+        cJSON_AddBoolToObject(req, "wake", true);
+    }
+
+    if (be_top(vm) >= 5 && !be_isnil(vm, 5))
+    {
+        cJSON_AddBoolToObject(req, "ext", flag_arg(vm, 5));
+    }
+
+    char err[200];
+    esp_err_t serr = autopid_can_send(req, NULL, err, sizeof(err));
+
+    cJSON_Delete(req);
+
+    if (serr == ESP_ERR_INVALID_ARG)
+    {
+        be_raise(vm, "can_error", err); /* Berry copies the text */
+    }
+
+    set_str_global(vm, "can_send_error", (serr == ESP_OK) ? "" : err);
+    be_pushbool(vm, serr == ESP_OK);
+    be_return(vm);
+}
+
 void se_bind_can_globals(bvm *vm)
 {
+    set_str_global(vm, "can_send_error", "");
     set_int_global(vm, "can_rx_id", 0);
     set_int_global(vm, "can_rx_ext", 0);
     set_int_global(vm, "can_rx_dlc", 0);

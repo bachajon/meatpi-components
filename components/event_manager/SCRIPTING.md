@@ -146,7 +146,10 @@ surfaces, that's a design smell to raise first.
   millis/uds/uds_ext/can_tx/can_start/can_stop/can_rx/digitalWrite/digitalPWM/emit (+ 2026-07-08: dtc_scan/dtc_clear, the
   autopid DTC surface, gated by the dtc_enabled/dtc_allow_clear settings;
   TASK_dtc.md §9, and dtc_desc(code) → uploaded-database description,
-  TASK_dtc_db.md); budget + kill. GET /api/scripts (list),
+  TASK_dtc_db.md; + 2026-11-21: can_send(bus, id, hexbytes[, wake[, ext]]),
+  a raw frame on any bus of the OBD connector through autopid's can.send,
+  where can_tx reaches WiCAN's own CAN controller alone); budget + kill.
+  GET /api/scripts (list),
   POST /api/scripts/run {src|name}, POST /api/scripts/stop, `script run`.
 - Event wiring: `script.run {name}` action + the `{"script":"name"}` rule
   sugar (parser rewrite, host-tested); trigger event exposed as evt_*
