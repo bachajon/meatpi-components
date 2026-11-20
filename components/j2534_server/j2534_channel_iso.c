@@ -67,6 +67,13 @@ static const char *TAG = "j2534_server";
 /* the reassembled PDU scratch: PSRAM, one RX pump drains every channel */
 EXT_RAM_BSS_ATTR static uint8_t s_pdu[J2534_MAX_DATA];
 
+/* a PDU taken out of a session ahead of its turn (j2534_iso_poll: the
+   message whose START_OF_MESSAGE is only now being told), kept for the
+   next poll of its channel. One: there is one RX pump. */
+EXT_RAM_BSS_ATTR static uint8_t s_held[J2534_MAX_DATA];
+static const j2534_iso_session_t *s_held_sess;
+static size_t s_held_len;
+
 static uint32_t now_us(void)
 {
     return (uint32_t)esp_timer_get_time();
@@ -253,6 +260,11 @@ static void session_close(j2534_iso_session_t *s)
         can_isotp()->close(s->isotp);
     }
 
+    if (s_held_sess == s)
+    {
+        s_held_sess = NULL; /* its held PDU goes with the session */
+    }
+
     memset(s, 0, sizeof(*s));
 }
 
@@ -381,8 +393,8 @@ void j2534_iso_unbind_all(j2534_channel_t *c)
 
 /* ---- indications ------------------------------------------------------ */
 
-static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
-                     bool ext, bool has_ae, uint8_t ae)
+static void indicate_at(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
+                        bool ext, bool has_ae, uint8_t ae, uint32_t ts_us)
 {
     uint8_t next = (uint8_t)((c->ind_head + 1) % J2534_CH_MAX_IND);
 
@@ -399,8 +411,14 @@ static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
     c->ind[c->ind_head].ext = ext;
     c->ind[c->ind_head].has_ae = has_ae;
     c->ind[c->ind_head].ae = ae;
-    c->ind[c->ind_head].ts_us = now_us();
+    c->ind[c->ind_head].ts_us = ts_us;
     c->ind_head = next;
+}
+
+static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
+                     bool ext, bool has_ae, uint8_t ae)
+{
+    indicate_at(c, rx_status, id, ext, has_ae, ae, now_us());
 }
 
 /* ---- write ------------------------------------------------------------ */
@@ -657,6 +675,31 @@ static bool session_join(j2534_msg_t *out, const j2534_iso_session_t *s,
     return true;
 }
 
+/* Is the reassembled @p pdu the message the first frame @p ff (PCI first,
+   @p dlc bytes) starts? Its length and its first bytes say so. */
+static bool pdu_is_of_first_frame(const uint8_t *pdu, size_t n,
+                                  const uint8_t *ff, uint8_t dlc)
+{
+    size_t len = ((size_t)(ff[0] & 0x0F) << 8) | ff[1];
+    uint8_t at = 2;
+
+    if (len == 0)
+    {
+        if (dlc < 6)
+        {
+            return false;
+        }
+
+        /* the 32-bit length of a message above 4095 bytes */
+        len = ((size_t)ff[2] << 24) | ((size_t)ff[3] << 16) |
+              ((size_t)ff[4] << 8) | ff[5];
+        at = 6;
+    }
+
+    return n == len && dlc >= at && n >= (size_t)(dlc - at) &&
+           memcmp(pdu, ff + at, (size_t)(dlc - at)) == 0;
+}
+
 bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
 {
     /* 1. a pending indication */
@@ -673,6 +716,21 @@ bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
 
         c->ind_tail = (uint8_t)((c->ind_tail + 1) % J2534_CH_MAX_IND);
         return true;
+    }
+
+    /* 1b. the message a START_OF_MESSAGE was just told for (see 2.) */
+    if (s_held_sess != NULL && s_held_sess >= c->sess &&
+        s_held_sess < c->sess + J2534_CH_MAX_SESSIONS)
+    {
+        const j2534_iso_session_t *s = s_held_sess;
+
+        s_held_sess = NULL;
+
+        if (s->in_use && session_join(out, s, s_held, s_held_len, now_us()))
+        {
+            obd_gate_release(c);
+            return true;
+        }
     }
 
     /* 2. the bus frames: a first frame on a session's id announces a
@@ -701,12 +759,44 @@ bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
             if (si >= 0 &&
                 j2534_iso_is_first_frame(fr.data + off, (uint8_t)(fr.dlc - off)))
             {
+                j2534_iso_session_t *s = &c->sess[si];
+                size_t n = 0;
+
+                /* A message this session finished before this first frame
+                   came (an ECU's single-frame acknowledgement, then its
+                   multi-frame answer on the same id: Toyota's loader login)
+                   is read before the START_OF_MESSAGE of the next one, as
+                   it was on the bus. Until 2026-11-19 the indication went
+                   first, whatever the session still held. */
+                if (s_held_sess == NULL &&
+                    can_isotp()->recv(s->isotp, s_pdu, sizeof(s_pdu), &n, 0) == ESP_OK &&
+                    n > 0)
+                {
+                    if (pdu_is_of_first_frame(s_pdu, n, fr.data + off,
+                                              (uint8_t)(fr.dlc - off)))
+                    {
+                        /* the pump is late and the message of this very
+                           first frame is whole already: the indication
+                           now, the message at the next poll */
+                        memcpy(s_held, s_pdu, n);
+                        s_held_len = n;
+                        s_held_sess = s;
+                    }
+                    else if (session_join(out, s, s_pdu, n, now_us()))
+                    {
+                        indicate_at(c, J2534_RX_START_OF_MESSAGE, fr.id,
+                                    fr.ext, off != 0, s->ae.rx, ts);
+                        obd_gate_release(c);
+                        return true;
+                    }
+                }
+
                 j2534_iso_indication(out, fr.id, fr.ext,
                                      J2534_RX_START_OF_MESSAGE, ts);
 
                 if (off != 0)
                 {
-                    indication_add_ae(out, c->sess[si].ae.rx);
+                    indication_add_ae(out, s->ae.rx);
                 }
 
                 return true;

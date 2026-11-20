@@ -52,7 +52,11 @@ typedef struct j2534_tp20_state j2534_tp20_state_t;
  * (dispatch_drops, bench 2026-11-17) that the node itself had kept. PSRAM,
  * 16 bytes a frame, one queue per channel. */
 #define J2534_CH_CAN_QLEN 256
-#define J2534_CH_MAX_IND  4   /* pending TxDone / START_OF_MESSAGE indications */
+/* pending TxDone / START_OF_MESSAGE indications. One PassThruWriteMsgs
+   batch queues a TxDone for each of its messages before the RX pump takes
+   the first: at 4 (three held) the two oldest of Toyota CUW's five-frame
+   loader login were dropped, and the tester never saw them (2026-11-19). */
+#define J2534_CH_MAX_IND  64
 
 typedef struct
 {

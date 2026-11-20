@@ -500,6 +500,15 @@ a TCP peer that vanishes is given up (section 8.1), a long ISO15765
 write no longer holds up what is received or the periodic messages, and
 the periodic messages have a task of their own (section 6).
 
+2026-11-19, both versions, no byte changes meaning: an ISO15765 channel
+holds 63 pending indications where it held 3, so every message of one
+`WRITE_MSGS` batch gets its TxDone (a batch of five lost its first two:
+Toyota CUW's loader login). And a message a session finished before the
+next first frame on its id is read before that frame's START_OF_MESSAGE,
+in the order of the bus (the indication went first before: the tester
+read START_OF_MESSAGE, then the single-frame acknowledgement that had
+come in front of it).
+
 ## 11. TP2.0 (`TP2_0_PS`, protocol 0x800E)
 
 VW's TP 2.0 transport as its own J2534 protocol (SAE J2534-2 section 19;
