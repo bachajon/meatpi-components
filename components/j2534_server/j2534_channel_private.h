@@ -65,12 +65,23 @@ typedef struct
     bool     tp_owned;  /* TP2.0 implicit pass; CLEAR_MSG_FILTERS keeps it */
 } j2534_ch_filter_t;
 
+/* ISO 15765-2 extended addressing of a session (ISO15765_ADDR_TYPE, SAE
+   J2534-1): the fifth byte of the FLOW_CONTROL filter's pattern (rx) and
+   flow-control message (tx), which leads every frame on the bus. */
+typedef struct
+{
+    bool    on;
+    uint8_t tx;     /* in front of every frame sent to the ECU    */
+    uint8_t rx;     /* in front of every frame the ECU sends back */
+} j2534_iso_ae_t;
+
 typedef struct
 {
     bool                in_use;
     uint32_t            tx_id;
     uint32_t            rx_id;
-    bool                ext;
+    bool                ext;    /* 29-bit ids (not the address extension) */
+    j2534_iso_ae_t      ae;     /* extended addressing, else .on false    */
     bool                pad;    /* frames padded to 8 bytes (the message TxFlags) */
     bool                tx_busy; /* the tester's write to this ECU is on the bus,
                                     the channel lock given up meanwhile
@@ -84,6 +95,8 @@ typedef struct
     uint32_t rx_status;
     uint32_t id;
     bool     ext;
+    bool     has_ae;    /* extended addressing: the indication carries */
+    uint8_t  ae;        /* this address extension after the id         */
     uint32_t ts_us;
 } j2534_ch_ind_t;
 
@@ -173,12 +186,16 @@ bool j2534_iso_provider_ready(void);
 
 /**
  * Open (or, for an rx id the channel already serves, reopen) the ISO-TP
- * session for an ECU. J2534 status: NOERROR (*slot = the session index),
+ * session for an ECU. @p ae NULL (or .on false): normal addressing. With
+ * extended addressing a session is one rx id AND rx address extension, so
+ * several share an rx id; a session of the other addressing kind on the
+ * rx id is replaced. J2534 status: NOERROR (*slot = the session index),
  * ERR_EXCEEDED_LIMIT (the channel's or the provider's table is full),
  * ERR_FAILED (no provider, the id held elsewhere, the bus down).
  */
 uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
-                        bool ext, bool pad, int *slot);
+                        bool ext, bool pad, const j2534_iso_ae_t *ae,
+                        int *slot);
 
 void j2534_iso_unbind(j2534_channel_t *c, int slot);
 void j2534_iso_unbind_all(j2534_channel_t *c);

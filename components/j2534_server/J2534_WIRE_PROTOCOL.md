@@ -137,8 +137,12 @@ indication: an `RX_MSG` whose `rx_status` is `TX_MSG_TYPE |
 TX_INDICATION` (0x09) and whose data is the 4-byte id alone; a first
 frame arriving on a session's id raises a `START_OF_MESSAGE` (0x02)
 indication the same way. Periodic messages raise no indications.
-`ISO15765_ADDR_TYPE` (extended addressing) is not supported:
-`ERR_INVALID_MSG`.
+`ISO15765_ADDR_TYPE` (extended addressing, 2026-11-19): the data is
+`[4-byte id][address extension][payload]` in both directions, the
+FLOW_CONTROL filter's pattern and flow-control message are 5 bytes (id +
+the address extension of that direction), and received messages and
+indications carry `0x80` in `rx_status`. A message longer than 6 bytes to
+an id and address extension no filter names is `ERR_NO_FLOW_CONTROL`.
 
 Filters (max 8 per channel): `PASS`/`BLOCK` match `mask`/`pattern` over
 the message `data` bytes (the 4 id bytes first): a message matches when
@@ -198,7 +202,7 @@ reply:   35 4a 01 80 03 00 00 00 08 00 00 00 00 00 00 00 42 36 00 00
 |---|---|---|
 | 0 | 4 | `protocol_id` (1 J1850VPW, 5 CAN, 6 ISO15765, 0x800E TP2_0_PS) |
 | 4 | 4 | `rx_status` (device to tester: `0x01 TX_MSG_TYPE` + `0x08 TX_INDICATION` = the TxDone indication after an ISO15765 or J1850 transmit, `0x02 START_OF_MESSAGE` = an ISO15765 first frame arrived, `0x100 CAN_29BIT_ID`, `0x10000 CONNECTION_ESTABLISHED` and `0x20000 CONNECTION_LOST` = the two TP2.0 indications) |
-| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`, `0x10000 TP2_0_BROADCAST_MSG`; `0x80 ISO15765_ADDR_TYPE` is refused) |
+| 8 | 4 | `tx_flags` (tester to device: `0x100 CAN_29BIT_ID`, `0x40 ISO15765_FRAME_PAD`, `0x10000 TP2_0_BROADCAST_MSG`; `0x80 ISO15765_ADDR_TYPE` extended addressing) |
 | 12 | 4 | `timestamp` (device: microseconds since boot, taken in the CAN receive interrupt for CAN frames, at reassembly for ISO15765 PDUs; wraps every 71.6 min) |
 | 16 | 4 | `extra_data_index` |
 | 20 | 4 | `data_size` (0..4128) |
@@ -261,7 +265,7 @@ version 2 is answered (section 13) and what `j2534_proto.h` defines since
 | `0x07` | | `ERR_FAILED` | no free channel / periodic slot, timer failure, unknown message type |
 | `0x08` | | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
 | `0x09` | | `ERR_TIMEOUT` | ISO-TP send/receive timed out |
-| `0x0A` | | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id, extended addressing |
+| `0x0A` | | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id |
 | `0x0C` | | `ERR_EXCEEDED_LIMIT` | the channel's filter table (8) or its ISO-TP sessions (4; 8 device-wide) are all in use |
 | `0x0E` | `0x1A` | `ERR_DEVICE_IN_USE` | a tester is attached on another transport |
 | `0x10`..`0x12` | | `ERR_BUFFER_*` | not sent by the device. `ERR_BUFFER_OVERFLOW` is what the Windows driver returns from `PassThruReadMsgs` after an `EVENT RX_LOST` (section 13) |

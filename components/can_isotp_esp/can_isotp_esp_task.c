@@ -71,14 +71,29 @@ static bool session_busy(const struct can_isotp_session *s, uint32_t now)
     return s->tx_inflight || (int32_t)(s->busy_until_ms - now) > 0;
 }
 
-static struct can_isotp_session *find_by_rx(uint32_t id, bool ext)
+/* The session a received frame belongs to: the one on its id, and with
+   extended addressing the one among those whose address extension leads
+   the frame. *known tells whether the id has a session at all (a frame
+   with another address extension is not an orphan). */
+static struct can_isotp_session *find_by_rx(const can_core_frame_t *fr,
+                                            bool *known)
 {
+    *known = false;
+
     for (int i = 0; i < ISOTP_MAX_SESSIONS; i++)
     {
-        if (can_isotp_esp_tbl[i] != NULL && can_isotp_esp_tbl[i]->rx_id == id &&
-            can_isotp_esp_tbl[i]->ext == ext)
+        struct can_isotp_session *s = can_isotp_esp_tbl[i];
+
+        if (s == NULL || s->rx_id != fr->id || s->ext != fr->ext)
         {
-            return can_isotp_esp_tbl[i];
+            continue;
+        }
+
+        *known = true;
+
+        if (!s->addr_ext || (fr->dlc >= 1 && fr->data[0] == s->rx_ae))
+        {
+            return s;
         }
     }
 
@@ -93,12 +108,17 @@ static void feed_frame(const can_core_frame_t *fr)
         return;
     }
 
-    struct can_isotp_session *s = find_by_rx(fr->id, fr->ext);
+    bool known;
+    struct can_isotp_session *s = find_by_rx(fr, &known);
 
     if (s == NULL)
     {
-        STAT_INC(frames_orphan); /* closed between dispatch and here */
-        return;
+        if (!known)
+        {
+            STAT_INC(frames_orphan); /* closed between dispatch and here */
+        }
+
+        return; /* or: an address extension no session here listens to */
     }
 
     uint8_t payload[8];

@@ -371,6 +371,9 @@ esp_err_t esp_isotp_new_transport(twai_node_handle_t twai_node, const esp_isotp_
     if (config->flow_override) {
         isotp_set_flow_control(&isotp->link, config->flow_block_size, config->flow_st_min_us);
     }
+    if (config->addr_ext) {
+        isotp_set_addr_ext(&isotp->link, config->tx_addr_ext, config->rx_addr_ext);
+    }
     isotp->link.receive_arbitration_id = config->rx_id;
 
     // Pre-allocate ISR-safe receive frame buffer to avoid dynamic allocation in interrupt context.

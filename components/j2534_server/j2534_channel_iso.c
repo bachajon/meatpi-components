@@ -24,7 +24,9 @@
  * @file j2534_channel_iso.c
  * @brief The ISO15765 side of a J2534 channel: one ISO-TP session per
  *        FLOW_CONTROL filter on the registered provider (can_isotp.h),
- *        the SAE J2534-1 message layout [4-byte id][payload] both ways,
+ *        the SAE J2534-1 message layout [4-byte id][payload] both ways
+ *        ([4-byte id][address extension][payload] with extended
+ *        addressing, ISO15765_ADDR_TYPE),
  *        single frames without a session (functional addressing), and the
  *        TxDone and START_OF_MESSAGE indications. Every function runs with
  *        the channel lock held by j2534_channel.c; j2534_iso_write alone
@@ -36,6 +38,16 @@
  * PDU `00 00 07 E0 10 03`, unpadded, because the device took the bare
  * payload and read the pad flag from CONNECT. Standard tools put the id
  * first and the pad flag on every message; the device does the same now.
+ *
+ * 2026-11-19: extended addressing in both directions. A FLOW_CONTROL
+ * filter with ISO15765_ADDR_TYPE (5-byte pattern and flow-control message)
+ * opens a provider session with the two address-extension bytes; the
+ * tester's messages to it go through that session (single and segmented),
+ * and what the ECU answers comes back as [id][address extension][payload]
+ * with ISO15765_ADDR_TYPE in RxStatus. Toyota's central gateway (0x750 /
+ * 0x758, one address extension per ECU behind it) speaks this; until now
+ * only a single frame went out, around the provider, and nothing came
+ * back.
  */
 #include "j2534_channel_private.h"
 
@@ -88,12 +100,16 @@ static int find_free(const j2534_channel_t *c)
     return -1;
 }
 
-static int find_by_rx(const j2534_channel_t *c, uint32_t rx_id, bool ext)
+/* the session of an rx id; with extended addressing, of the rx id and the
+   address extension its frames arrive with */
+static int find_by_rx(const j2534_channel_t *c, uint32_t rx_id, bool ext,
+                      const j2534_iso_ae_t *ae)
 {
     for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
     {
         if (c->sess[i].in_use && c->sess[i].rx_id == rx_id &&
-            c->sess[i].ext == ext)
+            c->sess[i].ext == ext && c->sess[i].ae.on == ae->on &&
+            (!ae->on || c->sess[i].ae.rx == ae->rx))
         {
             return i;
         }
@@ -102,12 +118,60 @@ static int find_by_rx(const j2534_channel_t *c, uint32_t rx_id, bool ext)
     return -1;
 }
 
-static int find_by_tx(const j2534_channel_t *c, uint32_t tx_id, bool ext)
+/* a session on the rx id of the other addressing kind (normal when
+   @p ae_on, extended when not): the two cannot share an id */
+static int find_other_kind(const j2534_channel_t *c, uint32_t rx_id, bool ext,
+                           bool ae_on)
+{
+    for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
+    {
+        if (c->sess[i].in_use && c->sess[i].rx_id == rx_id &&
+            c->sess[i].ext == ext && c->sess[i].ae.on != ae_on)
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int find_by_tx(const j2534_channel_t *c, uint32_t tx_id, bool ext,
+                      bool has_ae, uint8_t ae)
 {
     for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
     {
         if (c->sess[i].in_use && c->sess[i].tx_id == tx_id &&
-            c->sess[i].ext == ext)
+            c->sess[i].ext == ext && c->sess[i].ae.on == has_ae &&
+            (!has_ae || c->sess[i].ae.tx == ae))
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+/* The session a frame off the bus belongs to, -1 for none. *owned tells
+   whether the frame's id has a session at all: with extended addressing a
+   frame led by an address extension nobody here listens to is still not a
+   functional reply to hand out through the PASS filters. */
+static int find_by_frame(const j2534_channel_t *c, const can_core_frame_t *fr,
+                         bool *owned)
+{
+    *owned = false;
+
+    for (int i = 0; i < J2534_CH_MAX_SESSIONS; i++)
+    {
+        const j2534_iso_session_t *s = &c->sess[i];
+
+        if (!s->in_use || s->rx_id != fr->id || s->ext != fr->ext)
+        {
+            continue;
+        }
+
+        *owned = true;
+
+        if (!s->ae.on || (fr->dlc >= 1 && fr->data[0] == s->ae.rx))
         {
             return i;
         }
@@ -136,15 +200,31 @@ static uint32_t session_open(j2534_channel_t *c, j2534_iso_session_t *s)
         .stmin_us     = st_us,
         .padding_byte = 0xAA,
         .use_padding  = s->pad,
+        .addr_ext     = s->ae.on,
+        .tx_ae        = s->ae.tx,
+        .rx_ae        = s->ae.rx,
     };
     esp_err_t err = can_isotp()->open(&cfg, &s->isotp);
 
     if (err == ESP_OK)
     {
         s->in_use = true;
-        ESP_LOGI(TAG, "ISO15765 session tx %03lX rx %03lX%s%s",
-                 (unsigned long)s->tx_id, (unsigned long)s->rx_id,
-                 s->ext ? " 29-bit" : "", s->pad ? " padded" : "");
+
+        if (s->ae.on)
+        {
+            ESP_LOGI(TAG, "ISO15765 session tx %03lX/%02X rx %03lX/%02X%s%s "
+                          "(extended addressing)",
+                     (unsigned long)s->tx_id, s->ae.tx,
+                     (unsigned long)s->rx_id, s->ae.rx,
+                     s->ext ? " 29-bit" : "", s->pad ? " padded" : "");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "ISO15765 session tx %03lX rx %03lX%s%s",
+                     (unsigned long)s->tx_id, (unsigned long)s->rx_id,
+                     s->ext ? " 29-bit" : "", s->pad ? " padded" : "");
+        }
+
         return J2534_STATUS_NOERROR;
     }
 
@@ -177,8 +257,16 @@ static void session_close(j2534_iso_session_t *s)
 }
 
 uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
-                        bool ext, bool pad, int *slot)
+                        bool ext, bool pad, const j2534_iso_ae_t *ae,
+                        int *slot)
 {
+    static const j2534_iso_ae_t NO_AE = { .on = false };
+
+    if (ae == NULL || !ae->on)
+    {
+        ae = &NO_AE;
+    }
+
     if (!j2534_iso_provider_ready())
     {
         ESP_LOGW(TAG, "ISO15765 not available (no ISO-TP provider, or the "
@@ -186,8 +274,15 @@ uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
         return J2534_ERR_FAILED;
     }
 
-    /* the same ECU again: the tool re-arms its filter, rebind in place */
-    int s = find_by_rx(c, rx_id, ext);
+    /* the same ECU again: the tool re-arms its filter, rebind in place.
+       So does a session of the other addressing kind on the rx id: the
+       provider keeps one kind per id. */
+    int s = find_by_rx(c, rx_id, ext, ae);
+
+    if (s < 0)
+    {
+        s = find_other_kind(c, rx_id, ext, ae->on);
+    }
 
     if (s >= 0)
     {
@@ -208,6 +303,7 @@ uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
     c->sess[s].tx_id = tx_id;
     c->sess[s].rx_id = rx_id;
     c->sess[s].ext = ext;
+    c->sess[s].ae = *ae;
     c->sess[s].pad = pad;
 
     uint32_t st = session_open(c, &c->sess[s]);
@@ -286,7 +382,7 @@ void j2534_iso_unbind_all(j2534_channel_t *c)
 /* ---- indications ------------------------------------------------------ */
 
 static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
-                     bool ext)
+                     bool ext, bool has_ae, uint8_t ae)
 {
     uint8_t next = (uint8_t)((c->ind_head + 1) % J2534_CH_MAX_IND);
 
@@ -301,6 +397,8 @@ static void indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
     c->ind[c->ind_head].rx_status = rx_status;
     c->ind[c->ind_head].id = id;
     c->ind[c->ind_head].ext = ext;
+    c->ind[c->ind_head].has_ae = has_ae;
+    c->ind[c->ind_head].ae = ae;
     c->ind[c->ind_head].ts_us = now_us();
     c->ind_head = next;
 }
@@ -318,11 +416,13 @@ static bool pad_rebind(j2534_channel_t *c, j2534_iso_session_t *s, bool pad)
     uint32_t tx = s->tx_id;
     uint32_t rx = s->rx_id;
     bool ext = s->ext;
+    j2534_iso_ae_t ae = s->ae;
 
     session_close(s);
     s->tx_id = tx;
     s->rx_id = rx;
     s->ext = ext;
+    s->ae = ae;
     s->pad = pad;
     return session_open(c, s) == J2534_STATUS_NOERROR;
 }
@@ -330,9 +430,13 @@ static bool pad_rebind(j2534_channel_t *c, j2534_iso_session_t *s, bool pad)
 /* the send's own wait: flow control after the first frame, then the
    consecutive frames at the ECU's STmin; capped under the DLL's 6 s ACK
    wait (a 4 KB block at STmin 5 ms needs about 3 s) */
-static uint32_t send_timeout_ms(size_t len)
+static uint32_t send_timeout_ms(size_t len, bool has_ae)
 {
-    uint32_t frames = (len <= 7) ? 1u : 1u + (uint32_t)((len - 6u + 6u) / 7u);
+    /* a frame carries one byte less behind an address extension */
+    size_t sf = has_ae ? 6u : 7u;   /* single / consecutive frame */
+    size_t ff = sf - 1u;            /* first frame                */
+    uint32_t frames = (len <= sf) ? 1u
+                                  : 1u + (uint32_t)((len - ff + sf - 1u) / sf);
     uint32_t t = 1500u + frames * 10u;
 
     return (t > 5500u) ? 5500u : t;
@@ -351,13 +455,12 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
        [4-byte CAN id][1-byte address extension][payload], and every CAN
        frame is led by that address-extension byte, so a single frame holds
        6 payload bytes (not 7). Toyota's central gateway (0x750/0x758) speaks
-       this for SecurityAccess, TesterPresent and ReadDataByIdentifier -- all
-       single-frame -- and the stock tools (Techstream, CUW, PCMflash) cannot
-       reach an engine ECU behind the gateway without it. The esp_isotp
-       session stack is standard-addressing only, so an extended-addressed
-       single frame is built and sent directly on the functional path below;
-       multi-frame extended-addressed transfers are not handled (none of the
-       gateway flows this enables use one). */
+       this, and the stock tools (Techstream, CUW, PCMflash) cannot reach an
+       engine ECU behind the gateway without it. The message goes through
+       the session its FLOW_CONTROL filter opened for that id and address
+       extension (single or segmented; the answer comes back through it,
+       j2534_iso_poll); without one a single frame still goes out directly,
+       as a functional request does. */
     if ((msg->tx_flags & J2534_TX_ISO15765_ADDR_TYPE) != 0)
     {
         if (msg->data_size < 5 || msg->data_size > (uint32_t)J2534_MAX_DATA)
@@ -388,18 +491,11 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     bool pad = (msg->tx_flags & J2534_TX_ISO15765_FRAME_PAD) != 0;
 
-    /* extended addressing here is single-frame only (the AE byte costs one of
-       the 8 CAN bytes, so at most 6 UDS payload bytes fit) */
-    if (has_ae && n > 6)
-    {
-        ESP_LOGW(TAG, "ISO15765 ext-addr: %u B needs multi-frame (not supported)",
-                 (unsigned)n);
-        return J2534_ERR_NO_FLOW_CONTROL;
-    }
+    int s = find_by_tx(c, id, ext, has_ae, ae);
 
-    int s = has_ae ? -1 : find_by_tx(c, id, ext);
-
-    if (s < 0 && n > 7)
+    /* without a session only a single frame can go: 7 bytes, 6 behind an
+       address extension */
+    if (s < 0 && n > (has_ae ? 6u : 7u))
     {
         ESP_LOGD(TAG, "ISO15765 %u B to %03lX: no flow-control filter",
                  (unsigned)n, (unsigned long)id);
@@ -459,12 +555,12 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     if (ss != NULL)
     {
-        err = can_isotp()->send(tp, pl, n, send_timeout_ms(n));
+        err = can_isotp()->send(tp, pl, n, send_timeout_ms(n, has_ae));
     }
     else
     {
-        /* functional addressing, or an extended-addressed single frame:
-           one frame, no session */
+        /* functional addressing, or an extended-addressed single frame to
+           an address no FLOW_CONTROL filter names: one frame, no session */
         uint8_t fr[8];
         uint8_t dlc;
 
@@ -517,13 +613,49 @@ uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
 
     if (!periodic)
     {
-        indicate(c, J2534_RX_TX_MSG_TYPE | J2534_RX_TX_INDICATION, id, ext);
+        indicate(c, J2534_RX_TX_MSG_TYPE | J2534_RX_TX_INDICATION, id, ext,
+                 has_ae, ae);
     }
 
     return J2534_STATUS_NOERROR;
 }
 
 /* ---- poll ------------------------------------------------------------- */
+
+/* an indication of an extended-addressing session: the address extension
+   follows the id (SAE J2534-1), ISO15765_ADDR_TYPE says so */
+static void indication_add_ae(j2534_msg_t *out, uint8_t ae)
+{
+    out->data[4] = ae;
+    out->data_size = 5;
+    out->extra_data_index = 5;
+    out->rx_status |= J2534_RX_ISO15765_ADDR_TYPE;
+}
+
+/* a session's reassembled message for the tester: [id][payload], and
+   [id][address extension][payload] with ISO15765_ADDR_TYPE for an
+   extended-addressing session */
+static bool session_join(j2534_msg_t *out, const j2534_iso_session_t *s,
+                         const uint8_t *payload, size_t len, uint32_t ts_us)
+{
+    if (!s->ae.on)
+    {
+        return j2534_iso_join(out, s->rx_id, s->ext, payload, len, ts_us);
+    }
+
+    if (len > (size_t)J2534_MAX_DATA - 5 ||
+        !j2534_iso_join(out, s->rx_id, s->ext, NULL, 0, ts_us))
+    {
+        return false;
+    }
+
+    out->data[4] = s->ae.rx;
+    memcpy(out->data + 5, payload, len);
+    out->data_size = (uint32_t)(5 + len);
+    out->extra_data_index = out->data_size;
+    out->rx_status |= J2534_RX_ISO15765_ADDR_TYPE;
+    return true;
+}
 
 bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
 {
@@ -533,6 +665,12 @@ bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
         const j2534_ch_ind_t *i = &c->ind[c->ind_tail];
 
         j2534_iso_indication(out, i->id, i->ext, i->rx_status, i->ts_us);
+
+        if (i->has_ae)
+        {
+            indication_add_ae(out, i->ae);
+        }
+
         c->ind_tail = (uint8_t)((c->ind_tail + 1) % J2534_CH_MAX_IND);
         return true;
     }
@@ -552,12 +690,25 @@ bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
 
         uint32_t ts = fr.ts_us ? fr.ts_us : now_us();
 
-        if (find_by_rx(c, fr.id, fr.ext) >= 0)
+        bool owned;
+        int si = find_by_frame(c, &fr, &owned);
+
+        if (owned)
         {
-            if (j2534_iso_is_first_frame(fr.data, fr.dlc))
+            /* behind an address extension the PCI is the second byte */
+            uint8_t off = (si >= 0 && c->sess[si].ae.on) ? 1 : 0;
+
+            if (si >= 0 &&
+                j2534_iso_is_first_frame(fr.data + off, (uint8_t)(fr.dlc - off)))
             {
                 j2534_iso_indication(out, fr.id, fr.ext,
                                      J2534_RX_START_OF_MESSAGE, ts);
+
+                if (off != 0)
+                {
+                    indication_add_ae(out, c->sess[si].ae.rx);
+                }
+
                 return true;
             }
 
@@ -596,7 +747,7 @@ bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out)
         }
 
         if (can_isotp()->recv(s->isotp, s_pdu, sizeof(s_pdu), &n, 0) == ESP_OK &&
-            n > 0 && j2534_iso_join(out, s->rx_id, s->ext, s_pdu, n, now_us()))
+            n > 0 && session_join(out, s, s_pdu, n, now_us()))
         {
             obd_gate_release(c); /* the reply is in: conversation over */
             return true;

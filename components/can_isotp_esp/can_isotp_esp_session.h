@@ -68,10 +68,15 @@ struct can_isotp_session
     SemaphoreHandle_t   rx_sem;    /* counting: one token per mailbox PDU */
     isotp_mbox_t        mbox;
     isotp_mbox_slot_t  *slots;     /* PSRAM                               */
-    int                 sub_idx;   /* can_manager queue subscription      */
+    int                 sub_idx;   /* can_manager queue subscription; -1
+                                      when another addr_ext session on the
+                                      same rx id holds it for both         */
     uint32_t            tx_id;
     uint32_t            rx_id;
-    bool                ext;
+    bool                ext;       /* 29-bit ids (NOT the address extension) */
+    bool                addr_ext;  /* extended addressing: frames led by an AE byte */
+    uint8_t             tx_ae;     /* addr_ext: in front of every frame sent  */
+    uint8_t             rx_ae;     /* addr_ext: a received frame starts with it */
     volatile bool       tx_inflight;    /* multi-frame send not complete  */
     volatile uint32_t   tx_deadline_ms; /* give up tracking it after this */
     volatile uint32_t   busy_until_ms;  /* tick-cadence polling until     */

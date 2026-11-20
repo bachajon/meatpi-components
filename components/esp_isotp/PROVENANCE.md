@@ -24,3 +24,11 @@ via CMake (upstream arrangement) to pin the isotp-c config.
   32) and defaults to 0, `ISO_TP_DEFAULT_ST_MIN_US` defaults to 0. The
   firmware's tracked sdkconfig still says 8 and 1000, and no session of
   `can_isotp_esp` uses the Kconfig values any more (it always overrides).
+- 2026-11-19: ISO 15765-2 extended addressing, per link and off by default.
+  `isotp-c/isotp.c` and `isotp.h`: `addr_ext`, `send_ae` and `receive_ae`
+  in `IsoTpLink`, set by `isotp_set_addr_ext()`; every frame sent (single,
+  first, consecutive, flow control) is led by `send_ae` and carries one
+  byte less, a received frame is taken only when it starts with
+  `receive_ae`, which is stripped before the PCI is read. `inc/esp_isotp.h`
+  and `src/esp_isotp.c`: `addr_ext`, `tx_addr_ext` and `rx_addr_ext` in
+  `esp_isotp_config_t`. A link without it behaves as before.

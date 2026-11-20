@@ -321,7 +321,7 @@ uint32_t j2534_channel_connect(int slot, uint32_t protocol, uint32_t flags,
         {
             /* the ids on CONNECT (a WiCAN extension); standard tools arm a
                FLOW_CONTROL filter instead. Padding follows each message. */
-            st = j2534_iso_bind(c, tx_id, rx_id, ext, false, NULL);
+            st = j2534_iso_bind(c, tx_id, rx_id, ext, false, NULL, NULL);
         }
     }
     else if (protocol == J2534_PROT_J1850VPW)

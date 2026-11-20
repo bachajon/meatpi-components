@@ -106,6 +106,9 @@ typedef struct {
     bool flow_override;               /*!< When true, flow_block_size / flow_st_min_us replace the Kconfig defaults */
     uint8_t flow_block_size;          /*!< Receiver BS. 0 = sender streams the rest of the PDU */
     uint32_t flow_st_min_us;          /*!< Receiver STmin in microseconds. 0 = no separation */
+    bool addr_ext;                    /*!< ISO 15765-2 extended addressing: every frame is led by an address extension byte */
+    uint8_t tx_addr_ext;              /*!< Address extension put in front of every frame sent (addr_ext only) */
+    uint8_t rx_addr_ext;              /*!< Address extension a received frame must start with (addr_ext only) */
 } esp_isotp_config_t;
 
 /**

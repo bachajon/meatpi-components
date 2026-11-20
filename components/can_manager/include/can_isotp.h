@@ -74,6 +74,15 @@ typedef struct
                                 knows 100..900 us beside whole ms)    */
     uint8_t  padding_byte; /**< pad value when use_padding            */
     bool     use_padding;  /**< pad frames to 8 bytes                 */
+    bool     addr_ext;     /**< ISO 15765-2 extended addressing: every
+                                frame is led by an address-extension
+                                byte and carries one byte less. NOT
+                                ext_id (29-bit ids). false: normal    */
+    uint8_t  tx_ae;        /**< addr_ext: the byte in front of every
+                                frame sent (the ECU's address)        */
+    uint8_t  rx_ae;        /**< addr_ext: the byte a received frame
+                                must start with; several sessions may
+                                share one rx_id with different rx_ae  */
 } can_isotp_cfg_t;
 
 typedef struct

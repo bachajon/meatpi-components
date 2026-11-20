@@ -72,10 +72,17 @@ uint32_t j2534_channel_add_filter(int slot, uint32_t type,
     {
         /* ISO15765: pattern = the ECU's response id, flow-control message =
            the request id; its TxFlags name 29-bit ids and the padding of
-           the frames this session sends (SAE J2534-1) */
+           the frames this session sends (SAE J2534-1). With
+           ISO15765_ADDR_TYPE (extended addressing) each carries a fifth
+           byte, the address extension of that direction. */
+        bool has_ae = pattern != NULL && flow_control != NULL &&
+                      ((pattern->tx_flags | flow_control->tx_flags) &
+                       J2534_TX_ISO15765_ADDR_TYPE) != 0;
+        uint32_t need = has_ae ? 5u : 4u;
+
         if (c->protocol != J2534_PROT_ISO15765 ||
             pattern == NULL || flow_control == NULL ||
-            pattern->data_size < 4 || flow_control->data_size < 4)
+            pattern->data_size < need || flow_control->data_size < need)
         {
             st = J2534_ERR_INVALID_MSG;
         }
@@ -92,8 +99,15 @@ uint32_t j2534_channel_add_filter(int slot, uint32_t type,
             uint32_t rx = j2534_ch_get_id_be(pattern->data) & idmask;
             uint32_t tx = j2534_ch_get_id_be(flow_control->data) & idmask;
             int sess = -1;
+            j2534_iso_ae_t ae = { .on = has_ae };
 
-            st = j2534_iso_bind(c, tx, rx, ext, pad, &sess);
+            if (has_ae)
+            {
+                ae.rx = pattern->data[4];
+                ae.tx = flow_control->data[4];
+            }
+
+            st = j2534_iso_bind(c, tx, rx, ext, pad, &ae, &sess);
 
             if (st == J2534_STATUS_NOERROR)
             {

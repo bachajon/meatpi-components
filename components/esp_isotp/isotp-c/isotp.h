@@ -31,6 +31,11 @@ typedef struct IsoTpLink {
     /* sender paramters */
     uint32_t            send_arbitration_id; /* used to reply consecutive frame */
 
+    /* extended addressing (isotp_set_addr_ext); 0 = normal addressing */
+    uint8_t             addr_ext;   /* every frame is led by an address extension byte */
+    uint8_t             send_ae;    /* the byte this link puts in front of what it sends */
+    uint8_t             receive_ae; /* the byte a received frame must start with        */
+
     /* message buffer */
     uint8_t*            send_buffer;
     uint32_t            send_buf_size;
@@ -99,6 +104,15 @@ void isotp_init_link(IsoTpLink* link, uint32_t sendid, uint8_t* sendbuf, uint32_
 
 /** Flow control this link sends as receiver. block_size 0 asks the sender to stream. */
 void isotp_set_flow_control(IsoTpLink* link, uint8_t block_size, uint32_t st_min_us);
+
+/**
+ * Extended addressing (ISO 15765-2) for this link, set right after
+ * isotp_init_link and before any traffic: every frame sent (single, first,
+ * consecutive, flow control) is led by send_ae and carries one byte less;
+ * a received frame is taken only when its first byte is receive_ae, which
+ * is stripped before the PCI is read. Never called: normal addressing.
+ */
+void isotp_set_addr_ext(IsoTpLink* link, uint8_t send_ae, uint8_t receive_ae);
 
 /**
  * @brief Destroys the ISO-TP link and releases associated resources.

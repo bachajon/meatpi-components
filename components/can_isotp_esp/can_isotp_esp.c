@@ -195,6 +195,7 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
 
     esp_err_t err = can_isotp_esp_ensure_started();
     int slot = -1;
+    const struct can_isotp_session *sibling = NULL; /* addr_ext, same rx id */
 
     if (err == ESP_OK)
     {
@@ -210,6 +211,17 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
             else if (can_isotp_esp_tbl[i]->rx_id == cfg->rx_id &&
                      can_isotp_esp_tbl[i]->ext == cfg->ext_id)
             {
+                /* one session per rx id; with extended addressing one per
+                   rx id AND address extension (Toyota's gateway answers
+                   for every ECU behind it on 0x758, told apart by that
+                   byte), never beside a normal session on the id */
+                if (cfg->addr_ext && can_isotp_esp_tbl[i]->addr_ext &&
+                    can_isotp_esp_tbl[i]->rx_ae != cfg->rx_ae)
+                {
+                    sibling = can_isotp_esp_tbl[i];
+                    continue;
+                }
+
                 ESP_LOGW(TAG, "rx %lX already has a session",
                          (unsigned long)cfg->rx_id);
                 err = ESP_ERR_INVALID_STATE;
@@ -252,6 +264,9 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
         s->tx_id = cfg->tx_id;
         s->rx_id = cfg->rx_id;
         s->ext = cfg->ext_id;
+        s->addr_ext = cfg->addr_ext;
+        s->tx_ae = cfg->addr_ext ? cfg->tx_ae : 0;
+        s->rx_ae = cfg->addr_ext ? cfg->rx_ae : 0;
 
         esp_isotp_config_t ic =
         {
@@ -273,6 +288,9 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
             .flow_st_min_us          = cfg->stmin_us != 0
                                            ? cfg->stmin_us
                                            : (uint32_t)cfg->stmin_ms * 1000u,
+            .addr_ext                = s->addr_ext,
+            .tx_addr_ext             = s->tx_ae,
+            .rx_addr_ext             = s->rx_ae,
         };
 
         err = esp_isotp_new_transport(NULL, &ic, &s->tp);
@@ -285,7 +303,11 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
         }
     }
 
-    if (err == ESP_OK)
+    /* the frames of an rx id reach the task's queue through ONE
+       subscription: a second one on the same id would queue every frame
+       twice. A session that shares its rx id (extended addressing) rides
+       on the subscription the first one holds; close() hands it on. */
+    if (err == ESP_OK && sibling == NULL)
     {
         err = can_manager_subscribe_queue(can_isotp_esp_frame_q, cfg->rx_id,
                                           cfg->ext_id ? 0x1FFFFFFFu : 0x7FFu,
@@ -319,9 +341,20 @@ static esp_err_t isotp_open(const can_isotp_cfg_t *cfg,
 
         portEXIT_CRITICAL(&can_isotp_esp_stats_mux);
 
-        ESP_LOGI(TAG, "session open: tx %lX rx %lX %s pad=%d",
-                 (unsigned long)cfg->tx_id, (unsigned long)cfg->rx_id,
-                 cfg->ext_id ? "29-bit" : "11-bit", cfg->use_padding);
+        if (s->addr_ext)
+        {
+            ESP_LOGI(TAG, "session open: tx %lX/%02X rx %lX/%02X %s pad=%d "
+                          "(extended addressing)",
+                     (unsigned long)cfg->tx_id, s->tx_ae,
+                     (unsigned long)cfg->rx_id, s->rx_ae,
+                     cfg->ext_id ? "29-bit" : "11-bit", cfg->use_padding);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "session open: tx %lX rx %lX %s pad=%d",
+                     (unsigned long)cfg->tx_id, (unsigned long)cfg->rx_id,
+                     cfg->ext_id ? "29-bit" : "11-bit", cfg->use_padding);
+        }
         *out = s;
     }
 
@@ -359,7 +392,29 @@ static void isotp_close(can_isotp_session_t s)
 
     if (s->sub_idx >= 0)
     {
-        (void)can_manager_unsubscribe_queue(s->sub_idx);
+        /* another extended-addressing session on the same rx id lives on
+           this subscription: it takes it over */
+        struct can_isotp_session *heir = NULL;
+
+        for (int i = 0; i < ISOTP_MAX_SESSIONS && heir == NULL; i++)
+        {
+            if (can_isotp_esp_tbl[i] != NULL &&
+                can_isotp_esp_tbl[i]->rx_id == s->rx_id &&
+                can_isotp_esp_tbl[i]->ext == s->ext)
+            {
+                heir = can_isotp_esp_tbl[i];
+            }
+        }
+
+        if (heir != NULL)
+        {
+            heir->sub_idx = s->sub_idx;
+        }
+        else
+        {
+            (void)can_manager_unsubscribe_queue(s->sub_idx);
+        }
+
         s->sub_idx = -1;
     }
 
@@ -408,7 +463,9 @@ static esp_err_t isotp_send(can_isotp_session_t s, const uint8_t *data,
     (void)xSemaphoreTake(s->tx_done, 0); /* drop a stale completion */
     s->tx_deadline_ms = can_isotp_esp_now_ms() + timeout_ms + 500;
     s->busy_until_ms = can_isotp_esp_now_ms() + ISOTP_BUSY_MS;
-    s->tx_inflight = (len > 7); /* a single frame completes inside send */
+    /* a single frame completes inside send: up to 7 bytes, 6 when the
+       address extension takes the first byte of the frame */
+    s->tx_inflight = (len > (s->addr_ext ? 6u : 7u));
 
     esp_err_t err = esp_isotp_send(s->tp, data, (uint32_t)len);
 
