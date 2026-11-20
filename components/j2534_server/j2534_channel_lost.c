@@ -61,5 +61,19 @@ uint32_t j2534_ch_take_lost(j2534_channel_t *c)
         n += j2534_lost_since(sub.drops, &c->sub_drops_seen);
     }
 
+    /* 2026-11-19: only a raw CAN channel tells the tester about loss. On
+       an ISO15765 or TP2.0 channel the bus queue holds the frames no
+       ISO-TP session reassembles (other traffic on the bus, first-frame
+       peeks, unowned functional singles): losing those is not a lost
+       reply, the answers the tester reads are reassembled by the sessions
+       off this queue and still arrive. Told as an EVENT RX_LOST, the
+       Windows driver returns ERR_BUFFER_OVERFLOW for the next read, and
+       Toyota's Calibration Update Wizard gives up on its reflash there.
+       The drops stay counted on /api/can and /api/j2534. */
+    if (c->protocol != J2534_PROT_CAN)
+    {
+        return 0;
+    }
+
     return n;
 }
