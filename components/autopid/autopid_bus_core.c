@@ -39,37 +39,45 @@
  * 11-bit ids with ISO 15765-4 formatting, 91 = the same with the bit rate
  * times 8/7; the divisor is 500 kbit/s over it (04 = 125, 0F = 33.3,
  * 01 = 500); the last argument of the single-wire slot is its transceiver's
- * NORMAL mode (3). The high-voltage wake mode wakes every module on a car's
- * single-wire bus: no automatic path may send it, so there is no way to ask
- * for it here. The print format first (spaces, headers on, the timeout): a
- * row of another bus can be the first thing the chip is asked after a
- * reset. */
+ * mode: NORMAL (3) for every row. The high-voltage wake mode (2) wakes every
+ * module on a car's single-wire bus: no automatic path may send it, so a row
+ * has no way to ask for it. A key of can.send can (AP_BUS_KEY_WAKE, a frame
+ * somebody asked for by name), and it can ask for 29-bit ids
+ * (AP_BUS_KEY_EXT: the option without its bit 7, `01` / `11`). The print
+ * format first (spaces, headers on, the timeout): a row of another bus can
+ * be the first thing the chip is asked after a reset. */
 #define BUS_FORMAT  "ATS1;ATH1;ATST96;"
 #define BUS_TAIL    ";ATSH7DF;ATCRA"
-#define BUS_OPTION  0x81u
+#define BUS_OPTION  0x01u   /* ISO 15765-4 formatting                  */
+#define BUS_ID11    0x80u   /* 11-bit ids                              */
 #define BUS_X87     0x10u
 #define BUS_DIV_MAX 64
+#define BUS_SW_NORMAL 3
+#define BUS_SW_WAKE   2
 
 typedef struct
 {
     const char *word;
     const char *label;
     char        slot;
-    const char *transceiver;  /* with the single-wire mode behind it */
+    const char *transceiver;
     uint8_t     divisor;      /* the bus's own rate                  */
 } bus_def_t;
 
-static const bus_def_t BUS[AP_BUS_COUNT] =
+/* AP_BUS_HS carries the word of the car's OBD protocol: it is where a frame
+   for `obd` goes on a CAN car, and no config names it. */
+static const bus_def_t BUS[AP_BUS_SLOTS] =
 {
     [AP_BUS_OBD] = { "obd", "the car's OBD protocol", '\0', NULL, 0 },
     [AP_BUS_MS]  = { "ms", "MS CAN", 'B', "MS_CAN", 4 },
-    [AP_BUS_SW]  = { "sw", "single-wire CAN", 'F', "SW_CAN,3", 15 },
+    [AP_BUS_SW]  = { "sw", "single-wire CAN", 'F', "SW_CAN", 15 },
     [AP_BUS_CH]  = { "ch", "CH CAN", 'C', "CH_CAN", 1 },
+    [AP_BUS_HS]  = { "obd", "HS CAN", 'D', "HS_CAN", 1 },
 };
 
 static const bus_def_t *def_of(uint8_t bus)
 {
-    return &BUS[(bus < AP_BUS_COUNT) ? bus : AP_BUS_OBD];
+    return &BUS[(bus < AP_BUS_SLOTS) ? bus : AP_BUS_OBD];
 }
 
 bool ap_bus_parse(const char *word, ap_row_bus_t *out)
@@ -124,7 +132,7 @@ bool ap_bus_rate_parse(uint8_t bus, double kbps, uint8_t *code)
         return true; /* no speed named: the bus's own */
     }
 
-    if (bus == AP_BUS_OBD || bus >= AP_BUS_COUNT || kbps > 1000)
+    if (bus == AP_BUS_OBD || bus >= AP_BUS_SLOTS || kbps > 1000)
     {
         return false; /* the car's protocol has its speed in its number */
     }
@@ -155,7 +163,7 @@ bool ap_bus_rate_parse(uint8_t bus, double kbps, uint8_t *code)
 
 uint32_t ap_bus_rate_bps(uint8_t bus, uint8_t code)
 {
-    if (bus == AP_BUS_OBD || bus >= AP_BUS_COUNT)
+    if (bus == AP_BUS_OBD || bus >= AP_BUS_SLOTS)
     {
         return 0;
     }
@@ -167,7 +175,7 @@ uint32_t ap_bus_rate_bps(uint8_t bus, uint8_t code)
                : rate_bps(d, (code & AP_BUS_RATE_X87) != 0);
 }
 
-size_t ap_bus_chain(uint16_t key, char *out, size_t cap)
+size_t ap_bus_define(uint16_t key, char *out, size_t cap)
 {
     uint8_t bus = AP_BUS_OF(key);
     uint8_t code = AP_BUS_RATE_OF(key);
@@ -180,7 +188,7 @@ size_t ap_bus_chain(uint16_t key, char *out, size_t cap)
 
     out[0] = '\0';
 
-    if (bus == AP_BUS_OBD || bus >= AP_BUS_COUNT)
+    if (bus == AP_BUS_OBD || bus >= AP_BUS_SLOTS)
     {
         return 0;
     }
@@ -188,11 +196,47 @@ size_t ap_bus_chain(uint16_t key, char *out, size_t cap)
     unsigned d = code & 0x7Fu;
     bool own = (code == 0 || d == 0 || d > BUS_DIV_MAX);
     unsigned option = BUS_OPTION |
+                      (((key & AP_BUS_KEY_EXT) != 0) ? 0u : BUS_ID11) |
                       ((!own && (code & AP_BUS_RATE_X87)) ? BUS_X87 : 0u);
-    int n = snprintf(out, cap,
-                     BUS_FORMAT "VTSET_CAN %c,%02X,%02X,%s;ATTP%c" BUS_TAIL,
-                     b->slot, option, own ? b->divisor : d, b->transceiver,
-                     b->slot);
+    int n = snprintf(out, cap, "VTSET_CAN %c,%02X,%02X,%s", b->slot, option,
+                     own ? b->divisor : d, b->transceiver);
+
+    if (n > 0 && (size_t)n < cap && bus == AP_BUS_SW)
+    {
+        /* the mode is part of the definition: the chip applies the slot's
+           own when it transmits, whatever a mode word said before */
+        n += snprintf(out + n, cap - (size_t)n, ",%d",
+                      ((key & AP_BUS_KEY_WAKE) != 0) ? BUS_SW_WAKE
+                                                     : BUS_SW_NORMAL);
+    }
+
+    if (n < 0 || (size_t)n >= cap)
+    {
+        out[0] = '\0';
+        return 0;
+    }
+
+    return (size_t)n;
+}
+
+size_t ap_bus_chain(uint16_t key, char *out, size_t cap)
+{
+    char define[40];
+
+    if (out == NULL || cap == 0)
+    {
+        return 0;
+    }
+
+    out[0] = '\0';
+
+    if (ap_bus_define(key, define, sizeof(define)) == 0)
+    {
+        return 0;
+    }
+
+    int n = snprintf(out, cap, BUS_FORMAT "%s;ATTP%c" BUS_TAIL, define,
+                     def_of(AP_BUS_OF(key))->slot);
 
     if (n < 0 || (size_t)n >= cap)
     {

@@ -203,6 +203,49 @@ esp_err_t autopid_dtc_clear(const char *codes, const char *mode,
  *  task. */
 esp_err_t autopid_dtc_desc(const char *code, char *out, size_t out_cap);
 
+/* ---- can.send (2026-11-21, GitHub issue #1072) ----------------------------
+ * Raw frames on any bus of the OBD connector: the engine behind the route
+ * POST /api/can/send, the rule action `can.send` and the script binding
+ * `can_send()`. */
+
+/**
+ * Send one frame, or a short sequence, on one bus.
+ *
+ * @p request: `{"bus": "can"|"obd"|"ms"|"sw"|"ch", "bus_kbps"?: N,
+ * "id": "<hex>"|N, "ext"?: bool, "data": "<hex>", "wake"?: bool}`, or
+ * `"frames": [{"id","ext"?,"data","wake"?,"gap_ms"?}, ...]` (1 to 8) in
+ * place of `id` and `data`. `can` = WiCAN's own CAN controller; `obd` = the
+ * car's OBD protocol through the OBD chip (on a car before CAN the id is
+ * the message's three header bytes); `ms`, `sw`, `ch` = MS, single-wire and
+ * CH CAN through the chip. `wake` (single-wire CAN) sends that frame in the
+ * transceiver's high-voltage wake mode. `gap_ms` = from that frame's start
+ * to the next one's. Nothing of it writes the OBD chip's memory.
+ *
+ * SYNC: about 0.1 s a frame through the chip plus the way to the bus and
+ * back (0.3 to 0.5 s in all), plus the gaps. Never from the event
+ * dispatcher (the rule action is a blocking one). No flash is touched: any
+ * task may call it.
+ *
+ * @p reply (may be NULL): on ESP_OK and ESP_FAIL a new object, caller frees:
+ * `{"ok","bus","via":"obd_chip"|"can_controller","sent":N,"elapsed_ms",
+ * "frames":[{"id","result":"sent"|"no_ack"|"error"|"not_sent","at_ms",
+ * "reply"?}],"transcript"?}`. @p err (may be NULL): one sentence when the
+ * return is not ESP_OK.
+ *
+ * @return ESP_OK = every frame is on the bus (CAN: acknowledged);
+ * ESP_FAIL = frames were tried and at least one was not acknowledged or
+ * was refused by the chip; ESP_ERR_INVALID_ARG = the request is malformed,
+ * nothing sent; ESP_ERR_INVALID_STATE = not now, nothing sent (the chip is
+ * with an app or another job, the bus guard refuses the car's protocol,
+ * the car's protocol is not known, the CAN controller is off).
+ *
+ * A diagnostic tool's hold of the bus (obd_gate) is not asked here: the
+ * caller may be the holder (a script). The rule action `can.send` asks it
+ * and does not send while the hold stands.
+ */
+esp_err_t autopid_can_send(const cJSON *request, cJSON **reply, char *err,
+                           size_t err_len);
+
 /** Register the /api/autopid routes (own-routes pattern; main wires it in
  *  HTTP compositions only). */
 esp_err_t autopid_register_http(void);

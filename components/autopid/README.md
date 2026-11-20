@@ -74,12 +74,17 @@ Decisions log there is authoritative; the big ones:
   search picks): the push's `can_protocol` (ha_webhooks, 2026-11-15).
 - `autopid_dtc_scan_start()` / `_scanning()` / `_report(&json)` /
   `_clear(codes, mode, ...)` / `_desc(code, ...)`: the DTC engine.
+- `autopid_can_send(request, &reply, err, err_len)` (2026-11-21): raw frames
+  on any bus of the OBD connector, see "can.send" below. The engine of
+  `POST /api/can/send`, the `can.send` rule action and the script binding
+  `can_send()`.
 - `autopid_register_http()` / `autopid_register_cli()`: own routes/commands.
 
 ## Files
 
 | File | Role |
 |---|---|
+| `autopid_send.h` / `autopid_send_core.c` / `autopid_send.c` / `autopid_http_send.c` | can.send (2026-11-21, issue #1072, see "can.send" below): raw frames on any bus of the OBD connector. The pure core (host-tested): a request's JSON into frames and every refusal with its sentence, where the chip is taken for a frame (the key of `autopid_bus.h` with the id length and the single-wire wake mode), the words the chip is given and how its reply reads. `autopid_send.c`: `autopid_can_send()`, WiCAN's own controller for `can`, the chip job for the rest. `autopid_http_send.c`: `POST /api/can/send` and the rule action |
 | `autopid.c` | lifecycle, the config tables and their lock, battery-pause watch, core query surface |
 | `autopid_poller.c` / `autopid_poller.h` | the poller task (PSRAM stack, notify-driven): pauses, DTC due-check, scheduler -> runner -> bookkeeping (split out of autopid.c 2026-10-02) |
 | `autopid_bus_guard.c` | PURE bus guard: the bitrate a chip protocol transmits at, and the verdict (`allow` / `search` / `park`) for what the native controller heard on the bus, with its one-sentence reason (see "Bus guard" below) |
@@ -1119,6 +1124,173 @@ second period kept alive, the same rows and codes with J1850 VPW pinned, the chi
 stored cells the same before and after; with `-Detect` the detection on the
 K-line car and the way back, two saves of the chip's stored protocol).
 
+## can.send: a raw frame on any bus (2026-11-21, GitHub issue #1072)
+
+A frame somebody asks for by name, outside the tables: a wake-up and a
+remote start on a GM car's single-wire bus (the issue), a body command on
+MS CAN, a broadcast on the car's own bus. Three surfaces, one engine
+(`autopid_can_send()`):
+
+| Surface | Form |
+|---|---|
+| HTTP | `POST /api/can/send` with the request below as its body |
+| Rule action | `can.send` with the same object as `with` (a blocking action: it runs on the rules engine's workers) |
+| Script | `can_send(bus, id, hexbytes[, wake[, ext]])` (script_engine), one frame a call |
+
+It lives in this component because the OBD chip's jobs do: a send through
+the chip is a chip job like the Test route and a trouble code scan (the
+poller parked, one job at a time).
+
+### The request
+
+```json
+{"bus": "sw", "id": "1024E097", "data": "80 01 FF"}
+
+{"bus": "sw", "frames": [
+  {"id": "100", "data": "00", "wake": true},
+  {"id": "621", "data": "00 FF FF FF FF FF 00 00"},
+  {"id": "1024E097", "data": "80 01 FF", "gap_ms": 360},
+  {"id": "1024E097", "data": "00 00 FF"}]}
+```
+
+| Key | Meaning |
+|---|---|
+| `bus` | where: see the table below. Required |
+| `bus_kbps` | `ms`, `sw`, `ch`: the bus's speed when it is not the usual one, as in a row (`autopid_bus.h`) |
+| `id` | hex text (`"7DF"`, `"0x1024E097"`) or a number, 0 to 1FFFFFFF |
+| `ext` | a 29-bit id. Default: true when the id is above 7FF |
+| `data` | hex text, spaces optional: 1 to 8 bytes through the chip, 0 to 8 on `can` |
+| `wake` | `sw` alone: this frame in the transceiver's high-voltage wake mode |
+| `frames` | in place of `id` and `data`: 1 to 8 frames, each with `id`, `data`, and optionally `ext`, `wake`, `gap_ms` |
+| `gap_ms` | in `frames`: from this frame's start to the next one's, 0 to 2000 (5000 for all of a request) |
+
+| `bus` | Goes out on | Through |
+|---|---|---|
+| `can` | pins 6 and 14 | WiCAN's own CAN controller (`can_manager`): it must be enabled and on the bus. No chip involved, so it works while an app holds the chip, and it takes about 3 ms |
+| `obd` | the car's OBD protocol | the OBD chip. On a CAN car (ISO 15765-4, J1939): pins 6 and 14 at that protocol's bit rate, 11 or 29 bits by the frame whatever the protocol's own id length. On a car before CAN (SAE J1850 PWM / VPW, ISO 9141-2, ISO 14230-4): `id` is the message's three header bytes (`"686AF1"`), 1 to 7 data bytes, and the chip adds the checksum. Refused (409) while no car is known and the protocol setting is Automatic |
+| `ms` | pins 3 and 11, 125 kbit/s | the OBD chip |
+| `sw` | pin 1, 33.3 kbit/s | the OBD chip |
+| `ch` | pins 12 and 13, 500 kbit/s | the OBD chip |
+
+### What goes to the chip
+
+Nothing of it writes the chip's memory. A CAN bus is reached through a slot
+defined in the chip's RAM, exactly as a row's bus is (`VTSET_CAN` and
+`ATTP<slot>`, "The bus of a row" above); a send has two more things to say
+about the slot, carried in two bits of the bus key
+(`AP_BUS_KEY_EXT`, `AP_BUS_KEY_WAKE`): the id length (option `01` in place
+of `81`) and, on single-wire CAN, the transceiver's mode (`,2` in place of
+`,3`). `obd` on a CAN car uses a slot of its own on the HS transceiver
+(`AP_BUS_HS`, slot D: `VTSET_CAN D,81,01,HS_CAN`, divisor 02 on a 250 kbit/s
+protocol), which no row may name. Then:
+
+| Words | Why |
+|---|---|
+| `ATCAF0` | the bytes as given: no ISO 15765 length byte in front |
+| `ATV1` | the data length as given. Without it the chip pads every frame to eight bytes (bench: `11 22 33` read `11 22 33 00 00 00 00 00`) |
+| `ATAT0`, `ATST19` | 100 ms for an answer nobody asked for. The chip waits about that long at least; a frame nobody acknowledges reads `CAN ERROR` after 60 ms |
+| `ATSH7DF`, or `ATCP10` + `ATSH24E097` | the id: three digits for 11 bits, the classic pair for 29 (the five bits above the three header bytes, then those) |
+| the data (`8001FF`) | the frame |
+
+Every one of these is a word `autopid_chain.c` knows how to undo, and they
+go out through `ap_base_send_init()`, so the restore that follows a row
+follows a send: behind the last frame the baseline prelude goes out with
+`ATCAF1`, `ATV0`, `ATAT1`, `ATCP18` behind it, the slot's definition is
+taken back, and the chip is on the car's protocol as it was. Bench: 0.25 to
+0.6 s for one frame, the way there and back included.
+
+A message before CAN goes out on the car's own protocol, where the chip
+already is: the timing words, `ATSH<three bytes>`, the data, and the
+baseline prelude behind it.
+
+### The wake mode
+
+A single-wire CAN transceiver has a high-voltage mode: a frame sent in it
+wakes every module on the bus (GMLAN). The chip applies the mode of the
+slot's own definition when it transmits (a mode word, `STCSWM 2`, is
+overridden by the next definition), so `wake` defines the slot with `,2`
+for that frame. A frame without `wake` behind it is another key: the chip
+leaves the slot, the slot is defined normal, and the frame goes out in
+normal mode. On the way home the slot is defined normal once more before
+it is taken back (`ap_bus_leave()`), whatever the last frame was.
+
+No row can ask for the wake mode, and no automatic path sends it: the
+polling of a parked car must never wake it. `wake` exists in a request of
+can.send alone.
+
+### What comes back
+
+`autopid_can_send()` returns `ESP_OK` when every frame is on the bus,
+`ESP_FAIL` when frames were tried and one was not acknowledged or was
+refused by the chip, `ESP_ERR_INVALID_ARG` for a malformed request and
+`ESP_ERR_INVALID_STATE` for one that cannot be served now; nothing is sent
+in the last two cases, and `err` carries one sentence. The route maps them
+to 200 (with `ok` true or false), 400 and 409.
+
+```json
+{"ok": true, "bus": "sw", "via": "obd_chip", "sent": 2, "elapsed_ms": 431.2,
+ "frames": [{"id": "100", "result": "sent", "at_ms": 0, "reply": "NO DATA"},
+            {"id": "621", "result": "sent", "at_ms": 119, "reply": "NO DATA"}],
+ "transcript": "> ATS1\n< OK\n..."}
+```
+
+| `result` | Meaning |
+|---|---|
+| `sent` | on the bus. On CAN: somebody acknowledged it (the chip said `NO DATA`, or printed an answer that came within the wait). Before CAN: the chip sent it |
+| `no_ack` | CAN: it went out and nobody acknowledged it (`CAN ERROR`): nobody on that bus, another speed, a transceiver asleep |
+| `error` | the chip refused it (`?`, `BUS ERROR`, `BUS INIT: ...ERROR`, no reply), or the controller did not take it. The frames behind it are `not_sent` |
+| `not_sent` | never tried |
+
+`at_ms` is the frame's start, from the first frame's. `transcript` is every
+word of the chip job, as the Test route gives it.
+
+### When it is refused (409)
+
+- An app is using the OBD chip (the terminal, an ELM327 app on a bridge):
+  the chip is free ten seconds after the app's last command, the same wait
+  the poller keeps. `can` is not affected.
+- Another chip job runs (a test, a scan): the send waits up to 3 s for it.
+- `obd`: the bus guard refuses the car's protocol right now (its sentence
+  is the answer), or no car is known yet.
+- `can`: the CAN controller is off, listen-only or not on the bus yet.
+
+A diagnostic tool's hold of the bus (the UDS Tool, J2534 or a script with
+Exclusive bus) stops the rule action, which is background like the polling
+that hold keeps off the bus. It does not stop the route or a script's own
+`can_send()`: a script that spoke UDS first holds the bus itself.
+
+AutoPID's voltage pause does not stop a send: waking a parked car is what
+some of these frames are for.
+
+### Limits
+
+- A frame through the chip takes about 0.1 s (the chip's wait behind it),
+  so a `gap_ms` under that is as fast as the chip goes. A change of id
+  length or of the wake mode between two frames costs the slot's definition
+  again (about 60 ms).
+- No frame without data through the chip, no remote frame on any bus.
+- Nothing is read back: a reply that comes within the wait is noted in
+  `reply` and that is all. To ask and decode, use the Test route or a row.
+- `obd` on a car before CAN keeps the chip's rules for that bus (a K-line
+  bus is started by the first message, which then takes up to 3 s).
+
+### Tests
+
+Host: `test_send.c` (8 cases: the hex text, one frame and its refusals, a
+sequence, what the car decides for `obd`, the slot definitions with 29-bit
+ids and the wake mode, every word undone by the restore and none of them a
+stored one, how the chip's reply reads). Bench: `.\test.ps1 cansend` in the
+firmware repo (`CAN SEND PASS`, `testing/cansend.md`): every bus against ECU
+sim v2's receive log, the wake mode against its sleeping single-wire
+transceiver, the rule, the script, an app on the chip, a car before CAN,
+sends in the middle of the polling, the chip's stored cells the same
+before and after.
+
+Memory: PSRAM `.bss` 2 KB (the transcript of the send in flight) + 2 KB
+(the route's body); no task of its own, no heap beyond the reply's JSON.
+Stack: about 1.2 KB in the caller (the web server's task, a rules worker,
+the script task), estimated.
+
 ## Config file shape (`PUT /api/autopid/config`)
 
 ```json
@@ -1774,7 +1946,7 @@ it is what found the two defects above.
 
 ## Tests
 
-`host_test/` (run: `.\test.ps1 host autopid`, 181 tests): the sentence of a park on traffic a CAN node at a fixed bit rate could not read (`test_guard_a_fixed_nodes_unreadable_names_its_setting`, 2026-11-13: the node's bit rate and its setting, whole in the 176 bytes that keep it at 1000 kbit/s too, the listener's sentence unchanged, a chain's sentence, nothing of it on a bus that is not "unreadable"); which pictures of a running CAN node may be the OBD chip's own doing and what the quiet makes of them (`test_guard_sent_marks`, `test_guard_a_running_nodes_picture_may_be_the_chips_own`, `test_guard_a_picture_held_against_the_quiet`, `test_guard_who_was_heard_stays_heard_for_a_while`, 2026-11-13: frames at a bit rate the chip talked at and unreadable traffic once it talked on CAN, not frames at the other bit rate, not before the chip talked; nothing heard = silent, frames read = live stands, noise = live turns unreadable, and noise heard stands for ten seconds); what first contact tries by itself behind the CAN candidates (`test_dialect_precan_candidates`, 2026-11-13: SAE J1850 and the K-line when nobody else is on the CAN pins, nothing when somebody talks there); the pre-CAN protocols (`test_precan.c`, 7 cases, 2026-11-12: the protocol table with its kinds, its start and session times, the walk in its order of cost (`21534`, every entry a pre-CAN protocol) and the keep-alive rule; the request header of each protocol, at the end of its prelude and behind an init that takes the chip there; GitHub issue #1045's own replies (the 4Runner's, and the Cayman S's with its ECU at 0x11 and with headers off) and the bench's on all five protocols decoded by the expression that reads them on CAN, read the CAN way first to show the wrong value; two ECUs told apart by their address, as a row's reply and as the detection's responder set, and a message with a wrong checksum left out; the VIN from five ISO 9141-2 messages, from five ISO 14230 messages and from one long ISO 14230 message; trouble codes in several messages of three, the bench's own lines: five and seven stored and four pending joined into the CAN layout and read by the DTC codec, one message with an unused place, no code at all, headers off, two ECUs with their messages mixed, a refusal behind a list, more codes than a payload holds, J1850 VPW, ISO 14230 with seven data bytes a message and with one long message that carries a count; what the protocol hint must not take: a CAN reply under it, the rows of a long headers-off reply, data whose last byte is no checksum); the words the chip stores (`test_store_words.c`, 5 cases, 2026-11-11: which words they are and which RAM words only look like them, no chain keeps one behind the sanitizing, the parser refuses a row that is on and lets a switched-off row keep it, a stored file repaired once with the clean rows left on, the rows of the car's protocol that wait while their type's init carries one, with the row on another bus, the J1939 group and the other types going on); the bus of a row (`test_bus.c`, 11 cases, 2026-11-11: the words, the speed of a bus and its chain with no stored word in it, what a row of another bus may carry, the config parse and its refusals, the rows of a bus asked together, an excursion asking every row once and coming home with two buses at max rate, the rest after CAN ERRORs, the class that keeps such rows out of the HS bus guard's hands); the frame of reference of a reply (`test_frames.c`, 9 cases, 2026-10-24, issue #1014: a stored config's standard rows re-numbered to the table's expressions, a custom row and an unknown command left alone, a second pass a no-op; the chip's own prints from the bench, an extended-addressed BMW SME with a pending frame and padding, decoded as the published rows mean (`[B6:B7]/10` = 72.6 %, the i3's `[B11:B12]` shown to count the pending frame); a Hyundai Ioniq 2021 BMS reply of nine frames from a Car Scanner log (`B10/2` = 75 %, `[B19:B20]/10` = 341.9 V); a Leaf AZE0 reply with its padding kept; the MEB 29-bit print of issue #914 taken as an id by the row's filter or the protocol hint and left alone without; headers-off replies rebuilt into frames, the 28-row reply in arrival order, a missing row stopping the assembly; the lowest responder; ATH0/ATS0/ATE1 dropped from a chain and the receive filter a chain sets; the standard table's numbering); the bounds on a decoded value and the SAE rows inside their own range (`test_bounds.c`, 4 cases, 2026-10-20: the report's 100.000001646 clamped to 100 on a standard and on a custom row, the reporter's controlled values, the tolerance, a J1939 not-available raw dropped, the exact ratio and the signed span, every ranged table row decoded at 0x00 / 0xFF / 0x7F / 0x80 through the real parser inside its range); what a chain of the tables sets on the chip and the chain that puts the baseline back (`test_chain.c`, 4 cases, 2026-10-20: the BMW row of issue #964, the published i3 / Mini / e-Ulysse chains, the off and reset forms set nothing, every undo command fits `AP_RESTORE_LEN`); the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
+`host_test/` (run: `.\test.ps1 host autopid`, 194 tests): can.send (`test_send.c`, 8 cases, 2026-11-21, issue #1072: a request's JSON into frames and every refusal with its sentence, the issue's whole sequence as one request, what the car decides for `obd`, the slot definitions with 29-bit ids, the single-wire wake mode and the HS slot, every word of the send undone by the restore and none of them a stored one, how the chip's reply reads; see "can.send"); the sentence of a park on traffic a CAN node at a fixed bit rate could not read (`test_guard_a_fixed_nodes_unreadable_names_its_setting`, 2026-11-13: the node's bit rate and its setting, whole in the 176 bytes that keep it at 1000 kbit/s too, the listener's sentence unchanged, a chain's sentence, nothing of it on a bus that is not "unreadable"); which pictures of a running CAN node may be the OBD chip's own doing and what the quiet makes of them (`test_guard_sent_marks`, `test_guard_a_running_nodes_picture_may_be_the_chips_own`, `test_guard_a_picture_held_against_the_quiet`, `test_guard_who_was_heard_stays_heard_for_a_while`, 2026-11-13: frames at a bit rate the chip talked at and unreadable traffic once it talked on CAN, not frames at the other bit rate, not before the chip talked; nothing heard = silent, frames read = live stands, noise = live turns unreadable, and noise heard stands for ten seconds); what first contact tries by itself behind the CAN candidates (`test_dialect_precan_candidates`, 2026-11-13: SAE J1850 and the K-line when nobody else is on the CAN pins, nothing when somebody talks there); the pre-CAN protocols (`test_precan.c`, 7 cases, 2026-11-12: the protocol table with its kinds, its start and session times, the walk in its order of cost (`21534`, every entry a pre-CAN protocol) and the keep-alive rule; the request header of each protocol, at the end of its prelude and behind an init that takes the chip there; GitHub issue #1045's own replies (the 4Runner's, and the Cayman S's with its ECU at 0x11 and with headers off) and the bench's on all five protocols decoded by the expression that reads them on CAN, read the CAN way first to show the wrong value; two ECUs told apart by their address, as a row's reply and as the detection's responder set, and a message with a wrong checksum left out; the VIN from five ISO 9141-2 messages, from five ISO 14230 messages and from one long ISO 14230 message; trouble codes in several messages of three, the bench's own lines: five and seven stored and four pending joined into the CAN layout and read by the DTC codec, one message with an unused place, no code at all, headers off, two ECUs with their messages mixed, a refusal behind a list, more codes than a payload holds, J1850 VPW, ISO 14230 with seven data bytes a message and with one long message that carries a count; what the protocol hint must not take: a CAN reply under it, the rows of a long headers-off reply, data whose last byte is no checksum); the words the chip stores (`test_store_words.c`, 5 cases, 2026-11-11: which words they are and which RAM words only look like them, no chain keeps one behind the sanitizing, the parser refuses a row that is on and lets a switched-off row keep it, a stored file repaired once with the clean rows left on, the rows of the car's protocol that wait while their type's init carries one, with the row on another bus, the J1939 group and the other types going on); the bus of a row (`test_bus.c`, 11 cases, 2026-11-11: the words, the speed of a bus and its chain with no stored word in it, what a row of another bus may carry, the config parse and its refusals, the rows of a bus asked together, an excursion asking every row once and coming home with two buses at max rate, the rest after CAN ERRORs, the class that keeps such rows out of the HS bus guard's hands); the frame of reference of a reply (`test_frames.c`, 9 cases, 2026-10-24, issue #1014: a stored config's standard rows re-numbered to the table's expressions, a custom row and an unknown command left alone, a second pass a no-op; the chip's own prints from the bench, an extended-addressed BMW SME with a pending frame and padding, decoded as the published rows mean (`[B6:B7]/10` = 72.6 %, the i3's `[B11:B12]` shown to count the pending frame); a Hyundai Ioniq 2021 BMS reply of nine frames from a Car Scanner log (`B10/2` = 75 %, `[B19:B20]/10` = 341.9 V); a Leaf AZE0 reply with its padding kept; the MEB 29-bit print of issue #914 taken as an id by the row's filter or the protocol hint and left alone without; headers-off replies rebuilt into frames, the 28-row reply in arrival order, a missing row stopping the assembly; the lowest responder; ATH0/ATS0/ATE1 dropped from a chain and the receive filter a chain sets; the standard table's numbering); the bounds on a decoded value and the SAE rows inside their own range (`test_bounds.c`, 4 cases, 2026-10-20: the report's 100.000001646 clamped to 100 on a standard and on a custom row, the reporter's controlled values, the tolerance, a J1939 not-available raw dropped, the exact ratio and the signed span, every ranged table row decoded at 0x00 / 0xFF / 0x7F / 0x80 through the real parser inside its range); what a chain of the tables sets on the chip and the chain that puts the baseline back (`test_chain.c`, 4 cases, 2026-10-20: the BMW row of issue #964, the published i3 / Mini / e-Ulysse chains, the off and reset forms set nothing, every undo command fits `AP_RESTORE_LEN`); the detection's rows as a new car's tables, on or off (`test_scan_rows.c`, 3 cases, 2026-10-09); the J1939 rows
 (`test_j1939_rows.c`, 10 cases: the `PGN:` grammar and its refusals, the
 config parser's typed fields and the `init` / `rxheader` refusal, the
 scheduler's class-masked pick and the 20 ms passive floor, the built-in

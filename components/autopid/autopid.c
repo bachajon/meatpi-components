@@ -332,6 +332,11 @@ void ap_core_job_release(void)
     s_job_busy = false;
 }
 
+bool ap_core_started(void)
+{
+    return s_started;
+}
+
 uint16_t ap_core_sub_floor_count(void)
 {
     uint16_t n = 0;

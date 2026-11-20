@@ -55,6 +55,7 @@
 #include "autopid_bus.h"
 #include "autopid_private.h"
 #include "autopid_http_private.h"
+#include "autopid_send.h"
 
 static const char *TAG = "autopid";
 
@@ -544,6 +545,10 @@ esp_err_t autopid_register_http(void)
           .handler = dbc_signals_handler },
         { .uri = "/api/autopid/dbc/add", .method = HTTP_POST,
           .handler = dbc_add_handler },
+        /* can.send (autopid_send.c, issue #1072): a raw frame on any bus of
+           the OBD connector. It lives here because the OBD chip's jobs do */
+        { .uri = "/api/can/send", .method = HTTP_POST,
+          .handler = ap_send_post_handler },
     };
 
     esp_err_t err = http_server_manager_register_handlers(

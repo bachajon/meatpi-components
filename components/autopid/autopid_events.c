@@ -43,6 +43,7 @@
 
 #include "autopid.h"
 #include "autopid_private.h"
+#include "autopid_send.h"
 
 /* per-slot emission memory (indexed like the value cache) */
 typedef struct
@@ -549,6 +550,7 @@ void ap_events_register(void)
     (void)event_manager_register_action(&GROUP);
     (void)event_manager_register_action(&DTC_SCAN_ACT);
     (void)event_manager_register_action(&DTC_CLEAR_ACT);
+    ap_send_events_register(); /* can.send (autopid_send.c) */
     (void)event_manager_register_value("autopid.data", value_read);
     (void)event_manager_register_value("autopid.", value_read);
 }

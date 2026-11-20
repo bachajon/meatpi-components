@@ -51,6 +51,9 @@ void run_precan_tests(void);
 /* test_filter_type.c: a CAN filter follows the switch of its table, the
    line a test of a filter shows for a captured frame */
 void run_filter_type_tests(void);
+/* test_send.c: can.send (issue #1072): a request into frames, the refusals,
+   the slot definitions with 29-bit ids and the wake mode, the chip's words */
+void run_send_tests(void);
 
 /* ---- helpers ----------------------------------------------------------------- */
 
@@ -2096,6 +2099,7 @@ void app_main(void)
     run_store_words_tests();
     run_precan_tests();
     run_filter_type_tests();
+    run_send_tests();
 
     UNITY_END();
 }

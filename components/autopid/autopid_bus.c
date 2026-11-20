@@ -55,6 +55,9 @@ static const char *TAG = "autopid";
 
 static int s_last_pid = -1;      /* the row of another bus whose init is in effect */
 static uint8_t s_defined;        /* the buses whose slot this excursion defined    */
+static bool s_woke;              /* the single-wire slot was defined in its wake
+                                    mode (a frame of can.send): normal again on
+                                    the way home                                   */
 static ap_bus_err_t s_err[AP_BUS_COUNT]; /* CAN ERROR per bus, and its rest       */
 static bool s_refused_logged;    /* one W per streak of refused slots              */
 static ap_bus_stats_t s_stats;
@@ -237,6 +240,7 @@ static bool bus_enter(uint16_t bus, ap_tr_t *tr)
 
     s_refused_logged = false;
     s_defined |= (uint8_t)(1u << AP_BUS_OF(bus));
+    s_woke = s_woke || (bus & AP_BUS_KEY_WAKE) != 0;
     mem->hdr_borrowed = false;
     mem->rxheader_set = false;  /* the chain's ATCRA cleared the filter */
     mem->init_pin = '\0';
@@ -338,11 +342,28 @@ void ap_bus_leave(ap_tr_t *tr)
         mem->baseline_sent = false;
     }
 
+    if (s_woke)
+    {
+        /* the single-wire transceiver back in its normal mode before the
+           slot goes: a frame in the wake mode wakes every module on that
+           bus, and nothing that comes later may send one by accident */
+        char cmd[40];
+        char resp[64];
+
+        if (ap_bus_define(AP_BUS_KEY(AP_BUS_SW, 0), cmd, sizeof(cmd)) > 0)
+        {
+            (void)ap_base_request_tr(cmd, resp, sizeof(resp), AP_INIT_TIMEOUT,
+                                     tr);
+        }
+
+        s_woke = false;
+    }
+
     /* the slots as found: a definition lives in the chip's RAM until a
        reset, and the one-argument form takes it back. The chip is off them
        now, so it is safe to. Whoever is next (an app that uses a user
        protocol, the next snapshot of the chip) finds what was there */
-    for (uint8_t b = AP_BUS_MS; b < AP_BUS_COUNT; b++)
+    for (uint8_t b = AP_BUS_MS; b < AP_BUS_SLOTS; b++)
     {
         if ((s_defined & (1u << b)) != 0)
         {

@@ -67,20 +67,33 @@ typedef enum
 {
     AP_BUS_OBD = 0,   /* the car's OBD protocol (the baseline's)           */
     AP_BUS_MS,        /* MS CAN, pins 3 and 11                             */
-    AP_BUS_SW,        /* single-wire CAN, pin 1, normal mode only          */
+    AP_BUS_SW,        /* single-wire CAN, pin 1, normal mode for a row     */
     AP_BUS_CH,        /* CH CAN, pins 12 and 13                            */
-    AP_BUS_COUNT
+    AP_BUS_COUNT,     /* the buses a ROW may name                          */
+    /* HS CAN, pins 6 and 14, through a slot of its own: where a frame of
+       can.send goes on a car whose OBD protocol is CAN (autopid_send.h). No
+       row asks there: a row of the car's protocol is AP_BUS_OBD. */
+    AP_BUS_HS = AP_BUS_COUNT,
+    AP_BUS_SLOTS      /* every place the chip can be taken to              */
 } ap_row_bus_t;
 
 /* Where a row asks, as one number the scheduler and the runner compare: the
  * bus and its bit rate code (0 = the bus's own rate; else bit 7 = times 8/7,
  * bits 0..6 = the divisor of 500 kbit/s). 0 = the car's OBD protocol. Rows
  * of one bus at two speeds are two places: a config that has them changes
- * bus between them. */
+ * bus between them.
+ *
+ * Two more bits say how the slot is defined, and only can.send sets them
+ * (autopid_send.h, 2026-11-21): AP_BUS_KEY_EXT = 29-bit ids, AP_BUS_KEY_WAKE
+ * = the single-wire transceiver's high-voltage wake mode. A key with one of
+ * them is another place than the key without it: the chip is taken off the
+ * slot and the slot is defined again. */
 #define AP_BUS_KEY(bus, rate)  ((uint16_t)(((uint16_t)(bus) << 8) | (rate)))
-#define AP_BUS_OF(key)         ((uint8_t)((key) >> 8))
+#define AP_BUS_OF(key)         ((uint8_t)(((key) >> 8) & 0x0Fu))
 #define AP_BUS_RATE_OF(key)    ((uint8_t)((key) & 0xFFu))
 #define AP_BUS_RATE_X87        0x80u
+#define AP_BUS_KEY_EXT         0x8000u
+#define AP_BUS_KEY_WAKE        0x4000u
 
 /* ---- pure (autopid_bus_core.c, host-tested) -------------------------------- */
 
@@ -105,9 +118,16 @@ const char *ap_bus_word(uint8_t bus);
 /** The bus as a log or a message names it ("MS CAN", "single-wire CAN"). */
 const char *ap_bus_label(uint8_t bus);
 
-/** The chip's AT user protocol a bus is reached through ('B', 'F', 'C');
- *  '\0' for AP_BUS_OBD. */
+/** The chip's AT user protocol a bus is reached through ('B', 'F', 'C',
+ *  'D' for AP_BUS_HS); '\0' for AP_BUS_OBD. */
 char ap_bus_slot(uint8_t bus);
+
+/** The one word that defines the slot of a key in the chip's RAM
+ *  (`VTSET_CAN B,81,04,MS_CAN`): the id length (AP_BUS_KEY_EXT), the bit
+ *  rate, the transceiver and, on single-wire CAN, its mode (3 = normal, 2 =
+ *  the high-voltage wake mode with AP_BUS_KEY_WAKE). @return its length; 0
+ *  for AP_BUS_OBD and when it does not fit @p cap. */
+size_t ap_bus_define(uint16_t key, char *out, size_t cap);
 
 /** The chain that takes the chip to a bus from anywhere but that bus's own
  *  slot: the print format the reader needs, the slot's definition at that

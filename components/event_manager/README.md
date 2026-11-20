@@ -114,7 +114,7 @@ timers publish `timer.tick {timer}` on esp_timer (64-bit µs: no
 |---|---|---|
 | event_manager | `timer.tick {timer}` | `log.note {message}` |
 | mqtt_manager | `mqtt.rx {topic, payload≤47ch}`: topics AUTO-derived from enabled rules' `match.topic` at start (hot-source pre-filter) | `mqtt.publish {topic, payload, qos, retain}` (async path; `~/x` = prefix-relative) |
-| autopid | `autopid.param {param,value,unit,group}` (ON CHANGE + `min_event_interval_ms`), `autopid.pid_failed {pid,streak}`, `autopid.scan_done {found}` | action `autopid.group {group,enabled[,period_ms]}` (§5b context switching: EPHEMERAL, reboot restores config defaults; **undoable**: `undo:true` = `autopid_group_restore()`); values `${autopid.data}` (legacy JSON snapshot) + `${autopid.<param>}` |
+| autopid | `autopid.param {param,value,unit,group}` (ON CHANGE + `min_event_interval_ms`), `autopid.pid_failed {pid,streak}`, `autopid.scan_done {found}` | action `autopid.group {group,enabled[,period_ms]}` (§5b context switching: EPHEMERAL, reboot restores config defaults; **undoable**: `undo:true` = `autopid_group_restore()`); action `can.send {bus, id, data, ext?, wake?, bus_kbps?}` or `{bus, frames[]}` (2026-11-21, issue #1072: a raw frame on a bus of the OBD connector, `obd` / `ms` / `sw` / `ch` through the OBD chip, `can` = WiCAN's own controller; blocking → worker pool; not sent while a diagnostic tool holds the bus; the autopid README, "can.send"); values `${autopid.data}` (legacy JSON snapshot) + `${autopid.<param>}` |
 | wifi_manager | `wifi.sta {connected, ssid}` on every STA link-up (got IP) and real drop (2026-09-17; failed attempts stay quiet) | values `${wifi.ssid}` ("" when down), `${wifi.connected}` (`true`/`false`) |
 | battery_monitor | `battery.threshold {edge, volts}` (12.0 V down / 12.5 V up, 5 s hold; initial state delivered at boot) | value `${battery.voltage}` |
 | imu_manager | `imu.motion {state}` (active\|stationary), `imu.bump {axes}` | - |
@@ -142,7 +142,7 @@ sources (status.bit covers the connected-bit cases today), the
     task (8 KB PSRAM). Fast, non-network actions: `log.note`,
     `mqtt.publish` (already async), `led.*`, `autopid.group`.
   - **worker pool** (`blocking=true`): a SLOW network/bus round-trip
-    (`http.post`, `obd.request`, `uds.request`) is handed to a bounded
+    (`http.post`, `obd.request`, `uds.request`, `can.send`) is handed to a bounded
     pool (`EM_WORKERS=2` tasks, 16 KB PSRAM each) via a depth-8 job queue,
     so one 8 s HTTP+TLS post can't stall tick processing. The workers'
     stack carries whatever the action needs of its caller: the TLS

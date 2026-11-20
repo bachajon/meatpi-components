@@ -613,6 +613,11 @@ ap_bounds_verdict_t ap_bounds_apply(double *value, float min, float max,
 bool ap_core_job_acquire(void);
 void ap_core_job_release(void);
 
+/** autopid_start() ran: the core's lock, the poller and the chip memory
+ *  exist. A surface that may be called before that (a rule's action at
+ *  boot) asks first. */
+bool ap_core_started(void);
+
 /* the bus guard and a CAN node of the unit's own (autopid_guard_node.c) */
 /** Is such a node up by its settings (can_manager enabled)? Then the guard
  *  has no listener and that node is asked. @p fixed_kbps (may be NULL): the
