@@ -23,9 +23,10 @@
 /**
  * @file j2534_channel_private.h
  * @brief The channel record shared by j2534_channel.c (lifecycle, CAN),
- *        j2534_channel_filter.c (the filter table) and
- *        j2534_channel_iso.c (the ISO15765 side). Every function here
- *        runs with the channel lock held by the caller.
+ *        j2534_channel_filter.c (the filter table),
+ *        j2534_channel_iso.c (the ISO15765 sessions and the write) and
+ *        j2534_channel_iso_rx.c (the ISO15765 receive side). Every
+ *        function here runs with the channel lock held by the caller.
  */
 #pragma once
 
@@ -40,6 +41,7 @@
 #include "can_isotp.h"
 
 #include "j2534_channel.h"
+#include "j2534_iso_ae.h"
 #include "j2534_iso_cfg.h"
 #include "j2534_proto.h"
 
@@ -55,7 +57,8 @@ typedef struct j2534_tp20_state j2534_tp20_state_t;
 /* pending TxDone / START_OF_MESSAGE indications. One PassThruWriteMsgs
    batch queues a TxDone for each of its messages before the RX pump takes
    the first: at 4 (three held) the two oldest of Toyota CUW's five-frame
-   loader login were dropped, and the tester never saw them (2026-11-19). */
+   loader login were dropped, and the tester never saw them (2026-11-19).
+   The ring holds one less than this; PSRAM, 16 bytes each, per channel. */
 #define J2534_CH_MAX_IND  64
 
 typedef struct
@@ -69,15 +72,10 @@ typedef struct
     bool     tp_owned;  /* TP2.0 implicit pass; CLEAR_MSG_FILTERS keeps it */
 } j2534_ch_filter_t;
 
-/* ISO 15765-2 extended addressing of a session (ISO15765_ADDR_TYPE, SAE
-   J2534-1): the fifth byte of the FLOW_CONTROL filter's pattern (rx) and
-   flow-control message (tx), which leads every frame on the bus. */
-typedef struct
-{
-    bool    on;
-    uint8_t tx;     /* in front of every frame sent to the ECU    */
-    uint8_t rx;     /* in front of every frame the ECU sends back */
-} j2534_iso_ae_t;
+/* j2534_iso_ae_t, the extended addressing of a session (ISO15765_ADDR_TYPE,
+   SAE J2534-1), is j2534_iso_ae.h's: the fifth byte of the FLOW_CONTROL
+   filter's pattern (rx) and flow-control message (tx), which leads every
+   frame on the bus. */
 
 typedef struct
 {
@@ -192,10 +190,11 @@ bool j2534_iso_provider_ready(void);
  * Open (or, for an rx id the channel already serves, reopen) the ISO-TP
  * session for an ECU. @p ae NULL (or .on false): normal addressing. With
  * extended addressing a session is one rx id AND rx address extension, so
- * several share an rx id; a session of the other addressing kind on the
- * rx id is replaced. J2534 status: NOERROR (*slot = the session index),
- * ERR_EXCEEDED_LIMIT (the channel's or the provider's table is full),
- * ERR_FAILED (no provider, the id held elsewhere, the bus down).
+ * several share an rx id; every session of the other addressing kind on
+ * the rx id is closed first (the caller drops their filter records:
+ * j2534_channel_filter.c). J2534 status: NOERROR (*slot = the session
+ * index), ERR_EXCEEDED_LIMIT (the channel's or the provider's table is
+ * full), ERR_FAILED (no provider, the id held elsewhere, the bus down).
  */
 uint32_t j2534_iso_bind(j2534_channel_t *c, uint32_t tx_id, uint32_t rx_id,
                         bool ext, bool pad, const j2534_iso_ae_t *ae,
@@ -227,8 +226,22 @@ void j2534_iso_unbind_all(j2534_channel_t *c);
 uint32_t j2534_iso_write(j2534_channel_t *c, const j2534_msg_t *msg,
                          bool periodic);
 
+/* ---- j2534_channel_iso_rx.c ------------------------------------------ */
+
 /** One received message or indication, if any (the RX pump's poll). */
 bool j2534_iso_poll(j2534_channel_t *c, j2534_msg_t *out);
+
+/**
+ * Queue an indication for the tester (TxDone after a write, or a
+ * START_OF_MESSAGE that has to wait behind a message). @p has_ae: of an
+ * extended-addressing session, @p ae follows the id. A full ring gives up
+ * its oldest entry and counts it as lost (j2534_ch_take_lost).
+ */
+void j2534_iso_indicate(j2534_channel_t *c, uint32_t rx_status, uint32_t id,
+                        bool ext, bool has_ae, uint8_t ae, uint32_t ts_us);
+
+/** Session @p s is closing: a message the poll holds for it is dropped. */
+void j2534_iso_rx_forget(const j2534_iso_session_t *s);
 
 /**
  * SET_CONFIG (@p get false) or GET_CONFIG on an ISO15765 channel: the list

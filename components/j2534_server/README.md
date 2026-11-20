@@ -120,6 +120,32 @@ measurements and the layouts). The Windows DLL sends and reads the two since dri
 1.9; older drivers send the IOCTLs as their id alone, which changes
 nothing.
 
+ISO 15765-2 extended addressing (`ISO15765_ADDR_TYPE`, 2026-11-19;
+contributed by bachajon, pull request 5, with the address extension in
+the vendored ISO-TP link, `esp_isotp/PROVENANCE.md`). A gateway that
+answers for the ECUs behind it on one pair of CAN ids tells them apart by
+one byte in front of every frame (Toyota's from 2019 on: 0x750 / 0x758);
+the device refused the flag until then, so Techstream and the like could
+not reach an engine ECU behind such a gateway. A FLOW_CONTROL filter
+with the flag carries five bytes in its pattern and its flow-control
+message, the id and the address extension of that direction, and opens
+a session of its own: several share the two ids. Messages are
+`[id][address extension][payload]` both ways, single or segmented, and
+what comes back (messages, TxDone, START_OF_MESSAGE) carries the flag in
+`RxStatus`. One response id holds one kind of addressing: a filter of the
+other kind takes the place of every session on it. The layout is pure
+and host tested (`j2534_iso_ae.c`). The Windows DLL passes the flag and
+the fifth byte through as they are: no driver change. With it came room
+for the tools that use it: ten ISO-TP sessions on a channel (four before:
+a tool that opens an engine ECU arms a filter for each of 7E8 to 7EF), 63
+pending indications (three before: five messages in one write got three
+TxDone and the tester was told two were lost), and a message a session
+finished before the next first frame on its id is read before that
+frame's START_OF_MESSAGE. Layouts and limits: `J2534_WIRE_PROTOCOL.md`
+section 3. Proven against a gateway played by a PCAN
+(`.\test.ps1 j2534ext`), and by the contributor with Techstream on an
+engine ECU on a bench; not yet behind a real gateway.
+
 The RX pump (the `j2534_rx` task) pushes what the channels received as it
 arrives: it blocks on the open channel's bus queue between frames (the
 channel queues are static for the module's life, reset at CONNECT, so a
@@ -212,7 +238,9 @@ Layout (each file under the 700-line cap):
 | `j2534_channel.c/.h`, `j2534_channel_private.h` | channels: lifecycle, CAN via `can_manager`, the bus-bitrate rule, the `reflash_seen` count (the content gate went 2026-10-27) |
 | `j2534_channel_filter.c` | the filter table: adding a PASS, BLOCK or FLOW_CONTROL filter, stopping one, clearing them, and the PASS/BLOCK verdict the receive paths ask for. Out of `j2534_channel.c` on 2026-11-18: it had grown to 801 lines, past the cap this table states; the code moved unchanged |
 | `j2534_channel_lost.c` | what a channel lost on the way in (2026-11-18): its bus queue's drop count and the indications it had no room for, taken before a message is handed over |
-| `j2534_channel_iso.c` | the ISO15765 side (2026-10-19): one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), the SAE J2534-1 message layout `[4-byte id][payload]` both ways, padding per message, single frames without a session (functional addressing), the TxDone and START_OF_MESSAGE indications; the tester's write gives the channel lock up while it is on the bus |
+| `j2534_channel_iso.c` | the ISO15765 side (2026-10-19), sessions and write: one ISO-TP session per FLOW_CONTROL filter on the registered provider (`can_isotp.h`; `can_isotp_esp` in public builds), in normal or extended addressing, the SAE J2534-1 message layout `[4-byte id][payload]`, padding per message, single frames without a session (functional addressing); the tester's write gives the channel lock up while it is on the bus |
+| `j2534_channel_iso_rx.c` | the ISO15765 receive side: the ring of TxDone and START_OF_MESSAGE indications and the RX pump's poll, which hands messages and indications over in the order of the bus. Out of `j2534_channel_iso.c` on 2026-11-20: with extended addressing it had grown to 848 lines, past the cap this table states |
+| `j2534_iso_ae.c/.h` | PURE (2026-11-20): ISO15765 extended addressing, the layout: what a FLOW_CONTROL filter asks for, `[id][address extension][payload]` both ways, the single frame behind an address extension, what the receive path asks of a first frame. Host-tested |
 | `j2534_iso_cfg.c/.h` | PURE: the `SET_CONFIG` / `GET_CONFIG` lists of an ISO15765 channel (`ISO15765_BS`, `ISO15765_STMIN`): the ranges, a list taken whole or not at all, the answer a GET makes, the values a channel opens with. Host-tested |
 | `j2534_channel_legacy.c` | the J1850 VPW side (2026-10-19): the VPW init, header-cached WRITE through `obd_chip` (short payload as one frame, longer through `VTFullyRequestCk`), reply-line parsing with `7F xx 78` ridden out, a small PSRAM RX ring the pump drains; pure chip-command helpers live in `j2534_proto.c` |
 | `j2534_server_settings.c` / `_http.c` / `_cli.c` | descriptor, `/api/j2534`, the `j2534` command |
@@ -274,10 +302,10 @@ frames in one `PassThruWriteMsgs` 17 reached the bus before the call ended
 |---|---|
 | `s_req_payload` (request payload), `s_rx_wire`, `s_tx_frame` (one whole frame) | 4384 + 4160 + 4164 B |
 | `j2534_msg_t` scratch: RX pump 1, handler 4, periodic slots 4 and the one a START_PERIODIC is looked at in (each ~4.2 KB) | ~42 KB |
-| `s_pdu` (the ISO-TP reassembly scratch of the RX pump) | 4128 B |
-| channel records `j2534_ch_tbl` (4 channels: filters, 4 ISO-TP session slots, the indication ring) | ~1.7 KB |
+| `s_pdu` (the ISO-TP reassembly scratch of the RX pump) and `s_held` (a message the pump holds back for one poll, since 2026-11-19) | 4128 B each |
+| channel records `j2534_ch_tbl` (4 channels: 10 filters, 10 ISO-TP session slots, the ring of 64 indications) | 6720 B, measured (the link map; ~1.7 KB with 4 session slots and a ring of 4) |
 | J1850 legacy: one chip-reply buffer `s_resp` + the RX ring (8 × 520 B) | ~8.2 KB |
-| ISO-TP sessions themselves: the provider's (about 25 KB PSRAM + 1.2 KB internal each while open, `can_isotp_esp` README); each takes one of `can_manager`'s 16 subscriber slots, as does every channel's own CAN queue (256 frames since 2026-11-17, 4 KB of PSRAM each: what the CAN node releases at once after a flash write; 32 before) | per open session |
+| ISO-TP sessions themselves: the provider's (about 25 KB PSRAM each while open, and 288 B of internal RAM, measured 2026-11-20 over ten sessions, `can_isotp_esp` README); each response id takes one of `can_manager`'s 16 subscriber slots (extended-addressing sessions on one id share theirs), as does every channel's own CAN queue (256 frames since 2026-11-17, 4 KB of PSRAM each: what the CAN node releases at once after a flash write; 32 before). Ten sessions on one channel take ten slots (measured); the device's twelve on distinct ids and four channels would take all sixteen | per open session |
 | a TP 2.0 channel while it is open: its state and, for each of the 4 connections, a reassembly buffer and a delivery buffer of 4092 B; taken from the heap at CONNECT, freed at DISCONNECT (not a PSRAM static yet: an open item against the standard) | ~33 KB heap |
 | tasks `j2534` (TCP listener) + `j2534_rx` (RX pump) + `j2534_per` (periodic messages, since 2026-11-18): 4 KB stacks each | 12 KB (+ 3 TCBs internal) |
 | mutexes (send, session, channels, the periodic table) | internal, ~360 B |
@@ -301,7 +329,7 @@ that passed while its last copy was still waiting to go) and
 
 ## Testing
 
-- Host: `host_test/` (47 Unity cases: codec round trips and bounds,
+- Host: `host_test/` (53 Unity cases: codec round trips and bounds,
   filter match, status names, the framer with partial / delayed /
   dropped / malformed / discarded input, the ACK vectors of
   `J2534_WIRE_PROTOCOL.md` section 7, the TCP gate predicate, the
@@ -321,7 +349,22 @@ that passed while its last copy was still waiting to go) and
   case that failed on the header of the day before), the version a
   `HELLO` asks for, every status in both versions' numbers, the refusal
   of a second tester as each kind of client gets it, the `EVENT RX_LOST`
-  vector of the wire protocol's section 13, the loss count).
+  vector of the wire protocol's section 13, the loss count; since
+  2026-11-20 extended addressing in `test_iso_ae.c`: what a FLOW_CONTROL
+  filter asks for, the message split and join, the single frame behind
+  an address extension, the two indications, the first frame questions
+  of the receive path, the frames a message takes).
+- ISO 15765 extended addressing: `.\test.ps1 j2534ext` in the firmware
+  checkout (`tools/testbench/usb/j2534_ext_addr_bench.py` -> `J2534 EXT
+  ADDR PASS`): a gateway with two ECUs behind one pair of ids, played by
+  a PCAN, every frame the device sends read off the bus; single frames,
+  messages in several frames both ways up to 4095 bytes, two answers
+  frame by frame in turn, a frame for nobody, the flow control as
+  `SET_CONFIG` sets it, five TxDone for five messages of one write, an
+  acknowledgement in front of the START_OF_MESSAGE that followed it, a
+  filter of the other kind on the same ids, ten sessions on a channel
+  and the device's twelve with what they cost, a busy bus beside it, and
+  the driver DLL called like an application.
 - A session when something goes wrong beside it: `.\test.ps1
   j2534session` in the firmware checkout
   (`tools/testbench/usb/j2534_session_bench.py` -> `J2534 SESSION PASS`):

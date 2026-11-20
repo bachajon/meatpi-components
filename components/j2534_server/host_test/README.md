@@ -1,7 +1,7 @@
 # J2534 host tests
 
 From the firmware checkout: `.\test.ps1 host j2534_server`.
-Expected: `47 Tests 0 Failures 0 Ignored`.
+Expected: `53 Tests 0 Failures 0 Ignored`.
 
 The suite covers header/message codecs and bounds, filter matching, stream
 framing, ACK vectors, TCP exposure, baud checks, ISO15765 layouts and
@@ -30,6 +30,20 @@ answered, the `EVENT RX_LOST` frame of the wire protocol's section 13
 byte for byte, and what a loss counter gained since the last look (told
 once, a counter that started again). The bus half is the firmware's
 `.\test.ps1 j2534session`.
+
+ISO15765 extended addressing, the layout (`j2534_iso_ae.c`, `test_iso_ae.c`,
+six cases, 2026-11-20): what a FLOW_CONTROL filter asks for (the flag on
+either message, five bytes each, the two address extensions by direction,
+the flag with four bytes refused and the caller's record left alone), a
+tester's message split into id, address extension and payload, the single
+frame behind an address extension bare and padded (six bytes fill it,
+seven do not fit), a received message and the two indications with
+`ISO15765_ADDR_TYPE` in `RxStatus` and five bytes of id and address
+extension, whether a reassembled message is the one a first frame starts
+(both length forms, and the frame one byte shorter behind an address
+extension), and the frames a message takes in each addressing. The
+vectors are the ones of the wire protocol's section 3. The bus half is the
+firmware's `.\test.ps1 j2534ext`.
 
 The production READ_VBATT helper runs against a fake battery owner: voltage
 conversion and rounding, a valid zero, refusal without an open device, no

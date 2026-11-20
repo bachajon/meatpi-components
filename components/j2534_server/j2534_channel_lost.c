@@ -40,10 +40,22 @@
  *
  * The count is in bus frames. On a raw CAN channel a frame is a message;
  * some of the frames lost may be ones a filter of the channel would have
- * kept out. On an ISO15765 and a TP2.0 channel the queue carries the
- * frames no ISO-TP session reassembles (first frames looked at for the
+ * kept out. On an ISO15765 and a TP2.0 channel the queue is what the
+ * channel reads beside its ISO-TP sessions (first frames looked at for the
  * START_OF_MESSAGE indication, single-frame answers to a functional
- * request, TP2.0 telegrams): the count says how many of those went.
+ * request, TP2.0 telegrams): the count says how many frames went there.
+ *
+ * 2026-11-20: pull request 5 made an ISO15765 and a TP2.0 channel report
+ * nothing, because Toyota's Calibration Update Wizard gives up on
+ * ERR_BUFFER_OVERFLOW. Not kept. What that tool met was the indication
+ * ring of three (lost_pending, counted here): five TxDone of one write,
+ * two dropped; the ring holds 63 since the same pull request. An
+ * indication the ring drops is a message the tester does not get, and an
+ * answer to a functional request comes off this very queue through the
+ * PASS filters: saying nothing about those is the fault of before
+ * 2026-11-18 again. What stays true of that change's reasoning: this
+ * queue takes every frame of the bus, so on a busy bus a pump that is
+ * held up reports frames the tester never asked for.
  */
 #include "j2534_channel_private.h"
 
@@ -59,20 +71,6 @@ uint32_t j2534_ch_take_lost(j2534_channel_t *c)
     if (c->can_sub >= 0 && can_manager_subscriber_get(c->can_sub, &sub))
     {
         n += j2534_lost_since(sub.drops, &c->sub_drops_seen);
-    }
-
-    /* 2026-11-19: only a raw CAN channel tells the tester about loss. On
-       an ISO15765 or TP2.0 channel the bus queue holds the frames no
-       ISO-TP session reassembles (other traffic on the bus, first-frame
-       peeks, unowned functional singles): losing those is not a lost
-       reply, the answers the tester reads are reassembled by the sessions
-       off this queue and still arrive. Told as an EVENT RX_LOST, the
-       Windows driver returns ERR_BUFFER_OVERFLOW for the next read, and
-       Toyota's Calibration Update Wizard gives up on its reflash there.
-       The drops stay counted on /api/can and /api/j2534. */
-    if (c->protocol != J2534_PROT_CAN)
-    {
-        return 0;
     }
 
     return n;

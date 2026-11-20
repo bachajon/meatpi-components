@@ -97,7 +97,7 @@ enum {
 /* ---- TxFlags / RxStatus bits ------------------------------------------ */
 enum {
     J2534_TX_ISO15765_FRAME_PAD = 0x00000040,
-    J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: [id][address extension][payload] */
+    J2534_TX_ISO15765_ADDR_TYPE = 0x00000080, /* extended addressing: j2534_iso_ae.h */
     J2534_TX_CAN_29BIT_ID       = 0x00000100,
     J2534_TX_WAIT_P3_MIN_ONLY   = 0x00000200,
     J2534_TX_TP2_0_BROADCAST    = 0x00010000, /* TP2_0_BROADCAST_MSG */
@@ -272,9 +272,9 @@ const char *j2534_status_name(uint32_t status);
 /* ---- ISO15765 message data, the SAE J2534-1 layout (2026-10-19) --------
  * data = [4-byte big-endian CAN id][UDS payload], the same way round in
  * both directions. Extended addressing (ISO15765_ADDR_TYPE, 2026-11-19)
- * puts a fifth byte, the address extension, between the two; the channel
- * handles it itself (j2534_channel_iso.c), these helpers are the normal
- * layout's. Before this date the device took the
+ * puts a fifth byte, the address extension, between the two: that
+ * layout's helpers are j2534_iso_ae.h's, these are the normal layout's.
+ * Before 2026-10-19 the device took the
  * bare payload, which no standard tool sends (udsoncan, the OEM suites). */
 
 /**

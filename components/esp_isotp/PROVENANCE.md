@@ -32,3 +32,8 @@ via CMake (upstream arrangement) to pin the isotp-c config.
   `receive_ae`, which is stripped before the PCI is read. `inc/esp_isotp.h`
   and `src/esp_isotp.c`: `addr_ext`, `tx_addr_ext` and `rx_addr_ext` in
   `esp_isotp_config_t`. A link without it behaves as before.
+- 2026-11-20: `host_test/` (ours, not upstream's): the link's two local
+  changes above, two links back to back over every message size, with
+  the frames of normal addressing pinned to what the library sent before
+  extended addressing was added. Run it after taking a new copy from
+  upstream (`host_test/README.md`).

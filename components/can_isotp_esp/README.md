@@ -38,10 +38,17 @@ before `uds_manager`/`j2534_server` start; `open()` needs the bus up
 - Per session (heap, freed on close): esp_isotp tx+rx buffers 2 x 4128 B PSRAM
   + its handle ~200 B internal + TX frame pool 16 x ~40 B internal, mailbox
   4 x 4130 B PSRAM, three semaphores ~300 B internal - about 25 KB PSRAM +
-  1.2 KB internal per open session, 9 sessions max (1 UDS + 8 J2534 flow
-  control sessions since 2026-10-19; estimated from the allocation sizes;
-  bench PSRAM min_free stayed 3.89 MB with a session open). Each open
-  session holds one of can_manager's 16 subscriber slots.
+  288 B internal per open session (measured 2026-11-20: ten sessions
+  opened through the J2534 server took 2880 B of the internal heap and
+  gave them back when closed; 1.2 KB was an estimate from the allocation
+  sizes), 12 sessions max (1 UDS + up to 11 J2534 flow control sessions
+  since 2026-11-19, 9 before; bench PSRAM min_free stayed 3.89 MB with a
+  session open). Each rx id with a session holds one of can_manager's 16
+  subscriber slots (extended-addressing sessions on one rx id share
+  theirs): twelve sessions on twelve ids beside four J2534 channel queues
+  would take all sixteen, and an open that finds none left fails with an
+  E line. Ten sessions on one channel left three free on the bench
+  (`.\test.ps1 j2534ext`, leg L).
 
 ## Design
 
@@ -139,11 +146,24 @@ fail-open (3 s wait, then take), so a wedged side can never brick the other.
   2026-10-19, ISO 15765-2's value; 100 ms before). The task polls a session
   at tick cadence for 1.2 s after any activity so the stack's timeout is
   always observed.
-- One PDU ≤ `CAN_ISOTP_ESP_MAX_PDU` (4128 B, SAE J2534's cap); 9 sessions
-  (1 UDS + 8 J2534 flow-control sessions, up to 4 per J2534 channel); a
-  rx id can have one session at a time.
+- One PDU ≤ `CAN_ISOTP_ESP_MAX_PDU` (4128 B, SAE J2534's cap); 12 sessions
+  (1 UDS + up to 11 J2534 flow-control sessions, up to 10 per J2534
+  channel); a rx id can have one session at a time in normal addressing.
 - 29-bit ids through `ext_id`; padding per session (`use_padding`,
   `padding_byte`).
+- ISO 15765-2 extended addressing through `addr_ext`, `tx_ae`, `rx_ae`
+  (2026-11-19, contributed by bachajon; not the 29-bit id): the session's
+  frames are led by an address extension in both directions (`tx_ae` on
+  what it sends, flow control included; a received frame is taken only
+  when it starts with `rx_ae`) and carry one byte less. Sessions with
+  different `rx_ae` share one rx id and ONE subscription of the CAN node
+  (a second subscription on the id would queue every frame twice): the
+  first to open holds it and hands it on when it closes. A frame on the
+  id led by an address extension no session names is dropped without
+  counting as an orphan. A normal session and an extended one cannot
+  share a rx id (`ESP_ERR_INVALID_STATE`). The link's own change is
+  host tested (`esp_isotp/host_test`); two sessions with their frames in
+  turn on one id are the firmware's `.\test.ps1 j2534ext`, leg T.
 
 ## Stats
 

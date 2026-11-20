@@ -43,7 +43,8 @@
  * 0 mean BS 0 / STmin 0, never the Kconfig values) and what set_flow puts
  * in their place later; N_Bs/N_Cr are the Kconfig response timeout
  * (1000 ms); one PDU is at most CAN_ISOTP_ESP_MAX_PDU bytes (SAE J2534's
- * 4128); at most 9 sessions (1 UDS + 8 of the J2534 channels).
+ * 4128); at most 12 sessions (1 UDS + up to 11 of the J2534 channels;
+ * 9 until 2026-11-19).
  *
  * Extended addressing (2026-11-19, can_isotp_cfg_t addr_ext / tx_ae /
  * rx_ae; ISO 15765-2, NOT 29-bit ids): the session's frames are led by an

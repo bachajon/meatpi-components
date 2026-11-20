@@ -782,5 +782,6 @@ void app_main(void)
     run_voltage_tests();
     run_iso_cfg_tests();
     run_session_tests();
+    run_iso_ae_tests();
     UNITY_END();
 }

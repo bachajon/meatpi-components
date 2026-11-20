@@ -5,13 +5,16 @@
 # (j2534_iso_cfg.c, pure).
 # 2026-11-18: what a session's wire version decides (j2534_proto_session.c,
 # pure): the status numbers, the EVENT frame, the loss count.
+# 2026-11-20: ISO15765 extended addressing, the layout (j2534_iso_ae.c, pure).
 set(comp_dir "${CMAKE_CURRENT_LIST_DIR}/../..")
 
 idf_component_register(
     SRCS "test_main.c" "test_voltage.c" "test_iso_cfg.c" "test_session.c"
+         "test_iso_ae.c"
          "${comp_dir}/j2534_proto.c"
          "${comp_dir}/j2534_proto_session.c"
          "${comp_dir}/j2534_iso_cfg.c"
+         "${comp_dir}/j2534_iso_ae.c"
          "${comp_dir}/j2534_server_migrate.c"
          "${comp_dir}/j2534_server_voltage.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"

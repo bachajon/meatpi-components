@@ -137,14 +137,43 @@ indication: an `RX_MSG` whose `rx_status` is `TX_MSG_TYPE |
 TX_INDICATION` (0x09) and whose data is the 4-byte id alone; a first
 frame arriving on a session's id raises a `START_OF_MESSAGE` (0x02)
 indication the same way. Periodic messages raise no indications.
-`ISO15765_ADDR_TYPE` (extended addressing, 2026-11-19): the data is
-`[4-byte id][address extension][payload]` in both directions, the
-FLOW_CONTROL filter's pattern and flow-control message are 5 bytes (id +
-the address extension of that direction), and received messages and
-indications carry `0x80` in `rx_status`. A message longer than 6 bytes to
-an id and address extension no filter names is `ERR_NO_FLOW_CONTROL`.
 
-Filters (max 8 per channel): `PASS`/`BLOCK` match `mask`/`pattern` over
+`ISO15765_ADDR_TYPE` (ISO 15765-2 extended addressing, 2026-11-19; a
+gateway that answers for the ECUs behind it on one pair of ids speaks it,
+Toyota's on 0x750 / 0x758): one byte, the address extension, leads every
+frame of a message on the bus, so a frame carries one byte less (a single
+frame 6). The message data is `[4-byte id][address extension][payload]`
+in both directions. The FLOW_CONTROL filter's pattern and flow-control
+message are 5 bytes each, the id and the address extension of that
+direction (the two bytes may differ), with the flag in the `tx_flags` of
+either; the flag with a 4-byte message is `ERR_INVALID_MSG`. A session is
+then one response id AND the address extension its frames arrive with:
+several filters share the two ids, and a frame led by an address
+extension none of them names is left alone. Received messages and both
+indications carry `0x80` in `rx_status`, and the indications are 5 bytes
+(the id and the address extension: of the request for a TxDone, of the
+answer for a START_OF_MESSAGE). A message to an id and address extension
+no filter names goes out as one frame when its payload is at most 6
+bytes and is `ERR_NO_FLOW_CONTROL` when it is longer; an answer in
+extended addressing is received through a FLOW_CONTROL filter only (the
+PASS path below reads normal addressing). One response id holds one kind
+of addressing: a filter of the other kind takes the place of every
+session of that id, and their filter ids lapse.
+
+One exchange, `10 03` to the ECU behind request id 0x750 with address
+extension E9, answered from 0x758 with 5F (the layout is a host-test
+vector, `host_test/main/test_iso_ae.c`; the frames are read off the bus
+by the firmware's `.\test.ps1 j2534ext`):
+
+```
+message data, tester to device   00 00 07 50 E9 10 03      tx_flags 0xC0 (FRAME_PAD, ADDR_TYPE)
+on the bus, id 750               E9 02 10 03 AA AA AA AA
+TxDone                           00 00 07 50 E9            rx_status 0x89
+on the bus, id 758               5F 06 50 03 00 32 01 F4
+message data, device to tester   00 00 07 58 5F 50 03 00 32 01 F4   rx_status 0x80
+```
+
+Filters (max 10 per channel): `PASS`/`BLOCK` match `mask`/`pattern` over
 the message `data` bytes (the 4 id bytes first): a message matches when
 `((data[i] ^ pattern[i]) & mask[i]) == 0` over `min(mask_len,
 data_len)`; an empty mask passes everything. On a CAN channel with no
@@ -155,7 +184,10 @@ through a PASS filter. `FLOW_CONTROL` (ISO15765 only) opens an ISO-TP
 session for one ECU: `pattern` data = the ECU's response id (4 bytes
 BE), the flow-control message's data = the request id, its `tx_flags`
 the 29-bit choice and the padding of the frames the device sends to
-that ECU. Up to 4 sessions per channel (and 8 device-wide); a filter for
+that ECU. Up to 10 sessions per channel and 12 device-wide, the device's
+own UDS client's among them while it holds one (4 and 9 until
+2026-11-19: a tool that opens an engine ECU arms a filter for each of
+7E8 to 7EF on one channel, and the fifth was refused); a filter for
 an id the channel already serves rebinds that session and its old
 filter id lapses; `STOP_FILTER` closes the session; `ERR_EXCEEDED_LIMIT`
 when the filter or session table is full.
@@ -266,7 +298,7 @@ version 2 is answered (section 13) and what `j2534_proto.h` defines since
 | `0x08` | | `ERR_DEVICE_NOT_CONNECTED` | `CONNECT` before `OPEN` |
 | `0x09` | | `ERR_TIMEOUT` | ISO-TP send/receive timed out |
 | `0x0A` | | `ERR_INVALID_MSG` | malformed PASSTHRU_MSG, short payload, unknown periodic id |
-| `0x0C` | | `ERR_EXCEEDED_LIMIT` | the channel's filter table (8) or its ISO-TP sessions (4; 8 device-wide) are all in use |
+| `0x0C` | | `ERR_EXCEEDED_LIMIT` | the channel's filter table (10) or its ISO-TP sessions (10; 12 device-wide) are all in use |
 | `0x0E` | `0x1A` | `ERR_DEVICE_IN_USE` | a tester is attached on another transport |
 | `0x10`..`0x12` | | `ERR_BUFFER_*` | not sent by the device. `ERR_BUFFER_OVERFLOW` is what the Windows driver returns from `PassThruReadMsgs` after an `EVENT RX_LOST` (section 13) |
 | `0x15` | `0x14` | `ERR_MSG_PROTOCOL_ID` | message protocol does not match the channel |
@@ -295,8 +327,9 @@ version 2 is answered (section 13) and what `j2534_proto.h` defines since
   default) and `allow_lan`. For observability the memory-transfer services
   seen in ISO15765 and J1850 requests are counted on `/api/j2534`
   (`reflash_seen`, since boot). A stored `allow_reflash` key is ignored.
-- **ISO-TP sessions**: one per FLOW_CONTROL filter (ECU), 4 per channel,
-  8 across the device, one per rx id; the device's own UDS terminal keeps
+- **ISO-TP sessions**: one per FLOW_CONTROL filter (ECU), 10 per channel,
+  12 across the device, one per rx id (with extended addressing one per
+  rx id and address extension); the device's own UDS terminal keeps
   its session 5 s after its last request, so a filter for that ECU
   inside those 5 s fails (`ERR_FAILED`). Retry. The flow control the
   device sends as a receiver is the channel's `ISO15765_BS` and
@@ -500,7 +533,12 @@ a TCP peer that vanishes is given up (section 8.1), a long ISO15765
 write no longer holds up what is received or the periodic messages, and
 the periodic messages have a task of their own (section 6).
 
-2026-11-19, both versions, no byte changes meaning: an ISO15765 channel
+2026-11-19, both versions (meatpi-components pull request 5):
+`ISO15765_ADDR_TYPE` is served where a message with it was
+`ERR_INVALID_MSG` (section 3: the layout, the 5-byte FLOW_CONTROL filter,
+`0x80` in `rx_status`), and a channel holds 10 ISO-TP sessions where it
+held 4. No byte changes meaning for a client that does not set the flag.
+The same day, in both versions: an ISO15765 channel
 holds 63 pending indications where it held 3, so every message of one
 `WRITE_MSGS` batch gets its TxDone (a batch of five lost its first two:
 Toyota CUW's loader login). And a message a session finished before the
@@ -748,11 +786,17 @@ buffer overflow): the Windows driver returns `ERR_BUFFER_OVERFLOW` from
 the `PassThruReadMsgs` that hands that message over, with the message.
 The count is in bus frames: on a raw CAN channel a frame is a message
 (some of those lost may be frames a filter of the channel would have
-kept out); on an ISO15765 and a TP2.0 channel the queue carries what no
-ISO-TP session reassembles (the first frames behind the
+kept out); on an ISO15765 and a TP2.0 channel the queue is what the
+channel reads beside its ISO-TP sessions (the first frames behind the
 START_OF_MESSAGE indication, single-frame answers to a functional
 request, TP2.0 telegrams), and an indication the channel had no room
-for counts as one. A loss that happens while the device is taking a
+for counts as one. Every frame of the bus passes through that queue, so
+on a busy bus a count can hold frames the tester never asked for; a
+message a session reassembles is never among them (the sessions read
+the bus on their own). With 3000 frames a second of other traffic
+beside an ISO15765 conversation over WiFi the queue lost nothing and no
+event was sent (the firmware's `.\test.ps1 j2534ext`, leg F). A loss
+that happens while the device is taking a
 message out of the queue may be told one message late, never early.
 The device counts every loss on `/api/j2534` (`rx_lost`), also in a
 version 1 session, which is told nothing, as before.

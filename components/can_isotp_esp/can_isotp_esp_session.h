@@ -49,9 +49,13 @@ extern "C" {
 #endif
 
 #define ISOTP_MAX_SESSIONS   12   /* 1 uds_manager + up to 11 J2534 flow-control
-                                     sessions (4 channels x up to 4 each,
-                                     2026-10-19); each takes a can_manager
-                                     subscriber slot while open           */
+                                     sessions, up to 10 on one channel (9
+                                     and 4 until 2026-11-19: a tool that
+                                     opens an engine ECU arms 7E8..7EF).
+                                     Each rx id takes a can_manager
+                                     subscriber slot while it has a
+                                     session; extended-addressing sessions
+                                     on one rx id share theirs            */
 
 /* after any activity a session is polled at tick cadence for this long:
  * longer than the stack's N_Bs/N_Cr (Kconfig response timeout, 1000 ms
