@@ -1223,6 +1223,7 @@ SCREENS.vehicle=async()=>{
     if(W.chip.state==="running")return;
     W.chip.state="running";W.chip.err="";render();
     const r=await chipFw.run(D.chip);
+    if(r.wait){W.chip.state="unknown";D.chip=r.st;render();chipFw.prompt(r.st,startChipUpdate);return;}
     if(!r.ok){chipFailed(r.why);return;}
     D.chip=r.st;W.chip.state="done";render();
     chipFw.done(r.st,()=>render());

@@ -59,7 +59,10 @@ async function chipCard(){
       s.ready?chip("ready at "+fmtBaud(s.baud)+" baud","ok"):chip("chip not up","warn"),
       fw.damaged?chip("stored identity damaged","crit"):ver?chip("firmware "+ver,fw.outdated?"warn":"ok"):null,
       chip("device carries "+(fw.builtin||"-"),""),
-      up.running?chip("update running","info"):up.done&&up.last&&up.last!=="ESP_OK"?chip("last update: "+up.last,"warn"):null);
+      /* a chip that never answered its version question was not written:
+         that is no failed update, and "last update: ESP_ERR_TIMEOUT" read as
+         one (issue #1075; Ali, 2026-11-21: say it in words) */
+      up.running?chip("update running","info"):up.done&&up.no_answer?chip("not checked: the chip did not answer","warn"):up.done&&up.last&&up.last!=="ESP_OK"?chip("last update: "+up.last,"warn"):null);
     const wire=(s.bringup&&s.bringup.wire)||[];
     if(!s.ready){
       const b=banner("warn","alert",h("span",{},h("b",{},"The chip did not come up at this start. "),"The bring-up saw: "+(wire.length?wireWords(wire):"nothing recorded")+". Open the wire tools below to see what the chip sends."));
@@ -71,6 +74,11 @@ async function chipCard(){
          one. */
       const b=banner("crit","alert",h("span",{},h("b",{},"The OBD chip's stored identity is damaged. "),"The chip still works, but it lost what it stores about itself (its name, its version, its serial number). WiCAN uses it as it is and does not rewrite its firmware: a rewrite cannot repair it. Please contact MeatPi support and include the chip configuration below."));
       b.style.marginTop="10px";noteRow.replaceChildren(b);
+    }else if(fw.outdated&&!up.running&&!fw.power_on){
+      /* issue #1075 (2026-11-21): offered only in a start that began with
+         the power coming on; the device refuses the route otherwise */
+      noteRow.replaceChildren(h("div",{class:"banner warn","data-wait":"unplug",style:"display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;margin-top:10px"},ic("alert"),
+        h("div",{},h("b",{},"A newer chip firmware is available. "),"The chip runs "+(ver||"an older version")+", this device carries "+(fw.builtin||"a newer image")+". Unplug WiCAN from the car, wait one minute and plug it back in: the update is offered here then.")));
     }else if(fw.outdated&&!up.running){
       updBtn.textContent="Update to "+(fw.builtin||"the packaged image");
       noteRow.replaceChildren(h("div",{class:"banner warn",style:"display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;margin-top:10px"},ic("alert"),
@@ -170,6 +178,10 @@ async function selftestCard(){
   render(await tryGet("/api/can/selftest"));
   const runBtn=h("button",{class:"btn pri sm",type:"button",onclick:async()=>{
     runBtn.disabled=true;
+    /* AutoPID is polling: the test takes it off the chip for its two
+       seconds, and the user is told before it does (Ali, 2026-11-21) */
+    const ap=await tryGet("/api/autopid");
+    if(ap&&ap.stats&&ap.stats.running&&!await confirmModal("AutoPID is polling the vehicle. It pauses for the self-test (about 2 seconds) and carries on afterwards.","AutoPID is active")){runBtn.disabled=false;return;}
     try{await api("/api/can/selftest",{method:"POST"});}catch(e){toast(e.message,"err");runBtn.disabled=false;return;}
     render({running:true});
     let r=null;for(let i=0;i<30;i++){await new Promise(res=>setTimeout(res,500));r=await tryGet("/api/can/selftest");if(r&&!r.running)break;}

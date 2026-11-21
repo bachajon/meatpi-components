@@ -787,7 +787,7 @@ async function api(path,opts={}){
   const res=await fetch(API+path,o);
   const ct=res.headers.get("content-type")||"";
   let data; if(ct.includes("json")){try{data=await res.json();}catch{data=null;}} else data=await res.text();
-  if(!res.ok)throw new Error((data&&data.error)?data.error:(typeof data==="string"&&data)||("HTTP "+res.status));
+  if(!res.ok){const er=new Error((data&&data.error)?data.error:(typeof data==="string"&&data)||("HTTP "+res.status));er.status=res.status;throw er;}
   return data;
 }
 async function tryGet(p){try{return await api(p);}catch{return null;}}
@@ -987,7 +987,7 @@ function sleepHoldText(){
   const st=sleepSoon.st;if(!st||typeof st.holds_left!=="number")return"";
   /* a log read in progress (the Home Assistant backfill, the dashboard's
      history) pushes the countdown out a minute at a time (2026-11-06) */
-  const act=st.activity_s>0?(st.activity_why==="chip_update"?"Kept awake while the OBD chip firmware is updated. ":"Kept awake while the log is being read. "):"";
+  const act=st.activity_s>0?(st.activity_why==="chip_update"?"Kept awake while the OBD chip firmware is updated. ":st.activity_why==="fw_update"?"Kept awake while the firmware is updated. ":"Kept awake while the log is being read. "):"";
   if(st.hold_s>0)return act+"Kept awake on your request ("+st.holds_left+" of "+st.holds_max+" holds left). ";
   return act+(st.holds_left===0?"Kept awake "+st.holds_max+" times: no further extension. ":"");
 }
@@ -1411,7 +1411,10 @@ function setConn(s,txt){
   else if(prev==="offline"&&s==="online"){refreshSleep();route();}
 }
 async function refreshSettingsList(){const list=await tryGet("/api/settings");if(list&&list.components)conn.settings=list.components;}
-async function restartNow(){try{await api("/api/restart",{method:"POST"});}catch{}expectReboot("Restarting");}
+/* a request that dies with the connection is the restart itself; a 409 is the
+   device saying not now (the OBD chip's firmware is being written,
+   2026-11-21) and nothing restarts */
+async function restartNow(){try{await api("/api/restart",{method:"POST"});}catch(e){if(e&&e.status===409){toast(e.message,"err");return;}}expectReboot("Restarting");}
 function expectReboot(reason="Rebooting"){conn.rebootUntil=Date.now()+95000;setConn("reboot",reason+", waiting for the device…");}
 async function ping(){
   try{const st=await api("/api/status");conn.status=st;
@@ -2011,16 +2014,35 @@ async function networksRowPicker(rows,component,values,info){
    POST /api/obd_chip/update, GET /api/obd_chip for the records written, then
    the chip's own restart) with its progress in a popup that a tap beside it
    does not close, the Done popup, and the banner with the same offer.
-   WiCAN stays awake meanwhile (the sleep entry waits for the job). */
+   WiCAN stays awake meanwhile (the sleep entry waits for the job).
+   Since 2026-11-21 (issue #1075, Ali) the update is offered only in a start
+   that began with the power coming on (GET /api/obd_chip fw.power_on; the
+   device refuses the route otherwise): in any other start the popup and
+   the banner tell the user to unplug WiCAN for a minute, with no button. */
 const chipFw={
   verOf:s=>{const m=/V\d+\.\d+\.\d+/.exec(s||"");return m?m[0]:"";},
   outdated:st=>!!(st&&st.ready&&st.fw&&st.fw.outdated),
+  powerOn:st=>!!(st&&st.fw&&st.fw.power_on),
+  UNPLUG:"Unplug WiCAN from the car, wait one minute and plug it back in",
   now(st){return this.verOf(st&&st.fw&&st.fw.chip)||"an older version";},
   builtin(st){return (st&&st.fw&&st.fw.builtin)||"the packaged version";},
   pop(){const m=document.querySelector("#modal-root .modal");if(m)m.classList.add("qs-pop-modal");return m;},
   /* the offer: one button (Ali: "OK or continue"); a tap beside it closes it */
   prompt(st,onStart){
     const lbl=t=>h("b",{style:"font-weight:600;color:var(--text-2)"},t);
+    if(!this.powerOn(st)){
+      /* not a start from power-on: no offer, the way to one */
+      const step=(n,t)=>h("div",{style:"display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;align-items:baseline"},h("b",{class:"mono",style:"color:var(--text-2)"},n+"."),h("span",{},t));
+      modal({title:null,body:h("div",{class:"qs-pop",id:"chip-fw-unplug"},h("span",{class:"ci info"},ic("cpu")),
+        h("div",{style:"min-width:0"},h("h3",{},"The OBD chip needs a firmware update"),
+          h("p",{},"The chip in this WiCAN runs firmware "+this.now(st)+", this WiCAN carries "+this.builtin(st)+". The update is offered right after WiCAN has been powered on:"),
+          h("div",{style:"display:grid;gap:6px;margin:4px 0 12px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;font-size:13.5px"},
+            step(1,"Unplug WiCAN from the car."),step(2,"Wait one minute."),step(3,"Plug it back in and open this page again.")),
+          h("p",{class:"help"},"The chip starts fresh when the power comes on, with nothing in progress on it: that is when it is updated. Your settings are not touched."))),
+        actions:[{label:"OK",kind:"pri",fn:null}]});
+      this.pop();
+      return;
+    }
     modal({title:null,body:h("div",{class:"qs-pop"},h("span",{class:"ci info"},ic("cpu")),
       h("div",{style:"min-width:0"},h("h3",{},"The OBD chip needs a firmware update"),
         h("p",{},"The chip in this WiCAN runs firmware "+this.now(st)+". On that version the automatic protocol search stops working after a restart, so apps and the vehicle detection cannot find the car until the device is unplugged. This WiCAN carries "+this.builtin(st)+", which does not have the fault."),
@@ -2033,6 +2055,10 @@ const chipFw={
   /* the banner with the same offer; cs = {state, err, tries} of the caller */
   banner(st,cs,onClick,id){
     const failed=cs.state==="failed";
+    if(!this.powerOn(st)&&cs.state!=="running"){
+      return h("div",{class:"banner warn",id,"data-wait":"unplug",style:"display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:12px"},ic("alert"),
+        h("div",{},h("b",{},"The OBD chip needs a firmware update. "),"The chip runs "+this.now(st)+", this WiCAN carries "+this.builtin(st)+". "+this.UNPLUG+": the update is offered here then."));
+    }
     return h("div",{class:"banner "+(failed?"crit":"warn"),id,style:"display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px"},ic("alert"),
       h("div",{},...(failed
         ?[h("b",{},"The chip firmware update did not finish. "),"The attempt ended with "+cs.err+". Try again: an interrupted write is completed by the next attempt."+(cs.tries>=2?" If it fails again, unplug WiCAN for ten seconds, plug it back in and try once more.":"")+" The chip still runs "+this.now(st)+"; its automatic protocol search stays broken until it is on "+this.builtin(st)+"."]
@@ -2041,6 +2067,11 @@ const chipFw={
   },
   /* the job with its progress popup; resolves {ok:true, st} or {ok:false, why} */
   async run(st0){
+    /* the page's copy may be from before a restart: asked again, and no
+       popup when this start is not one from power-on (the caller shows
+       the way to one) */
+    const fresh=await tryGet("/api/obd_chip");
+    if(fresh&&!this.powerOn(fresh))return {ok:false,wait:true,st:fresh};
     const builtin=this.builtin(st0);
     const bar=h("i",{style:"display:block;height:100%;width:0;background:var(--primary);border-radius:6px;transition:width .3s"});
     const line=h("span",{},"Starting the update…"),pct=h("span",{class:"mono",style:"font-weight:600"},"");
@@ -2209,7 +2240,7 @@ function buildMenu(active,sub){
     el.append(h("div",{class:"nav-warn"},
       h("div",{class:"nw-h"},ic("alert"),h("span",{},"Restart pending")),
       h("div",{class:"nw-b"},niceList(pending)+" changed: ",
-        h("a",{href:"#",onclick:async e=>{e.preventDefault();if(await confirmModal("Restart WiCAN now?","Reboot")){try{await api("/api/restart",{method:"POST"});}catch{}expectReboot("Restarting");}}},"reboot to apply"),".")));
+        h("a",{href:"#",onclick:async e=>{e.preventDefault();if(await confirmModal("Restart WiCAN now?","Reboot"))await restartNow();}},"reboot to apply"),".")));
 }
 function niceList(names){return names.slice(0,3).map(niceName).join(", ")+(names.length>3?" +"+(names.length-3):"");}
 let cleanup=null,curSection=null;
@@ -2483,6 +2514,7 @@ PAGES.status=async(view)=>{
     if(cs.state==="running")return;
     cs.state="running";cs.err="";paintChip();
     const r=await chipFw.run(chipSt);
+    if(r.wait){cs.state="unknown";chipSt=r.st;paintChip();chipFw.prompt(r.st,startChip);return;}
     if(!r.ok){cs.state="failed";cs.err=r.why;cs.tries++;paintChip();return;}
     chipSt=r.st;cs.state="done";paintChip();chipFw.done(r.st,null);
   }
@@ -2491,8 +2523,11 @@ PAGES.status=async(view)=>{
     const s=await tryGet("/api/obd_chip");if(!s)return;
     chipSt=s;paintChip();
     if(chipFw.outdated(s)&&cs.state==="unknown"){
-      let seen=false;try{seen=sessionStorage.getItem(chipKey)==="1";}catch(_){}
-      if(!seen){try{sessionStorage.setItem(chipKey,"1");}catch(_){}chipFw.prompt(s,startChip);}
+      /* once per browser session for each of the two popups: the way to
+         the offer, then, after the power came on, the offer itself */
+      const mark=chipFw.powerOn(s)?"offer":"unplug";
+      let seen=false;try{seen=sessionStorage.getItem(chipKey)===mark;}catch(_){}
+      if(!seen){try{sessionStorage.setItem(chipKey,mark);}catch(_){}chipFw.prompt(s,startChip);}
     }
   }
   /* this boot's cause is fixed for the whole boot, fetched once, not every refresh */
@@ -5536,7 +5571,7 @@ PAGES.system=async(view,sub)=>{
       actions:[{label:"Close"}]});}},"Restart History");
   paneMaint.append(card("Maintenance","refresh",
     h("div",{class:"rowflex",style:"flex-wrap:wrap;gap:10px"},
-      h("button",{class:"btn sm",onclick:async()=>{if(await confirmModal("Restart WiCAN now?","Reboot")){try{await api("/api/restart",{method:"POST"});}catch{}expectReboot("Restarting");}},},ic("refresh"),"Reboot"),
+      h("button",{class:"btn sm",onclick:async()=>{if(await confirmModal("Restart WiCAN now?","Reboot"))await restartNow();},},ic("refresh"),"Reboot"),
       histBtn,
       h("button",{class:"btn sm",title:"Start over with the first-run wizard: nothing is deleted by itself",onclick:()=>{location.hash="#/setup";}},ic("sparkles"),"Run Quick Setup again"),
       h("button",{class:"btn sm danger",onclick:async()=>{

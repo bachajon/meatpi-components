@@ -784,6 +784,19 @@ a chip down with wire notes, a chip left on V2.3.22, and a self-test pass).
   up before never re-runs the wizard) shows the banner `#chip-fw-banner`
   on every refresh while the chip is outdated and opens the popup once per
   browser session (`sessionStorage`, `wican-chip-prompted-<device id>`).
+  **Since 2026-11-21 (GitHub issue #1075, Ali) the update is offered only
+  in a start that began with the power coming on** (`fw.power_on` on `GET
+  /api/obd_chip`; the device refuses the route otherwise, so a browser
+  that still holds an older page cannot start it either). In any other
+  start `prompt` opens the other popup (`#chip-fw-unplug`: both versions,
+  three numbered steps, unplug WiCAN from the car, wait one minute, plug
+  it back in and open the page again, one button OK), `banner` says the
+  same in one sentence with no button (`data-wait="unplug"`), and the
+  Maintenance card's note (diag.js) likewise. `run` asks the device again
+  before it posts: a page whose copy is from before a restart shows the
+  way to a start from power-on instead of an error. The Status page's
+  once-per-session mark is per popup (`unplug`, then `offer`), so the
+  offer still opens once after the power came on.
   The popup rules (`.qs-pop*`, `.qs-spin`) live in index.html since both
   pages use them. Probes: `probe_chip_prompt.mjs` (six scenes); bench:
   `.	est.ps1 chipprompt`.
@@ -927,6 +940,26 @@ Probe: `tools/webui_preview/probe_can_filters.mjs` (61 checks); on the
 device `.\test.ps1 canfilters`, whose page leg is
 `tools/testbench/obd/can_filters_page.mjs`.
 
+**2026-11-21, evening (Ali's decisions on the open points of #1075):**
+
+- **The self-test asks first while AutoPID polls.** "Run the self-test"
+  reads `/api/autopid`; with `stats.running` true a confirm dialog titled
+  "AutoPID is active" says "AutoPID is polling the vehicle. It pauses for
+  the self-test (about 2 seconds) and carries on afterwards." Cancel runs
+  nothing and frees the button, Continue posts the test. No dialog when
+  AutoPID does not poll. The pause itself is the device's (can_selftest
+  README).
+- **A chip that never answered reads "not checked: the chip did not
+  answer"** on the card's state row (`fw.update.no_answer`), where it read
+  "last update: ESP_ERR_TIMEOUT". Any other failed run keeps "last update:"
+  and the error name.
+- **A restart the device refuses is shown, not waited for.** `api()` puts the
+  HTTP status on the error it throws (`e.status`); `restartNow()` shows a
+  409's text as a toast and returns, and the two inline restarts (the
+  Maintenance card's Reboot, the "reboot to apply" link) call it. A request
+  that dies with the connection is still read as the restart itself.
+
+Probe: `probe_diag.mjs` (46 checks).
 ## Fault codes and the info bubble (2026-11-12)
 
 The device's fault codes (`GET /api/faults`: `boot_errors`, `internal_ram_low`,
