@@ -27,6 +27,7 @@ device instead of starting it again (the crash-loop brake).
 | `restart_tracker_start()` / `_stop()` | Lifecycle uniformity (§3); passive component, both trivial. |
 | `restart_tracker_mark_planned_restart(reason, source, flags)` | Announce an intentional restart without performing it. |
 | `restart_tracker_restart(reason, source, flags)` | Mark + `esp_restart()`. `noreturn`. Use this, never raw `esp_restart()`. |
+| `restart_tracker_set_hold(fn)` / `restart_tracker_held()` | (2026-11-21) a reason not to restart right now, in words, or NULL: one function, set by the composition root (the OBD chip's firmware being written). `restart_tracker_restart()` waits while it names a reason, `RESTART_TRACKER_HOLD_MAX_S` (90 s) at most, then restarts all the same; a route that restarts on a click asks first and answers 409 |
 | `restart_tracker_get_state(out)` | Snapshot everything (history ring included). |
 | `restart_tracker_get_latest_record(out)` | This boot's record. |
 | `*_to_str(...)` | Human-readable reset/planned-reason/source names. |
@@ -75,6 +76,30 @@ Sources: web_ui / cmdline / console / mqtt / ota / safe_mode / config_server
 / sleep_mode / button / pairing / park (the crash park's own timer) / boot
 (the boot path itself: the partition migration restart).
 
+## Not now: the hold (2026-11-21, issue #1075)
+
+Ali, 2026-11-21, on a restart asked for while the OBD chip's firmware is
+being written: "Device blocks it". The tracker cannot know the chip (it sits
+far below it), so the composition root gives it one question to ask:
+`restart_tracker_set_hold(fn)`, where `fn()` returns the reason in words or
+NULL. Two readers:
+
+- `restart_tracker_restart()` waits (250 ms looks, one W line `restart
+  (reason/source) waits: <why>`) while the hold names a reason, then marks
+  and restarts. After `RESTART_TRACKER_HOLD_MAX_S` (90 s) it restarts all the
+  same, with a W line: a job that hangs must not keep the device from
+  restarting. The caller's task waits; nothing else changes for it.
+- `POST /api/restart` asks `restart_tracker_held()` first and answers 409
+  with the reason: a user's click gets an answer, not a silent wait. With
+  `{"force":true}` in the body it restarts all the same
+  (`restart_tracker_hold_bypass()`, one W line `restart (...) forced
+  although: <why>`): the way out when what holds is stuck, and the word the
+  bench uses to interrupt a chip write on purpose. The page never sends it.
+
+A reset nobody plans is not held, and neither is `restart_tracker_mark_planned_restart()`
+alone (the sleep path's own marks: the sleep manager has its own wait for an
+update). No host case: the wait is three lines around a hook; the bench
+stage `chipguard` walks both readers on the device.
 ## The crash note
 
 IDF prints where a crash happened (the Guru Meditation text) on the console

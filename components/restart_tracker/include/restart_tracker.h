@@ -208,7 +208,24 @@ esp_err_t restart_tracker_add_pre_restart_hook(restart_tracker_pre_restart_fn fn
  *  WICAN CAPS boot line and /api/status.health.caps carries it. */
 void restart_tracker_hooks_capacity(size_t *used, size_t *cap);
 
-/** The one sanctioned reboot: mark planned, then esp_restart(). No return. */
+/** A reason not to restart right now, in words, or NULL (2026-11-21, issue
+ *  #1075: no restart while the OBD chip's firmware is being written). The
+ *  composition root sets the one function. restart_tracker_restart() waits
+ *  while it names a reason, RESTART_TRACKER_HOLD_MAX_S at most, and then
+ *  restarts whatever it says: a job that hangs must not keep the device
+ *  from restarting. A route that restarts on a user's click asks
+ *  restart_tracker_held() first and tells the user. */
+#define RESTART_TRACKER_HOLD_MAX_S 90
+typedef const char *(*restart_tracker_hold_fn)(void);
+void restart_tracker_set_hold(restart_tracker_hold_fn fn);
+const char *restart_tracker_held(void);
+/** The next restart_tracker_restart() does not wait for the hold: the way
+ *  out when what holds is stuck, asked for in so many words (the restart
+ *  route's `force`). */
+void restart_tracker_hold_bypass(void);
+
+/** The one sanctioned reboot: wait out a hold (above), mark planned, then
+ *  esp_restart(). No return. */
 void restart_tracker_restart(restart_tracker_planned_reason_t reason,
                              restart_tracker_source_t source,
                              uint32_t flags) __attribute__((noreturn));

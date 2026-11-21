@@ -217,3 +217,15 @@ then ≈1 s flush delay, then
 `restart_tracker_restart(USER_REQUEST, WEB_UI, flags)`: the reboot lands in
 the next boot's history as `planned:true, source:"web_ui"`. Never a raw
 `esp_restart()`.
+
+**Response 409** (2026-11-21): the device may not restart right now, and
+says why. The one reason today: the OBD chip's firmware is being written.
+
+```json
+{ "error": "not now: the OBD chip's firmware is being updated. Try again in a minute" }
+```
+
+Nothing is scheduled. The page shows the text and does not wait for a
+restart. `{"force":true}` in the body restarts all the same (200, as above):
+the way out when what holds is stuck. A chip write cut that way leaves the
+chip in its download mode, and the next start completes it.

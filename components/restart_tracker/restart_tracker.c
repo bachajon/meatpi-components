@@ -40,6 +40,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #include "log_manager.h"
@@ -291,9 +292,70 @@ esp_err_t restart_tracker_mark_planned_restart(restart_tracker_planned_reason_t 
     return err;
 }
 
+/* ---- a reason not to restart right now ------------------------------------------- */
+
+static restart_tracker_hold_fn s_hold_fn; /* set once by the composition root */
+static volatile bool s_hold_bypass;       /* the next restart does not wait */
+
+void restart_tracker_hold_bypass(void)
+{
+    s_hold_bypass = true;
+}
+
+void restart_tracker_set_hold(restart_tracker_hold_fn fn)
+{
+    s_hold_fn = fn;
+}
+
+const char *restart_tracker_held(void)
+{
+    restart_tracker_hold_fn fn = s_hold_fn;
+
+    return (fn != NULL) ? fn() : NULL;
+}
+
+/** Wait while the hold names a reason, RESTART_TRACKER_HOLD_MAX_S at most. */
+static void hold_wait(restart_tracker_planned_reason_t reason,
+                      restart_tracker_source_t source)
+{
+    const char *why = restart_tracker_held();
+
+    if (why == NULL)
+    {
+        return;
+    }
+
+    if (s_hold_bypass)
+    {
+        ESP_LOGW(TAG, "restart (%s/%s) forced although: %s",
+                 restart_tracker_planned_reason_to_str(reason),
+                 restart_tracker_source_to_str(source), why);
+        return;
+    }
+
+    ESP_LOGW(TAG, "restart (%s/%s) waits: %s",
+             restart_tracker_planned_reason_to_str(reason),
+             restart_tracker_source_to_str(source), why);
+
+    int64_t until = esp_timer_get_time() +
+                    (int64_t)RESTART_TRACKER_HOLD_MAX_S * 1000000;
+
+    while (restart_tracker_held() != NULL && esp_timer_get_time() < until)
+    {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    if (restart_tracker_held() != NULL)
+    {
+        ESP_LOGW(TAG, "still held after %d s: restarting all the same",
+                 RESTART_TRACKER_HOLD_MAX_S);
+    }
+}
+
 void restart_tracker_restart(restart_tracker_planned_reason_t reason,
                              restart_tracker_source_t source, uint32_t flags)
 {
+    hold_wait(reason, source);
     restart_tracker_mark_planned_restart(reason, source, flags);
     ESP_LOGI(TAG, "restarting: %s/%s",
              restart_tracker_planned_reason_to_str(reason),
