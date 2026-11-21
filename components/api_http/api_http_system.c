@@ -725,6 +725,7 @@ static esp_err_t report_clear_handler(httpd_req_t *req)
 static esp_err_t restart_handler(httpd_req_t *req)
 {
     uint32_t flags = 0;
+    bool force = false;
 
     if (req->content_len > 0)
     {
@@ -740,9 +741,31 @@ static esp_err_t restart_handler(httpd_req_t *req)
                 flags = (uint32_t)f->valuedouble;
             }
 
+            force = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(in, "force"));
             cJSON_Delete(in);
             free(body);
         }
+    }
+
+    /* not while something says the device must stay up (the OBD chip's
+       firmware being written, 2026-11-21): the user is told here; a restart
+       the firmware plans itself waits in restart_tracker_restart(). `force`
+       is the way out when what holds is stuck (support, the benches); the
+       page never sends it */
+    const char *held = restart_tracker_held();
+
+    if (held != NULL && !force)
+    {
+        char msg[160];
+
+        snprintf(msg, sizeof(msg), "not now: %s. Try again in a minute", held);
+        ESP_LOGW(TAG, "restart refused: %s", held);
+        return api_send_error(req, "409 Conflict", msg);
+    }
+
+    if (held != NULL)
+    {
+        restart_tracker_hold_bypass();
     }
 
     ESP_LOGW(TAG, "reboot requested via /api/restart (flags=%lu)",
