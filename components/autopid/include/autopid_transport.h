@@ -65,6 +65,16 @@ typedef struct
      *  ends one after 5 s without a request: the poller asks something in
      *  time while it has nothing else to ask. NULL = no such notion. */
     uint32_t  (*kline_idle_ms)(void);
+    /** True while the chip is kept for a firmware update (obd_chip,
+     *  2026-11-21): the poller stays off it, as it does for an app, and
+     *  sends its baseline again afterwards (the chip comes back through a
+     *  fresh bring-up). NULL = no such notion. */
+    bool      (*kept_for_update)(void);
+    /** How many tasks wait for the chip right now (obd_chip, 2026-11-21: a
+     *  claim is polled, and the poller claims again at once). The poller
+     *  leaves a gap before its next request while this is above zero.
+     *  NULL = no such notion. */
+    uint8_t   (*waiters)(void);
 } ap_transport_t;
 
 /** The OBD transport (never NULL). */

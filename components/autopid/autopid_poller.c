@@ -59,6 +59,8 @@
 static const char *TAG = "autopid";
 
 #define AP_IDLE_WAIT     pdMS_TO_TICKS(500)
+/* the gap left for a task that waits for the chip: three of its 10 ms looks */
+#define AP_WAITER_GAP_MS 30
 
 /* the due entry's parameter slice, copied under the core's lock and
    consumed by the poller task alone: PSRAM, not a stack frame: at
@@ -81,6 +83,7 @@ static volatile bool s_paused_client;     /* an app is driving the chip */
 static volatile bool s_scan_pause;        /* std scan owns the chip     */
 static volatile bool s_paused_diag;       /* a diagnostic tool holds the bus (obd_gate) */
 static volatile bool s_paused_bus;        /* the bus guard: nothing may be sent */
+static volatile bool s_paused_chip_fw;    /* the chip is kept for a firmware update */
 static QueueHandle_t s_batt_q;            /* voltage-pause events, or NULL */
 static int64_t s_last_ok_us; /* last successful ECU poll (0 = never) */
 /* THIS task left the chip on another bus (autopid_bus.h) for the rows that
@@ -170,7 +173,8 @@ static void poller_task(void *arg)
             if (diag)
             {
                 ESP_LOGI(TAG, "paused: a diagnostic tool holds the bus "
-                              "(UDS Tool / J2534 exclusive)");
+                              "(UDS Tool, J2534 exclusive, a script, the CAN "
+                              "self-test)");
             }
             else
             {
@@ -186,7 +190,37 @@ static void poller_task(void *arg)
             }
         }
 
-        if (s_bus_out && !s_paused_client &&
+        /* the OBD chip's firmware is being updated (issue #1075, Ali,
+         * 2026-11-21: nobody talks to the chip from the update's first step
+         * until the chip is up again). Read before a row is picked, so the
+         * poll in flight ends and no new one begins; the update waits for
+         * this task's idle bit before it takes the chip. Afterwards the
+         * chip is fresh from a bring-up: the baseline first. */
+        bool chip_fw = (ap_be()->kept_for_update != NULL) &&
+                       ap_be()->kept_for_update();
+
+        if (chip_fw != s_paused_chip_fw)
+        {
+            s_paused_chip_fw = chip_fw;
+
+            if (chip_fw)
+            {
+                ESP_LOGI(TAG, "paused: the OBD chip's firmware is being "
+                              "updated");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "resumed: the OBD chip's firmware update ended");
+
+                if (ap_core_enabled() && !s_paused_voltage && !s_scan_pause &&
+                    !s_paused_client && !s_paused_diag)
+                {
+                    ap_runner_restore_baseline();
+                }
+            }
+        }
+
+        if (s_bus_out && !s_paused_client && !s_paused_chip_fw &&
             (!ap_core_enabled() || s_paused_voltage || s_scan_pause ||
              s_paused_diag))
         {
@@ -208,7 +242,7 @@ static void poller_task(void *arg)
          * without enabled; TASK_dtc.md §5). Voltage pause gates it: a
          * weak battery is no time for bus traffic; the client pause too. */
         if (!s_paused_voltage && !s_scan_pause && !s_paused_client &&
-            !s_paused_diag)
+            !s_paused_diag && !s_paused_chip_fw)
         {
             ap_dtc_periodic_check();
         }
@@ -220,7 +254,7 @@ static void poller_task(void *arg)
          * pause_mode "all": a weak battery is about bus traffic. */
         bool enabled = ap_core_enabled();
         bool chip_ok = enabled && !s_paused_voltage && !s_scan_pause &&
-                       !s_paused_client && !s_paused_diag;
+                       !s_paused_client && !s_paused_diag && !s_paused_chip_fw;
         bool passive_ok = enabled &&
                           !(s_paused_voltage && ap_settings_pause_all());
         /* the rows on a bus of the chip's own (autopid_bus.h) wait for the
@@ -256,6 +290,18 @@ static void poller_task(void *arg)
             dev_status_manager_set(DEV_STATUS_BIT_AUTOPID_IDLE);
             ulTaskNotifyTake(pdTRUE, AP_IDLE_WAIT);
             continue;
+        }
+
+        /* somebody waits for the chip (the console, a test request from the
+         * page): a claim is polled, and this task claims again within
+         * microseconds of its release, so a table that polls without a
+         * pause kept a single requester out for seconds (bench 2026-11-21:
+         * half the console's version reads got no answer under 29 rows in
+         * one group). Leave it a gap longer than its 10 ms look. */
+        if (chip_ok && ap_be()->waiters != NULL && ap_be()->waiters() > 0)
+        {
+            stats->yields++;
+            vTaskDelay(pdMS_TO_TICKS(AP_WAITER_GAP_MS));
         }
 
         /* pick the next due entry under the lock; copy what we need */
@@ -519,6 +565,7 @@ void ap_poller_pauses(autopid_stats_t *out)
     out->paused_client = s_paused_client;
     out->paused_diag = s_paused_diag;
     out->paused_bus = s_paused_bus;
+    out->paused_chip_fw = s_paused_chip_fw;
 }
 
 int64_t ap_poller_last_ok_us(void)

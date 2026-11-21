@@ -119,6 +119,8 @@ static esp_err_t autopid_get_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(stats, "paused_client", st.paused_client);
     cJSON_AddBoolToObject(stats, "paused_diag", st.paused_diag);
     cJSON_AddBoolToObject(stats, "paused_bus", st.paused_bus);
+    cJSON_AddBoolToObject(stats, "paused_chip_fw", st.paused_chip_fw);
+    cJSON_AddNumberToObject(stats, "yields", st.yields);
     ap_guard_status_json(o);
     cJSON_AddNumberToObject(stats, "polls_ok", st.polls_ok);
     cJSON_AddNumberToObject(stats, "polls_failed", st.polls_failed);

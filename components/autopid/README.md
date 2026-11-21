@@ -33,7 +33,21 @@ Decisions log there is authoritative; the big ones:
   likewise `stats.paused_diag` / `(paused for a diagnostic tool)` while the
   UDS Tool or J2534 holds the bus through their Exclusive bus option
   (obd_gate's diagnostics hold, 2026-09-16: polls AND DTC scans pause, the
-  chip baseline is restored on resume)
+  chip baseline is restored on resume); and `stats.paused_chip_fw` / `(the
+  OBD chip's firmware is being updated)` while `obd_chip_kept_for_update()`
+  reads true (2026-11-21, GitHub issue #1075: nobody talks to the chip from
+  the update's first step until the chip is up again). The transport's
+  `kept_for_update` hook, read at the head of every lap: the poll in flight
+  ends, no new one begins, the K-line keep-alive and the DTC schedule rest
+  too, a row that left the chip on another bus is not taken home (the
+  update warm-starts the chip anyway), and the update job waits for this
+  task's idle bit before it takes the chip, so no poll fails because of an
+  update. On resume the baseline goes out first: the chip is fresh from a
+  bring-up. I lines `paused: the OBD chip's firmware is being updated` /
+  `resumed: the OBD chip's firmware update ended`. Passive rows (J1939
+  groups read from the listener's store) go on. Bench: `.\test.ps1
+  chipguard` (paused from 0.8 s behind the request for the whole job,
+  `polls_failed` unchanged)
   in the `autopid` console command and INFO lines `paused: external OBD
   client active` / `resumed: external OBD client idle`. On resume the
   poller first re-sends the protocol prelude (`ap_std_prelude()`:
@@ -53,6 +67,18 @@ Decisions log there is authoritative; the big ones:
   (enable, per-type enables, init strings, pause voltage, min event
   interval: reboot-to-apply like every component).
 
+**A gap for a task that waits (2026-11-21).** The poller claims the chip
+for every request and claims again within microseconds of its release; a
+claim is polled (obd_chip README, Claim model), so under a table that keeps
+the poller busy without a pause a single requester found the chip free only
+by luck. The transport's `waiters` hook (`obd_chip_waiters()`) is read at the
+head of every lap that may use the chip: above zero, the poller sleeps
+`AP_WAITER_GAP_MS` (30 ms, three of the waiter's looks) before it picks its
+next row, and counts it in `stats.yields`. No row is skipped: the round is
+that much later. The diagnostics hold's line now names its users in full:
+`paused: a diagnostic tool holds the bus (UDS Tool, J2534 exclusive, a
+script, the CAN self-test)`; the CAN self-test takes that hold since the
+same day.
 ## API (`include/autopid.h`)
 
 - `autopid_init()` / `_start()` / `_stop()`: settings + log descriptor; the
