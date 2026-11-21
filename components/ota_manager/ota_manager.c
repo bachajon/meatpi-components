@@ -429,6 +429,13 @@ esp_err_t ota_manager_status(ota_manager_status_t *out)
     return ESP_OK;
 }
 
+bool ota_manager_busy(void)
+{
+    ota_manager_state_t st = s_session.state; /* one word, no lock */
+
+    return st == OTA_MANAGER_RECEIVING || st == OTA_MANAGER_READY;
+}
+
 const char *ota_manager_img_state_str(int esp_ota_img_state)
 {
     switch (esp_ota_img_state)

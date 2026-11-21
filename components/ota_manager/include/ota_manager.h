@@ -45,6 +45,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -102,6 +103,11 @@ esp_err_t ota_manager_abort(void);
 
 /** Snapshot for progress/diagnostics (GET /api/ota/status). */
 esp_err_t ota_manager_status(ota_manager_status_t *out);
+
+/** True while a session receives an image, or has ended well with its
+ *  restart due (RECEIVING, READY). One word read, no lock: the sleep
+ *  manager asks once a second and stays awake meanwhile (2026-11-21). */
+bool ota_manager_busy(void);
 
 /** State-change notification (RECEIVING at begin, READY/FAILED/IDLE at
  *  end/abort). Runs in the TRANSPORT's context, outside the session lock:

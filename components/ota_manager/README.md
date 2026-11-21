@@ -24,6 +24,7 @@ update is a different mechanism (`obd_chip_firmware_update`).
 | `ota_manager_end()` | Compares the digest when one was expected, validates (esp_ota magic + digest), sets the boot partition → READY. The TRANSPORT then reboots via `restart_tracker_restart(OTA_APPLY, <source>)`. |
 | `ota_manager_abort()` | Drop the session; the running firmware is untouched. |
 | `ota_manager_status(*out)` | state / received / total / error / target partition / the image's `project_name` and `version` once its head is in / `piped` (feeds `GET /api/ota/status`). |
+| `ota_manager_busy()` | (2026-11-21) true while a session receives an image or has ended well with its restart due (`RECEIVING`, `READY`); one word read, no lock. `sleep_manager` asks once a second and stays awake meanwhile: a sleep entry in the middle of an upload aborted the session and left the device asleep on the old image (bench, issue #1075). |
 | `ota_manager_pipe_begin/write/end/abort` | 2026-10-18 (`ota_pipe.c`): the session for a producer on a PSRAM stack (fw_update's download task). Begin, every write, end and abort run on a 5 KB internal-stack writer created for the session (its stack goes back to the heap at end or abort); the producer copies into two 4 KB PSRAM slots and blocks while both are full. One session at a time with the direct API: an upload while the pipe receives (or the other way round) is `ESP_ERR_INVALID_STATE`. |
 | `ota_manager_img_state_str(st)` | `new` / `pending_verify` / `valid` / `invalid` / `aborted` / `undefined`. |
 
