@@ -97,12 +97,17 @@ countdown naming the floor).
 
 ## Entry sequence
 
+A firmware update still running is waited for first, the OBD chip's or the
+device's own image (`sm_update_wait()`, `sleep_manager_update.c`, 180 s at
+most; "The OBD chip firmware update holds the same way" below) →
 `sleep.entering {volts}` event (rules get one last MQTT/HTTP shot,
 BEFORE radios stop) → wait for autopid idle (≤20 s, only if enabled) →
 **main's prepare callback** (`main/main_sleep.c`: autopid,
 data_logger, mqtt, vpn, mdns, wifi, ble, external_storage, the
 composition root owns the order, so this component depends on none of
-them) → CAN transceiver standby (GPIO38) → obd_chip_sleep(true) (since
+them; its own dependencies are `battery_monitor`, `obd_chip`, since
+2026-11-21 `ota_manager` (a core service: is an image being received),
+`dev_status_manager`, `restart_tracker` and `event_manager`) → CAN transceiver standby (GPIO38) → obd_chip_sleep(true) (since
 2026-11-07 the `STSLEEP0` word to the chip first, what 4.x sent at every
 sleep, then the sleep pin; the chip's README "The sleep word") → USB
 power rail held low (GPIO10, open-drain + hold). Pins via Kconfig
@@ -158,11 +163,27 @@ has a note. **The OBD chip firmware update holds the same way (Ali,
 while it is true (the Quick Setup prompt, the Maintenance card and the
 console all run the same job; the flag covers the stream and the chip's
 fresh bring-up after it), one I line per update; `activity_why` on the
-status (`log` or `chip_update`, "" with none) says which of the two gave
+status (`log`, `chip_update` or, since 2026-11-21, `fw_update`; "" with none) says which gave
 the extension, the bar reads "Kept awake while the OBD chip firmware is
 updated". The entry sequence still waits for a running job
 (`SM_FW_UPDATE_WAIT_MS`), so a countdown that was already due when the
-job started does not pull the chip's pin under a half-written image. The store-and-forward bench
+job started does not pull the chip's pin under a half-written image.
+**The device's own image holds the same way since 2026-11-21 (Ali, GitHub
+issue #1075: no sleep while the ESP32 or the OBD chip is updated):**
+`sm_update_busy()` (`sleep_manager_update.c`, where the chip's check and
+the entry's wait moved to, the 700-line rule) also asks
+`ota_manager_busy()`: true while an `ota_manager` session receives an
+image, whoever feeds it (the page's upload, an update job's download), and
+from its last byte until the restart into it. Reproduced on the firmware
+before: a countdown that ran out 14 s into an upload put the device to
+sleep, `update session aborted`, and it woke later on the old image. Now
+the countdown is pushed out while the session runs (`activity_why`
+`fw_update`, the bar reads "Kept awake while the firmware is updated", one
+I line `firmware update while a countdown runs: held awake ...`) and an
+entry that begins all the same (the critical floor, the bench's forced
+sleep) waits for it, bounded like the chip's (`firmware update in
+progress: sleep waits for it (up to 180 s)`). Bench: `.\test.ps1
+uploadconfirm` leg U5. The store-and-forward bench
 (`tools/testbench/ha/ha_history_backfill_bench.py`) holds the device at
 12.5 V while the integration pulls and reads the deadline move.
 

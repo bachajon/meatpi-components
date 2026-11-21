@@ -43,7 +43,6 @@
 #include "battery_monitor.h"
 #include "dev_status_manager.h"
 #include "log_manager.h"
-#include "obd_chip.h"
 #include "restart_tracker.h"
 
 #include "sleep_manager_private.h"
@@ -83,9 +82,13 @@ static uint8_t  s_holds_used;                 /* per boot */
  * under s_lock like the hold; the httpd task brings the reads. */
 static sm_activity_t s_activity;
 /* what holds it (the status's `activity_why`): "log" for a log read,
- * "chip_update" for the OBD chip firmware update (2026-11-08) */
+ * "chip_update" for the OBD chip firmware update (2026-11-08), "fw_update"
+ * for the device's own image (2026-11-21) */
+const char SM_WHY_LOG[] = "log";
+const char SM_WHY_CHIP_UPDATE[] = "chip_update";
+const char SM_WHY_FW_UPDATE[] = "fw_update";
 static const char *s_activity_why = "";
-static bool        s_chip_hold_logged;
+static bool        s_update_hold_logged;
 
 /* ---- sleep entry / nap loop ---------------------------------------------- */
 
@@ -111,26 +114,11 @@ static const char *state_name(sleep_manager_state_t st)
     }
 }
 
-/* A chip firmware update owns the chip's wire for about 90 s (3557 records);
- * the sleep entry pulls the chip's sleep pin, and a half-written image
- * strands the chip in its bootloader (issue #1023, 2026-10-28). Bounded:
- * a wedged update must never hold a flat battery awake for good. */
-#define SM_FW_UPDATE_WAIT_MS (180 * 1000)
-
 static void enter_sleep_sequence(float volts)
 {
-    if (obd_chip_update_in_progress())
-    {
-        ESP_LOGW(TAG, "OBD chip firmware update in progress: sleep waits "
-                 "for it (up to %u s)", SM_FW_UPDATE_WAIT_MS / 1000u);
-
-        for (uint32_t waited = 0;
-             obd_chip_update_in_progress() && waited < SM_FW_UPDATE_WAIT_MS;
-             waited += 1000)
-        {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-    }
+    /* a firmware update still running, the OBD chip's or the device's own
+       image: waited for, bounded (sleep_manager_update.c) */
+    sm_update_wait();
 
     ESP_LOGW(TAG, "entering sleep (%.2f V)", volts);
     sm_events_entering(volts); /* rules get one shot BEFORE teardown */
@@ -216,12 +204,13 @@ static void publish_pending(uint32_t now)
 
 /* ---- state task -------------------------------------------------------------- */
 
-/* The OBD chip firmware update (Ali, 2026-11-08: no sleep while it runs).
- * The entry sequence already waits for a running job; this keeps a running
- * countdown away from it in the first place: pushed out a minute at a
- * time, under the activity hold's cap, while the chip is written and
- * brought up again. Under s_lock. */
-static void hold_for_chip_update(uint32_t now)
+/* A firmware update (Ali, 2026-11-08: no sleep while the OBD chip is
+ * updated; 2026-11-21: nor while the device's own image is). The entry
+ * sequence already waits for a running one; this keeps a running countdown
+ * away from it in the first place: pushed out a minute at a time, under the
+ * activity hold's cap, while it runs (the chip's: written and brought up
+ * again; the image's: received, until the restart into it). Under s_lock. */
+static void hold_for_update(uint32_t now, const char *why)
 {
     if (!sm_activity_apply(&s_policy, s_run, &s_crit, &s_activity, now,
                            SM_ACTIVITY_HOLD_MS, SM_ACTIVITY_CAP_MS))
@@ -229,14 +218,14 @@ static void hold_for_chip_update(uint32_t now)
         return; /* nothing counts: nothing to hold */
     }
 
-    s_activity_why = "chip_update";
+    s_activity_why = why;
 
-    if (!s_chip_hold_logged)
+    if (!s_update_hold_logged)
     {
-        ESP_LOGI(TAG, "OBD chip firmware update while a countdown runs: held "
-                 "awake %u s at a time, %u min at most",
+        ESP_LOGI(TAG, "%s while a countdown runs: held awake %u s at a time, "
+                 "%u min at most", sm_update_name(why),
                  SM_ACTIVITY_HOLD_MS / 1000u, SM_ACTIVITY_CAP_MS / 60000u);
-        s_chip_hold_logged = true;
+        s_update_hold_logged = true;
     }
 }
 
@@ -353,14 +342,16 @@ static void state_task(void *arg)
         }
         else
         {
-            /* the chip update's hold, read once a lap (2026-11-08) */
-            if (obd_chip_update_in_progress())
+            /* an update's hold, read once a lap (2026-11-08, 2026-11-21) */
+            const char *update = sm_update_busy();
+
+            if (update != NULL)
             {
-                hold_for_chip_update(now);
+                hold_for_update(now, update);
             }
             else
             {
-                s_chip_hold_logged = false;
+                s_update_hold_logged = false;
             }
 
             /* here too: with sleep disabled the floor is the only countdown */
@@ -588,7 +579,7 @@ esp_err_t sleep_manager_activity(uint32_t seconds)
 
     if (counting)
     {
-        s_activity_why = "log";
+        s_activity_why = SM_WHY_LOG;
         publish_pending(now);
     }
 

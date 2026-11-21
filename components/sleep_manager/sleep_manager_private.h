@@ -240,6 +240,22 @@ bool sleep_settings_is_configured(void); /* boot apply ran (standard §4.3) */
  *  the nap's number (the fault's detail), @p resleeps the status counter. */
 void sm_nap_verify_chip(uint32_t nap, uint32_t *resleeps);
 
+/* ---- sleep_manager_update.c: no sleep while firmware is written ------------ */
+
+/* what holds a countdown (the status's `activity_why`); compared by address */
+extern const char SM_WHY_LOG[];         /* "log": a log read                  */
+extern const char SM_WHY_CHIP_UPDATE[]; /* "chip_update": the OBD chip's      */
+extern const char SM_WHY_FW_UPDATE[];   /* "fw_update": the device's own image */
+
+/** The update running now (one of the two SM_WHY_ words), or NULL. */
+const char *sm_update_busy(void);
+
+/** Its name for a log line ("OBD chip firmware update", "firmware update"). */
+const char *sm_update_name(const char *why);
+
+/** The entry sequence's wait for a running update, bounded. */
+void sm_update_wait(void);
+
 /* ---- glue ----------------------------------------------------------------- */
 
 void sm_events_register(void);
