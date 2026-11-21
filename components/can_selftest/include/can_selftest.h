@@ -48,7 +48,7 @@ extern "C" {
 #endif
 
 #define CAN_SELFTEST_STEPS 3
-#define CAN_SELFTEST_LINES 12
+#define CAN_SELFTEST_LINES 16 /* 15 used since 2026-11-21 (AutoPID's line, ATD, ATE0) */
 #define CAN_SELFTEST_LINE  80
 
 /** What the chip printed to the request, classified (pure, host-tested). */

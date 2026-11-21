@@ -33,9 +33,13 @@ its own line (Ali, 2026-10-28: a live bus runs, reported as `live`).
    (`can_manager_probe`: silent or live both run; unreadable refuses). A
    listen-only node on a silent `auto` bus adopts the configured bitrate
    (500 when auto) so it may transmit; `can_manager_tx_ready` decides.
-2. The ESP32 subscribes a queue to 7DF and reads the TWAI counters.
-3. The chip, in one transaction (`obd_chip_txn_begin`; `obd_chip_client_touch`
-   makes AutoPID yield): `ATTP6` (500 kbit/s) or `ATTP8` (250), `ATH1`,
+2. AutoPID is taken off the chip (2026-11-21, below): `obd_gate_diag_hold`,
+   then `obd_gate_diag_wait_ack` for up to 3 s, the poller's word that its
+   poll in flight has ended. The exchange carries the line `apid   off the
+   chip for the test (N ms)`. Then the ESP32 subscribes a queue to 7DF and
+   reads the TWAI counters.
+3. The chip, in one transaction (`obd_chip_txn_begin`): `ATD` and `ATE0`
+   (its defaults, below), `ATTP6` (500 kbit/s) or `ATTP8` (250), `ATH1`,
    `ATSH 7DF`, `ATCAF1`, then `010C` written raw (`obd_chip_send`) while this
    task plays the ECU: the 7DF frame `[02 01 0C]` arrives on the queue within
    400 ms, the reply `7EF [04 41 0C 1A F8]` goes out (`can_manager_send`),
@@ -59,6 +63,57 @@ its own line (Ali, 2026-10-28: a live bus runs, reported as `live`).
 Three steps with their ms and the exchange line by line are kept for the
 card and the console; a failed test logs W, never E (a user-run diagnostic).
 
+### AutoPID is off the chip, and the chip at its defaults (2026-11-21, Ali)
+
+Ali, 2026-11-21: "The canselftest should pause the Autopid, but we should
+warn user with a popup if Autopid is active". Until then the test kept
+AutoPID out by its transaction's claim alone and took the chip as it found
+it. Measured that day on the bench unit, whose table polls without a pause
+(29 rows in one 1000 ms group, 13 of them with an ECU of their own), 24 tests
+in a row: **12 failed.**
+
+- **Nine ended with a hardware verdict on healthy hardware**: "the ESP32
+  answered but the chip never printed it: the ESP32's transmit path or its
+  standby pin". The ESP32 had heard the chip's request and answered it; the
+  chip printed `NO DATA`. Cause: the chip still carried the receive filter of
+  the profile row polled last. A row with an ECU of its own sets one in its
+  init (`ATSP6;ATSH746;...;ATCRA7B0;`), nothing takes it away behind the
+  poll, and a chip that accepts 7B0 alone drops the ESP32's 7EF and the
+  car's 7E8. Proven by hand (`internal/issue_1075/tools/selftest_state.py`,
+  AutoPID off, the state set through /ws/obd): `ATTP6;ATSH746;...;ATCRA7B0`
+  fails every time; a 29 bit filter does not (the test's own change to an 11
+  bit protocol clears it); `ATCRA7EF` passes with the ESP32's line alone.
+- **Three were refused** with "the OBD chip could not be claimed": a claim
+  is polled, and the poller took the chip again ahead of the test's next
+  10 ms look.
+
+What the test does now:
+
+- **The diagnostics hold** (`obd_gate_diag_hold`, the hold the UDS Tool, the
+  J2534 server and a script take) before anything listens, and the poller's
+  acknowledgement (`obd_gate_diag_wait_ack`, 3 s at most; without it the test
+  goes on and says so in its exchange). AutoPID logs `paused: a diagnostic
+  tool holds the bus (...)` and `resumed: the diagnostic tool released the
+  bus`, counts no failed poll, and sends its baseline again on its own. The
+  hold is released on every way out (a refused subscription, a refused
+  claim, the end).
+- **The chip's defaults first**: `ATD`, then `ATE0` (the bring-up had the
+  echo off), ahead of `ATTPn`, `ATH1`, `ATSH 7DF`, `ATCAF1`. ATD clears the
+  receive filter, the headers, the timing and the flow control, whoever set
+  them: AutoPID, an app that left ten seconds ago, a script.
+- The ESP32's queue is emptied (`xQueueReset`) right before the chip is
+  asked. The chip's own request arrives within a millisecond of the write,
+  so a 7DF frame from before it is somebody else's.
+
+With the hold alone 3 tests of 30 still failed (the filter); with the
+defaults as well: see `testing/canselftest.md` in the firmware repo. The
+exchange grew by three lines (`apid`, `ATD`, `ATE0`): `CAN_SELFTEST_LINES`
+is 16.
+
+The page asks before it starts a test while AutoPID polls (web_ui_v2
+README, the diagnostics cards). The console and the route run the test
+without asking: the pause is the device's, the question is the page's.
+
 ## Surfaces
 
 - `POST /api/can/selftest` -> 202 `{"started":true}` (409 while a run is in
@@ -79,6 +134,7 @@ card and the console; a failed test logs W, never E (a user-run diagnostic).
 ## Dependencies
 
 can_manager, obd_chip (both must be init'd and started by main first),
+obd_gate (the diagnostics hold that takes AutoPID off the chip),
 settings_manager, log_manager, cmdline_manager, http_server_manager.
 
 ## Memory footprint (estimated)

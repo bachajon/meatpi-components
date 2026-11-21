@@ -10,7 +10,7 @@ idf_component_register(
     # request over the CAN pair they share (issue #1023, 2026-10-28). Above
     # both can_manager and obd_chip; main wires the routes, the settings
     # apply registers the console command (§6b).
-    PRIV_REQUIRES can_manager obd_chip settings_manager log_manager
+    PRIV_REQUIRES can_manager obd_chip obd_gate settings_manager log_manager
                   cmdline_manager http_server_manager esp_http_server
                   esp_timer
 )

@@ -29,8 +29,12 @@
  *   1. preconditions: the CAN bus running, the chip up and idle (no app on
  *      it), the bus readable (silent or live, both run; unreadable refuses);
  *      a listen-only node on a silent `auto` bus adopts the bitrate first
- *   2. the ESP32 subscribes to 7DF and reads the TWAI counters
- *   3. the chip, in one transaction: ATTPn (the bus bitrate), ATH1, ATSH 7DF,
+ *   2. AutoPID off the chip (obd_gate's diagnostics hold, acknowledged by
+ *      the poller once its poll in flight has ended); the ESP32 subscribes
+ *      to 7DF and reads the TWAI counters
+ *   3. the chip, in one transaction: ATD and ATE0 (its defaults: a filter
+ *      the last user left would drop every answer), ATTPn (the bus bitrate),
+ *      ATH1, ATSH 7DF,
  *      then `010C` written raw while this task plays the ECU: the 7DF frame
  *      [02 01 0C] arrives on the queue, the reply 7EF [04 41 0C 1A F8] goes
  *      out, the chip's output is collected to its prompt
@@ -57,6 +61,7 @@
 #include "can_manager.h"
 #include "log_manager.h"
 #include "obd_chip.h"
+#include "obd_gate.h"
 
 static const char *TAG = "can_selftest";
 
@@ -64,12 +69,14 @@ static const char *TAG = "can_selftest";
 #define CST_REPLY_ID    0x7EFu /* ECU number 8's response id: no car uses it */
 #define CST_WAIT_REQ_MS 400    /* the chip's request on the ESP32's queue    */
 #define CST_WAIT_OUT_MS 900    /* the chip's output to its prompt            */
+#define CST_WAIT_APID_MS 3000  /* AutoPID's poll in flight, to its end       */
 #define CST_RPM_A       0x1A   /* 1726 rpm: (0x1A * 256 + 0xF8) / 4          */
 #define CST_RPM_B       0xF8
 
 /* the job's result (~1.5 KB) and the exchange's chip output: PSRAM (§2) */
 static can_selftest_result_t s_last EXT_RAM_BSS_ATTR;
 static volatile bool s_running;
+static const char s_diag_token = 0; /* this tool's identity for obd_gate's hold */
 
 static const char *const STEP_NAMES[CAN_SELFTEST_STEPS] =
 {
@@ -250,6 +257,26 @@ static void run(can_selftest_result_t *r)
         goto out;
     }
 
+    /* AutoPID off the chip before anything listens (Ali, 2026-11-21: the
+       self-test pauses AutoPID): the diagnostics hold every ESP-side tool
+       takes, and the poller's word that its poll in flight has ended. Until
+       then only the transaction's claim kept the poller out, a claim the
+       test had to win against a poller that leaves no gap: on the bench 3
+       tests of 24 under a table polled without a pause were refused with
+       "the OBD chip could not be claimed". (The 9 hardware verdicts of the
+       same 24 had another cause: the chip's state, below.) The poller sends
+       its baseline again when the hold ends. */
+    uint32_t t_hold = now_ms();
+
+    obd_gate_diag_hold(&s_diag_token, true);
+
+    bool apid_off = obd_gate_diag_wait_ack(CST_WAIT_APID_MS);
+
+    line(r, "apid   %s (%lu ms)",
+         apid_off ? "off the chip for the test"
+                  : "did not say it is off the chip; the test goes on",
+         (unsigned long)(now_ms() - t_hold));
+
     /* 2. the ESP32 side: the request's queue and the counters before */
     QueueHandle_t q = xQueueCreate(8, sizeof(can_core_frame_t));
     int sub = -1;
@@ -257,6 +284,7 @@ static void run(can_selftest_result_t *r)
     if (q == NULL || can_manager_subscribe_queue(q, CST_REQ_ID, 0x7FF, false,
                                                  false, &sub) != ESP_OK)
     {
+        obd_gate_diag_hold(&s_diag_token, false);
         refuse(r, "no CAN subscription slot free");
 
         if (q != NULL)
@@ -270,13 +298,14 @@ static void run(can_selftest_result_t *r)
     (void)can_manager_subscriber_name(sub, "can_selftest");
     can_core_stats_t before = cs.stats;
 
-    /* 3. the chip side, one transaction; AutoPID yields as for an app */
+    /* 3. the chip side, one transaction */
     QueueHandle_t cq = xQueueCreate(32, sizeof(obd_chunk_t));
     esp_err_t err = (cq != NULL) ? obd_chip_txn_begin(pdMS_TO_TICKS(3000))
                                  : ESP_ERR_NO_MEM;
 
     if (err != ESP_OK)
     {
+        obd_gate_diag_hold(&s_diag_token, false);
         refuse(r, (err == ESP_ERR_INVALID_STATE)
                       ? "the OBD chip is busy (a monitor or an update)"
                       : "the OBD chip could not be claimed");
@@ -295,7 +324,17 @@ static void run(can_selftest_result_t *r)
        AutoPID's requests out for the 2 s, and the mark would make the next
        run refuse itself as "an app is using the chip" */
     uint32_t t1 = now_ms();
-    bool prepped = chip_cmd(r, proto) && chip_cmd(r, "ATH1") &&
+    /* The chip as its last user left it is not the chip the test needs. A
+       profile row with its own ECU leaves its receive filter behind its poll
+       (`ATCRA7B0`), and the chip then drops the ESP32's 7EF and the car's
+       answers alike: NO DATA, which the verdict reads as "the ESP32's
+       transmit path". Bench 2026-11-21: that state set by hand failed every
+       time, 9 tests of 24 under a polled profile before the hold, 3 of 30
+       with it. So: the chip's defaults first (ATD clears the filter, the
+       headers, the timing and the flow control), the echo off again as the
+       bring-up left it, then the test's own words. */
+    bool prepped = chip_cmd(r, "ATD") && chip_cmd(r, "ATE0") &&
+                   chip_cmd(r, proto) && chip_cmd(r, "ATH1") &&
                    chip_cmd(r, "ATSH 7DF") && chip_cmd(r, "ATCAF1");
 
     if (!prepped)
@@ -303,8 +342,12 @@ static void run(can_selftest_result_t *r)
         line(r, "chip   the preparation was refused; the test goes on");
     }
 
-    /* the request, written raw so this task is free to play the ECU */
+    /* the request, written raw so this task is free to play the ECU. A 7DF
+       frame that reached the ESP32's queue before the chip was asked cannot
+       be the chip's request (the chip's own arrives within a millisecond of
+       the write): dropped */
     obd_chip_subscribe(cq, "can_selftest");
+    xQueueReset(q);
     obd_chip_send((const uint8_t *)"010C\r", 5);
     line(r, "chip   010C  (sent)");
 
@@ -388,6 +431,7 @@ static void run(can_selftest_result_t *r)
 
     obd_chip_txn_end();
     obd_chip_settings_changed(); /* ATD: AutoPID's prelude goes out again */
+    obd_gate_diag_hold(&s_diag_token, false);
     vQueueDelete(cq);
     can_manager_unsubscribe_queue(sub);
     vQueueDelete(q);
