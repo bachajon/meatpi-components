@@ -256,6 +256,26 @@ esp_err_t fw_update_stop(void);
  */
 esp_err_t fw_update_boot_check(void);
 
+/**
+ * BOOT PATH, on the boot task (an internal stack: one otadata write), after
+ * fw_update_init() and BEFORE obd_chip_start(). A running image the
+ * bootloader still holds as new is confirmed to it here (Ali, 2026-11-21,
+ * issue #1075). Until then it stayed pending until the run had settled
+ * (ten minutes), a planned restart or the first sleep entry, and a power
+ * cut in between made a bootloader with the rollback option start the
+ * previous firmware again: after an update from 6.0.0-beta.5 that firmware
+ * writes its older chip firmware over the chip's and pulses the chip's
+ * reset line (measured on the bench). From this call on no power cut brings
+ * the previous firmware back, and the OBD chip has not heard a word from
+ * the new one yet. What stays: an image that crashes before it gets here
+ * still falls back in the bootloader, and an update job's image that
+ * crashes three times before it settled is still rolled back by the boot
+ * path (fw_update_boot_check; its record stays pending until the
+ * milestone). Change-guarded: no flash access when the image is confirmed
+ * already. ESP_OK also then.
+ */
+esp_err_t fw_update_confirm_start(void);
+
 /** Ask for a manifest check now. ESP_ERR_INVALID_STATE while an install
  *  runs; a running check answers ESP_OK with its job id. */
 esp_err_t fw_update_check_now(uint32_t *job_id);

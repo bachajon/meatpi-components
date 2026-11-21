@@ -261,6 +261,38 @@ void fwu_verify_now(const char *why)
     }
 }
 
+esp_err_t fw_update_confirm_start(void)
+{
+    if (!FWU->inited)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!FWU->slots.pending_verify)
+    {
+        return ESP_OK; /* confirmed long ago: no flash access */
+    }
+
+    /* the boot task's stack is internal: both run in line */
+    esp_err_t err = ota_manager_confirm_running();
+
+    fwu_slots_read_fn(&FWU->slots);
+
+    if (err != ESP_OK || FWU->slots.pending_verify)
+    {
+        /* the milestone and the pre-restart hook try again */
+        ESP_LOGW(TAG, "the new image could not be confirmed at the start "
+                 "(%s): a power cut can still bring the previous firmware "
+                 "back", esp_err_to_name(err));
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "the running image is new: confirmed before the OBD chip is "
+             "brought up, a power cut no longer brings the previous firmware "
+             "back");
+    return ESP_OK;
+}
+
 /** Before a planned restart that is not a rollback or a park retry: the
  *  bootloader must not fall back to the old image because a settings
  *  submit came two minutes after the update. */
@@ -362,7 +394,10 @@ static void milestone_tick(void)
        pending until the next planned restart, and a power cut, a reset or a
        crash before that made the bootloader fall back to the old image
        (seen twice on the bench, once on a unit that had run the new image
-       for hours). The same milestone now confirms it by the same rule. */
+       for hours). The same milestone now confirms it by the same rule.
+       Since 2026-11-21 every new image is confirmed at its first start
+       (fw_update_confirm_start): this is what is left for a start whose
+       confirm did not get through. */
     bool uploaded = !job && FWU->slots.pending_verify;
 
     if ((job || uploaded) && restart_tracker_settle(false))

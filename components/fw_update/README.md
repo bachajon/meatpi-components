@@ -100,6 +100,39 @@ pending with no record and the run has settled. Bench (firmware repo):
 `.\test.ps1 uploadconfirm`, red on the build before (still `pending_verify`
 676 s after the upload), green after.
 
+**Every new image is confirmed at its first start, before the OBD chip is
+brought up (2026-11-21, GitHub issue #1075, Ali: "remove the rollback
+feature or confirm directly after boot before chip bring up").** Until the
+confirm, a power cut made a bootloader with the rollback option start the
+previous firmware again, and for an update from 6.0.0-beta.5 or older that
+firmware is the dangerous one for the OBD chip: it writes its older chip
+firmware over the chip's and pulses the chip's reset line 2 s behind the
+write (measured on the bench: a cut inside the first minutes of
+6.0.0-beta.12 brought beta.5 back). The ten minutes of the milestone, and
+the first sleep entry or planned restart that ended them sooner, were that
+window. `fw_update_confirm_start()` closes it: the composition root calls
+it on the boot task right ahead of `obd_chip_start()`; when the slots read
+at init say the image is still new it calls
+`ota_manager_confirm_running()` (one otadata write, change-guarded: no
+flash access on any other start), reads the slots again and logs `the
+running image is new: confirmed before the OBD chip is brought up`. On the
+bench the confirm lands 300 ms ahead of the chip's first word and 2.8 s
+into the first start; a power cut 15 s later leaves the new image running.
+What stays of the rollback:
+- an image that crashes BEFORE that line (the boot path, the settings, the
+  network start) is still unconfirmed and falls back in the bootloader at
+  its next reset, as before: the chip has not heard a word from it;
+- (a) above is untouched: an update JOB's record stays `pending_verify`
+  until the milestone, and a job's image that crashes three times before
+  it settled is rolled back by the boot path
+  (`esp_ota_mark_app_invalid_rollback()` marks a confirmed image invalid
+  as well, as long as the other slot holds a bootable image);
+- an image installed by upload has no record: one that crashes after the
+  confirm is parked by the crash-loop brake instead of falling back (what
+  a field unit, whose bootloader never falls back, always did).
+The milestone's confirm of a record-less image (2026-11-18, above) remains
+for a start whose confirm did not get through.
+
 ## API (`include/fw_update.h`)
 
 | Call | Behavior |
@@ -113,6 +146,7 @@ pending with no record and the run has settled. Bench (firmware repo):
 | `fw_update_abort()` | `ESP_ERR_NOT_FOUND` without a job, `ESP_ERR_INVALID_STATE` once the restart is scheduled. |
 | `fw_update_status(*out)` | The snapshot (`fw_update_status_t`, ~1 KB: keep it off task stacks): settings, uplink, the last check, this device against the manifest, the job, the last recorded job, the slots. RAM only, so a PSRAM-stack task may call it (the HA poster does): the slot fields are the record the boot task and the confirm helper read from flash, see "Flash reads and PSRAM stacks" below (2026-10-21). |
 | `fw_update_confirm()` | The milestone by hand (the console, the bench). |
+| `fw_update_confirm_start()` | (2026-11-21) BOOT PATH, the boot task, after `fw_update_init()` and before `obd_chip_start()`: a running image the bootloader still holds as new is confirmed to it (one otadata write; nothing on any other start). From this call on no power cut brings the previous firmware back. `ESP_OK` also when there was nothing to confirm or the confirm did not get through (a W line; the milestone and the pre-restart hook try again). |
 | `fw_update_forget()` | Erases the record (the bench). Caller on an internal stack. |
 | `fw_update_set_event_cb(cb)` | A snapshot after every check and job move (one consumer). |
 | `fw_update_set_uplink_provider(fn)` | The uplink word (`wifi`, `espnetlink`, `espnetlink_usb`, `eth`, `none`) and whether it costs mobile data: main's. A mobile uplink refuses every image download (`cellular_blocked`). |

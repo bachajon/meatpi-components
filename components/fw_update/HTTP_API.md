@@ -56,12 +56,23 @@ The snapshot. Never mutates, never fetches.
   `image_invalid`, `flash_failed`, `aborted`.
 - `last_result` comes from the NVS record (a job that reached the restart),
   so it survives the reboot and a power cycle: `pending_verify` while the
-  new image runs unconfirmed, then `verified`, `rolled_back` (`by` = `app`
-  after three quick crashes, `bootloader` after one under a rollback-enabled
-  bootloader) or `boot_failed`.
+  job awaits its milestone (the run settled, ten minutes), then `verified`,
+  `rolled_back` (`by` = `app` after three quick crashes, `bootloader` for an
+  image that crashed before it could confirm itself under a rollback-enabled
+  bootloader) or `boot_failed`. Since 2026-11-21 the IMAGE is confirmed to
+  the bootloader at its first start (below); the job's verdict is still
+  given at the milestone, and `by` = `bootloader` is left for an image that
+  crashes in the first seconds of its first start, before the OBD chip is
+  brought up.
 - `rollback.ota_state`: `new` (written by this app under the field
   bootloader), `pending_verify` (the new bootloader's word), `valid`,
-  `invalid`, `aborted`, `undefined` (a factory-flashed slot).
+  `invalid`, `aborted`, `undefined` (a factory-flashed slot). **Since
+  2026-11-21 (GitHub issue #1075) a new image reads `valid` from the first
+  status read behind an update**, whichever way it came (an update job, a
+  file sent to `POST /api/ota/upload`): it is confirmed at its first start,
+  before the OBD chip is brought up (`fw_update_confirm_start()`), so that
+  a power cut cannot bring the previous firmware back. `new` and
+  `pending_verify` are left for a start whose confirm did not get through.
   `bootloader_version` 2 = built with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
   The `rollback` object is the record the firmware read from flash at boot
   and after its last confirm (the milestone, `fw_update_confirm()`), not a
