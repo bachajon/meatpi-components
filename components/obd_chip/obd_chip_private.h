@@ -280,6 +280,22 @@ bool obd_fw_answer_is_question(const char *resp, size_t len);
  *  chip restarted: the caller brings it up again). */
 bool obd_fw_last_flashed(void);
 
+/** The last run sent the chip a warm start (and maybe wrote it): what the
+ *  bring-up had set is gone, so the caller brings the chip up again. */
+bool obd_fw_last_touched(void);
+
+/** Runs of the engine that got the chip (past the claim) since boot: a
+ *  caller reads it before and after to know the "last run" is its own. */
+uint32_t obd_fw_runs(void);
+
+/** The engine (obd_chip_fw.c): @p fw_buf holds the whole vendor image text,
+ *  @p ver its "V2.3.24"-style version, @p rule which chip is left alone (an
+ *  obd_fw_rule_t; an int here, this header stays free of the public one),
+ *  @p src a label for the logs. The image's sources (a file, the packaged
+ *  one) are in obd_chip_fw_source.c. */
+esp_err_t obd_fw_run(const char *fw_buf, size_t fw_len, const char *ver,
+                     int rule, const char *src);
+
 /** True while the update JOB (obd_chip_fw_job.c) runs: the stream and the
  *  fresh bring-up after it. obd_chip_update_in_progress() folds it in so
  *  the sleep entry waits for the whole job (Ali, 2026-11-08). */
@@ -398,6 +414,13 @@ void obd_core_fanout(const uint8_t *data, size_t len);
 /** True while EXCLUSIVE is held (RX task pauses fan-out; TX rejects). */
 bool obd_core_exclusive_held(void);
 
+/** Keep the chip for the calling task (@p on) or give it back: every other
+ *  task's claim is refused at once meanwhile and a bridge's send() rejects
+ *  (the user's firmware update, from before its claim until the chip is up
+ *  again; obd_chip_claim.c, 2026-11-21). */
+void obd_core_reserve(bool on);
+bool obd_core_reserved(void);
+
 /** The claim held now: 0 none, 1 command, 2 monitor, 3 exclusive
  *  (obd_chip_claim.c; the stats name it). */
 int obd_core_claim_state(void);
@@ -445,6 +468,12 @@ esp_err_t obd_bringup_run(int *active_baud);
  *  without the echo. Not reentrant. */
 bool obd_bare_probe(const char *cmd, char *resp, size_t resp_len,
                     uint32_t timeout_ms);
+
+/** The warm start, confirmed by its banner, and the protocol closed behind
+ *  it (`ATWS`, `ATPC`; twice at most). On the bare UART like the probe
+ *  above: the bring-up's reset of an awake chip, and the last thing a chip
+ *  hears before the user's firmware update writes it (2026-11-21). */
+bool obd_bringup_soft_reset(char *resp, size_t resp_len);
 
 /** The legacy provisioning of the chip's sleep control (obd_chip_provision.c;
  *  the bring-up calls it on the bare UART, the echo off). */

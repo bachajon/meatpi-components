@@ -105,10 +105,10 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
                           "\"rx_buffered\":%lu,\"tx_bytes\":%lu},"
                           "\"fw\":{\"builtin\":\"%s\",\"current\":\"%s\","
                           "\"chip\":\"%s\",\"outdated\":%s,"
-                          "\"damaged\":%s,"
+                          "\"damaged\":%s,\"power_on\":%s,"
                           "\"update\":{\"running\":%s,\"lines\":%lu,"
                           "\"total\":%lu,\"source\":\"%s\",\"done\":%s,"
-                          "\"last\":\"%s\"}},"
+                          "\"last\":\"%s\",\"no_answer\":%s}},"
                           "\"bringup\":{\"wire\":[%s]},"
                           "\"reset\":{\"pulses\":%lu,\"refused\":%lu,"
                           "\"wake_ms\":%lu,\"wake_ready\":%s,"
@@ -149,10 +149,12 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
                               fw.chip, obd_chip_builtin_fw_version())
                               ? "true" : "false",
                           st.store_damaged ? "true" : "false",
+                          obd_chip_power_on_start() ? "true" : "false",
                           fw.running ? "true" : "false",
                           (unsigned long)fw.lines, (unsigned long)fw.total,
                           fw.source, fw.done_once ? "true" : "false",
                           fw.done_once ? esp_err_to_name(fw.last_err) : "",
+                          fw.no_answer ? "true" : "false",
                           wire_json,
                           (unsigned long)st.reset_pulses,
                           (unsigned long)st.reset_refused,
@@ -189,7 +191,11 @@ static esp_err_t reply(httpd_req_t *req, const char *status, const char *json)
  *  version is above the one it reports: a `force` key is refused (400),
  *  the forced rewrite is gone (2026-11-01, Ali). 202 when the job started,
  *  409 while one runs, 404 for a missing file, 400 otherwise (a file whose
- *  name carries no version among them). */
+ *  name carries no version among them). Since 2026-11-21 (issue #1075) also
+ *  409, with `"power_cycle":true`, in a start that did not begin with the
+ *  power coming on (`fw.power_on` false): the page tells the user to unplug
+ *  the adapter for a minute. `"any_start":true` lifts that rule: the
+ *  bench's and support's word, the page never sends it. */
 static esp_err_t obd_chip_update_handler(httpd_req_t *req)
 {
     char body[OC_HTTP_BODY_MAX + 1];
@@ -215,6 +221,7 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
     body[len] = '\0';
 
     char path[72] = "";
+    bool any_start = false;
 
     if (len > 0)
     {
@@ -247,6 +254,8 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
             strlcpy(path, p->valuestring, sizeof(path));
         }
 
+        any_start = cJSON_IsTrue(
+            cJSON_GetObjectItemCaseSensitive(root, "any_start"));
         cJSON_Delete(root);
     }
 
@@ -270,11 +279,20 @@ static esp_err_t obd_chip_update_handler(httpd_req_t *req)
     }
 
     esp_err_t err = obd_chip_firmware_update_start(
-        (path[0] != '\0') ? path : NULL);
+        (path[0] != '\0') ? path : NULL, any_start);
 
     if (err == ESP_ERR_INVALID_STATE)
     {
         return reply(req, "409 Conflict", "{\"error\":\"update already running\"}");
+    }
+
+    if (err == ESP_ERR_NOT_ALLOWED)
+    {
+        return reply(req, "409 Conflict",
+                     "{\"error\":\"the chip is updated only in a start that "
+                     "began with the power coming on: unplug the adapter, "
+                     "wait one minute and plug it back in\","
+                     "\"power_cycle\":true}");
     }
 
     if (err == ESP_ERR_INVALID_ARG)

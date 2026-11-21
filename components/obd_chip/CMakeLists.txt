@@ -19,6 +19,7 @@ idf_component_register(
          "obd_chip_stslcs.c"
          "obd_chip_settings.c"
          "obd_chip_fw.c"
+         "obd_chip_fw_source.c"
          "obd_chip_fw_job.c"
          "obd_chip_http.c"
          "obd_chip_cli.c"
@@ -33,7 +34,7 @@ idf_component_register(
     # V2.3.24 since 2026-10-28 (issue #1023), the v4.52p policy: a chip at
     # V2.3.22 or V2.3.24 is current (obd_fw_version_is_current in
     # obd_chip_fw_version.c). Bumping the packaged version = update this path,
-    # OBD_FW_BUILTIN_VERSION in obd_chip_fw.c AND that list. Byte-identical
+    # OBD_FW_BUILTIN_VERSION in obd_chip_fw_source.c AND that list. Byte-identical
     # to legacy main/obd_fw/V2.3.24.txt (main fab54ad).
     EMBED_TXTFILES "../obd_chip_manager/obd_fw/V2.3.24.txt"
 )

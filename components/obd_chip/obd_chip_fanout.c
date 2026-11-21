@@ -415,9 +415,11 @@ esp_err_t obd_chip_send(const uint8_t *data, size_t len)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (obd_core_exclusive_held())
+    if (obd_core_exclusive_held() || obd_core_reserved())
     {
-        return ESP_ERR_INVALID_STATE; /* fw update owns the wire */
+        /* a fw update owns the wire, or has the chip kept for itself (from
+           its first step until the chip is up again, 2026-11-21) */
+        return ESP_ERR_INVALID_STATE;
     }
 
     /* EEPROM guard (obd_chip_guard.h): apps re-send ATSP on every connect

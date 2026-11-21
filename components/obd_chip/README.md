@@ -180,7 +180,10 @@ zero-copy only with numbers.
 | `obd_chip_soft_reset()` | (2026-11-12) Reset the chip by command: a throw-away `ATI` (it ends a monitor or a half line), then the warm start `ATWS`, whose answer must carry the banner; twice at most. `ESP_OK` = the chip is fresh (its echo off again, the settings generation moved), `ESP_ERR_INVALID_RESPONSE` = not confirmed, `ESP_ERR_INVALID_STATE` = the chip never came up. sleep_manager's nap calls it ahead of the sleep word for a chip that reads awake. It replaces `obd_chip_hard_reset()`, the pulse on the reset line: that line is not offered to other components any more (see "The reset line is for a chip that does not answer"). |
 | `obd_chip_get_version(...)` | `VTVERS` → e.g. `MIC3624 V2.3.24`. |
 | `obd_chip_firmware_update(fs_path)` / `obd_chip_firmware_update_builtin(rule)` | EXCLUSIVE; the verified legacy flow (below). No forced rewrite since 2026-11-01 (Ali): a chip is written only when the image's version is above the one it reports. A file's version is its NAME (`V2.3.24.txt`; `ESP_ERR_INVALID_ARG` without one); the packaged image takes the rule, `OBD_FW_RULE_STARTUP` (the bring-up: a chip on the v4.52p accept list, V2.3.22 or V2.3.24, is left alone) or `OBD_FW_RULE_NEWER` (the user's entries). |
-| `obd_chip_firmware_update_start(fs_path)` | (2026-10-28) the user's update (`OBD_FW_RULE_NEWER`) on its own task, NULL = the packaged image; `ESP_ERR_INVALID_STATE` while one runs, `ESP_ERR_INVALID_ARG` for a file whose name carries no version; a reflashed chip comes back through a fresh bring-up. The console / HTTP entry. |
+| `obd_chip_firmware_update_start(fs_path, any_start)` | (2026-10-28) the user's update (`OBD_FW_RULE_NEWER`) on its own task, NULL = the packaged image; `ESP_ERR_INVALID_STATE` while one runs, `ESP_ERR_INVALID_ARG` for a file whose name carries no version; a reflashed chip comes back through a fresh bring-up. The console / HTTP entry. Since 2026-11-21 (issue #1075) `ESP_ERR_NOT_ALLOWED` in a start that did not begin with the power coming on, unless `any_start` is set (the console's `--any-start`, the route's `"any_start": true`: the bench's and support's word, the web page never sends it). See "The user's update, guarded" below. |
+| `obd_chip_power_on_start()` | (2026-11-21) true in a start whose reset reason is power-on (`esp_reset_reason() == ESP_RST_POWERON`): the chip came up from nothing with the device. `fw.power_on` on `GET /api/obd_chip`. |
+| `obd_chip_waiters()` | (2026-11-21) how many tasks wait for the chip right now. A claim is polled: a requester that claims again at once reads this and leaves a gap (AutoPID, 30 ms) |
+| `obd_chip_kept_for_update()` | (2026-11-21) true while the chip is kept for a firmware update: the user's job from its first step until the chip is up again behind it, and any run (the start-up's own included) while it writes records. Not during the start-up's version check, which every boot runs. A chip user that polls stays off the chip while it reads true (AutoPID does); whoever asks anyway is refused at once. |
 | `obd_chip_update_in_progress()` / `obd_chip_fw_status()` | (2026-10-28) the update's state: `running`, `lines`/`total` records, `source`, `done_once` + `last_err`. The sleep entry waits on the first, which is true for the whole update JOB since 2026-11-08 (the stream and the fresh bring-up after it: a sleep pin pulled during that bring-up resets the chip); sleep_manager also pushes a running countdown out while it is true. |
 | `obd_chip_probe(cmd, baud, timeout, rx, len, &got, &prompt)` | (2026-10-28, issue #1023) bare-wire diagnostic: send one command at a baud and return every byte that came back, prompt or not; EXCLUSIVE meanwhile, the UART goes back to its baud. The `obd_chip probe` command. |
 | `obd_chip_active_baud()` | The baud the chip answered at during bring-up (0 = never). |
@@ -372,6 +375,97 @@ bridge_manager; production replaces it with a configured bridge.
   never overlap the ESP-side ELM engines on the same physical CAN bus.
   See `components/obd_gate/README.md`.
 
+- **A waiter is counted (2026-11-21).** `obd_core_claim()` counts a task
+  from its first look that found the chip taken until its claim ends either
+  way; `obd_chip_waiters()` reads the count. It is no queue: the count lets
+  the one requester that never pauses (AutoPID's poller, which claims again
+  within microseconds of its release) leave a gap of three looks before its
+  next request. Measured before, under a table of 29 rows in one group: the
+  console's `obd_chip` got its version read through 4 to 5 times of 8, and
+  `GET /api/obd_chip/report` (the page's "Read the chip configuration")
+  failed once in ten with "could not read the chip". Host case
+  `test_claim_waiters_counted`.
+## The user's update, guarded (2026-11-21, GitHub issue #1075, Ali)
+
+A report of a chip that never came up after an update from 6.0.0-beta.5 to
+6.0.0-beta.12 was not reproduced (13 clean passes on the bench, the record
+in the app repo's `internal/issue_1075/`), and Ali's answer to "what is the
+safe way" is a sequence the device now enforces around the USER's update
+(the Quick Setup prompt, the Status page, the Maintenance card, `obd_chip
+update`, `POST /api/obd_chip/update`). The start-up's own update (a chip in
+its download mode, a chip below the accepted versions) is unchanged.
+
+1. **Only in a start that began with the power coming on.**
+   `obd_chip_firmware_update_start()` answers `ESP_ERR_NOT_ALLOWED` when
+   `esp_reset_reason()` is not `ESP_RST_POWERON` (the route: 409 with
+   `"power_cycle": true`; the console: the way out in words). The page
+   tells the user to unplug the adapter, wait one minute and plug it back
+   in, and offers the update in the start behind that: a chip fresh from
+   power-on, with no wake and no restart behind it, at a moment the user
+   chose. The device cannot measure the minute: it is an instruction (a
+   quick re-plug that leaves the 3.3 V rail standing reads as a brownout
+   or not as a reset at all, and nothing is offered). The device enforces
+   the rule, not only the page: a browser that still holds the page of the
+   firmware before would offer the update at once. `any_start` lifts the
+   rule for the bench and for support.
+2. **Nobody else on the chip.** The job waits for the bring-up, sets
+   `obd_chip_kept_for_update()` (AutoPID reads it at the head of every lap
+   and pauses: `paused: the OBD chip's firmware is being updated`,
+   `stats.paused_chip_fw`), waits up to 3 s for AutoPID's idle bit (the
+   poll in flight ends; without this wait the next step would refuse that
+   poll's next request and count one failed poll at every update), then
+   **reserves** the chip (`obd_core_reserve`, `obd_chip_claim.c`): every
+   other task's claim is refused at once with `ESP_ERR_INVALID_STATE`, a
+   bridge's `obd_chip_send()` rejects, a holder inside its transaction
+   still ends it. The engine's own claim then waits up to 15 s (above a
+   transaction's longest hold of 12 s; it was 5 s, and with AutoPID
+   polling at its shortest period the update's 10 ms looks never found the
+   chip free: `not run, the chip stayed claimed for 5 s`, once in four
+   tries on the bench). The reservation is given back when the chip is up
+   again: the job waits for the fresh bring-up it started.
+3. **A warm start and a closed protocol are the last words the chip's
+   firmware hears.** Behind the version gate and ahead of `VTDLMIC3422`
+   the engine sends `ATI` (a throw-away), `ATWS` (the banner must come)
+   and `ATPC` (`OK` must come): `obd_bringup_soft_reset()`, the bring-up's
+   own reset of an awake chip. Nothing asked before the update is in
+   flight when the loader takes over, and a store tidy the chip still owed
+   is done by the warm start (measured 2026-11-21: 214 ms, READY ready
+   throughout). Not confirmed twice = not written
+   (`ESP_ERR_INVALID_RESPONSE`), and the job brings the chip up again all
+   the same (the warm start put its echo back on). The start-up's update
+   skips this: it runs right behind the bring-up, which ended on the same
+   two words under the same claim. On the bench the three words take
+   195 ms and the write's own timing is what it was (3557 records in
+   19.6 s, the chip up again 22 s after the request).
+4. **No sleep meanwhile**: `obd_chip_update_in_progress()` is true for the
+   whole job, and sleep_manager holds a countdown and makes its entry wait
+   (`sleep_manager_update.c`).
+
+Files: the engine `obd_chip_fw.c`, the image's sources (a file, the
+packaged image) `obd_chip_fw_source.c` (split out 2026-11-21, the 700-line
+rule), the job, the power-on rule and the quiet phase `obd_chip_fw_job.c`.
+Tests: the host case `claim: reserved for the update`, `.\test.ps1
+chipguard` (the whole way with a real minute without power), `obdfw` (the
+refusal on the route and the console), `chipprompt` and the page probe (the
+unplug popup and banner).
+
+**No restart while the chip is written (2026-11-21, Ali: "Device blocks
+it").** `obd_chip_kept_for_update()` is also what the composition root hands
+to `restart_tracker_set_hold()`: `POST /api/restart` answers 409 with the
+reason while the chip is kept, and every restart the firmware plans itself
+(the console's `system -r`, a settings apply, an image to start) waits in
+`restart_tracker_restart()` until the chip is up again, 90 s at most. A reset
+nobody plans (a crash, the power) is outside it: the next start completes a
+chip found in its download mode, as before.
+
+**A chip that never answered is not a failed update (2026-11-21).** The
+start-up's version question on a silent wire ends the engine with
+`ESP_ERR_TIMEOUT` and nothing written. The status now says which case it is:
+`obd_chip_fw_status_t.no_answer`, `fw.update.no_answer` on `GET
+/api/obd_chip`. The card shows "not checked: the chip did not answer" and the
+console `update:  idle; not checked: the chip did not answer (nothing was
+written)` where both said "last update: ESP_ERR_TIMEOUT", which the reporter
+of #1075 read as a failed chip write. `last` keeps the error name.
 ## Firmware update (verified legacy flow: do not improvise)
 
 `VTVERS` (expect `MIC3624 …`) → `VTDLMIC3422` → `VTDLDT<line>` per record
@@ -409,7 +503,7 @@ byte(s) but no prompt (FC 00)`), and, like legacy, still tries
 wire silent at both bauds aborts (`no answer on the wire ... not
 flashing`). The bring-up logs the same wire note when `ATI` gets no
 prompt. Bumping the packaged version = new `EMBED_TXTFILES` path +
-`OBD_FW_BUILTIN_VERSION` in `obd_chip_fw.c` + the current list in
+`OBD_FW_BUILTIN_VERSION` in `obd_chip_fw_source.c` + the current list in
 `obd_chip_fw_version.c`. A chip left on V2.3.22 is accepted (the start-up update
 leaves it alone) but reported outdated (`obd_fw_version_is_outdated`,
 host-tested; `fw.outdated` on `GET /api/obd_chip`; the bring-up's warning
@@ -435,10 +529,12 @@ as `V2.3.99.txt` (the name is the version): `test.ps1 obdfw` and
 
 **From the console and the API (2026-10-28):** `obd_chip` (state, the
 chip's `VTVERS` with a warning when it is older than the packaged image,
-the packaged image, the job), `obd_chip update [--file <path>]` and
-`POST /api/obd_chip/update {"path"}` run the user's update as a job
-(`obd_chip_firmware_update_start`): the packaged image or the file, written
-only when newer than the chip's firmware. `obd_chip probe [baud]` sends `ATI` and `VTVERS` on the bare
+the packaged image, the job), `obd_chip update [--file <path>]
+[--any-start]` and `POST /api/obd_chip/update {"path", "any_start"}` run
+the user's update as a job (`obd_chip_firmware_update_start`): the packaged
+image or the file, written only when newer than the chip's firmware, and
+since 2026-11-21 only in a start that began with the power coming on
+(above). `obd_chip probe [baud]` sends `ATI` and `VTVERS` on the bare
 wire at 2000000 and 115200 and prints every byte that came back, prompt or
 not; `obd_chip probe scan` tries `ATI` at every standard baud (9600 to
 3000000); `obd_chip probe auto [seconds] [baud]` lets the S3's UART hardware
@@ -646,7 +742,9 @@ trigger a reprovision-every-boot loop (`obd_parse_feed`, host-tested).
 `esp_driver_uart`, `esp_driver_gpio`, `settings_manager`, `log_manager`,
 `filesystem` (fw file reads), `cmdline_manager` (the `obd_chip` command,
 2026-10-28), `http_server_manager` + `esp_http_server` (the own routes),
-`obd_gate`, `event_manager`: all private. Init order: after the core
+`obd_gate`, `event_manager`, `dev_status_manager` (the fault codes; since
+2026-11-21 AutoPID's idle bit, which the update job waits for): all
+private. Init order: after the core
 managers; `settings_manager_start()` before `obd_chip_start()`.
 `can_selftest` (above this component) uses the public request, send,
 subscribe and transaction API for the CAN self-test.

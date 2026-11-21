@@ -8,6 +8,7 @@ idf_component_register(
          "test_parse.c"
          "test_stslcs.c"
          "test_request.c"
+         "test_claim.c"
          "test_kline.c"
          "test_settle.c"
          "${comp_dir}/obd_chip_cmd.c"

@@ -55,19 +55,24 @@
  * reports, never the same version and never a downgrade; the user's update
  * lifts a .22 chip to .24. The update runs as a job for the console and
  * HTTP, reports its progress, and the sleep entry waits for it.
+ *
+ * Issue #1075 (2026-11-21, Ali): the user's update sends the chip a warm
+ * start and closes its protocol (`ATWS`, `ATPC`, both confirmed) before the
+ * download mode is entered, so nothing asked before the update is in flight
+ * when the loader takes over; unconfirmed = not written. Its claim waits
+ * longer than a transaction's longest hold: the job has the chip reserved
+ * by then (obd_chip_fw_job.c), nobody else can take it in between. The
+ * image's sources (a file, the packaged one) moved to obd_chip_fw_source.c
+ * (700-line rule).
  */
 #include "obd_chip.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#include "esp_attr.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-#include "filesystem.h"
 
 #include "obd_chip_private.h"
 
@@ -78,9 +83,12 @@ static const char *TAG = "obd_chip"; /* one TAG per component (§10) */
 #define FW_TIMEOUT_MS  5000
 #define FW_TARGET_ID   "MIC3624"
 
-/* keep in lockstep with EMBED_TXTFILES in CMakeLists.txt and the accepted
- * list in obd_chip_fw_version.c (obd_fw_version_is_current) */
-#define OBD_FW_BUILTIN_VERSION "V2.3.24"
+/* The wait for the exclusive claim: above a transaction's longest hold
+ * (12 s, obd_chip_claim.c), so a holder in the middle of one ends it first.
+ * 5 s until 2026-11-21: with AutoPID polling at its shortest period the
+ * update's 10 ms looks never found the chip free and the job ended "not
+ * run" (bench, issue #1075). */
+#define FW_CLAIM_WAIT_MS 15000
 
 /* ---- wire diagnostics (issue #1023) ------------------------------------------ */
 
@@ -140,7 +148,10 @@ static int other_baud(int baud)
 /* ---- status (GET /api/obd_chip, the obd_chip command, the sleep entry) ----- */
 
 static volatile bool        s_running;
+static volatile bool        s_writing;      /* past the gate: the chip is written */
 static bool                 s_last_flashed;
+static bool                 s_last_warm;    /* the run sent the warm start */
+static uint32_t             s_runs;         /* runs that got the chip */
 static obd_chip_fw_status_t s_status;
 static char                 s_source[72];
 
@@ -150,7 +161,11 @@ static void status_begin(const char *src, uint32_t total)
     s_status.source = s_source;
     s_status.lines = 0;
     s_status.total = total;
+    s_status.no_answer = false;
     s_status.running = true;
+    s_last_flashed = false;
+    s_last_warm = false;
+    s_runs++;
     s_running = true;
 }
 
@@ -161,6 +176,7 @@ static esp_err_t status_end(esp_err_t err, bool flashed)
     s_status.done_once = true;
     s_status.last_err = err;
     s_last_flashed = flashed;
+    s_writing = false;
     s_running = false;
     obd_core_release();
     return err;
@@ -175,9 +191,26 @@ bool obd_chip_update_in_progress(void)
     return s_running || obd_fw_job_running();
 }
 
+bool obd_chip_kept_for_update(void)
+{
+    /* the user's job from its first step to the chip being up again, and
+       any run (the start-up's too) while it writes the chip */
+    return s_writing || obd_fw_job_running();
+}
+
 bool obd_fw_last_flashed(void)
 {
     return s_last_flashed;
+}
+
+bool obd_fw_last_touched(void)
+{
+    return s_last_flashed || s_last_warm;
+}
+
+uint32_t obd_fw_runs(void)
+{
+    return s_runs;
 }
 
 /* the chip's VTVERS as last read by the bring-up or the update gate: the
@@ -412,9 +445,8 @@ static esp_err_t fw_enter_download(bool prompt_seen, char *resp,
  *  text, @p ver its "V2.3.24"-style version (the file's name, or the
  *  packaged constant), @p rule which chip is left alone (obd_fw_rule_t:
  *  a chip at or above @p ver always is), @p src a label for the logs. */
-static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
-                               const char *ver, obd_fw_rule_t rule,
-                               const char *src)
+esp_err_t obd_fw_run(const char *fw_buf, size_t fw_len, const char *ver,
+                     int rule, const char *src)
 {
     static char line[FW_LINE_MAX];
     static char resp[FW_RESP_MAX];
@@ -428,12 +460,12 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
 
     /* EXCLUSIVE: fan-out pauses, send() rejects, we own the wire now (the
        bring-up task holds it already for its start-up check) */
-    esp_err_t err = obd_core_claim(3 /* CLAIM_EXCLUSIVE */, 5000);
+    esp_err_t err = obd_core_claim(3 /* CLAIM_EXCLUSIVE */, FW_CLAIM_WAIT_MS);
 
     if (err != ESP_OK)
     {
-        ESP_LOGW(TAG, "%s: not run, the chip stayed claimed for 5 s (%s)", src,
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "%s: not run, the chip stayed claimed for %u s (%s)", src,
+                 FW_CLAIM_WAIT_MS / 1000u, esp_err_to_name(err));
         return err;
     }
 
@@ -457,6 +489,9 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
 
     if (err != ESP_OK)
     {
+        /* a silent wire: nothing was written, and the card says that, not
+           "last update: ESP_ERR_TIMEOUT" (read as a failed write, #1075) */
+        s_status.no_answer = (err == ESP_ERR_TIMEOUT);
         return status_end(err, false);
     }
 
@@ -495,6 +530,26 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
 
         ESP_LOGI(TAG, "chip firmware %s is older than %s: updating", chip_ver,
                  ver);
+
+        /* the user's update: a warm start and a closed protocol are the
+           last words the chip's firmware hears (the head of this file).
+           The start-up's own update comes right behind the bring-up, which
+           ended on the same two words under the same claim. */
+        if (rule == OBD_FW_RULE_NEWER)
+        {
+            s_last_warm = true;
+
+            if (!obd_bringup_soft_reset(resp, sizeof(resp)))
+            {
+                ESP_LOGW(TAG, "the chip did not confirm the warm start and "
+                         "the closed protocol ahead of the write: not written "
+                         "(%s)", src);
+                return status_end(ESP_ERR_INVALID_RESPONSE, false);
+            }
+
+            ESP_LOGI(TAG, "chip warm-started and its protocol closed: "
+                     "writing");
+        }
     }
     else if (prompt && obd_bringup_store_damaged())
     {
@@ -513,6 +568,7 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
     }
 
     /* 2. enter download mode */
+    s_writing = true;
     ESP_LOGW(TAG, "starting chip firmware update from %s (%u bytes, %lu "
              "records)", src, (unsigned)fw_len,
              (unsigned long)s_status.total);
@@ -609,84 +665,3 @@ static esp_err_t fw_update_run(const char *fw_buf, size_t fw_len,
 
     return status_end(err, err == ESP_OK);
 }
-
-esp_err_t obd_chip_firmware_update(const char *fs_path)
-{
-    /* whole file into PSRAM: vendor images are ~500 KB of text */
-    static char *s_fw_buf;
-    static size_t s_fw_cap;
-
-    /* the image's version is the file's name (the established contract):
-       without one there is nothing to compare the chip against, and a
-       chip is written only when the image is newer */
-    char ver[16];
-
-    if (fs_path == NULL || obd_fw_version_token(fs_path, ver, sizeof(ver)) == 0)
-    {
-        ESP_LOGW(TAG, "fw file '%s': no version in its name (V2.3.24.txt), "
-                 "not flashing", (fs_path != NULL) ? fs_path : "");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    size_t fw_size = 0;
-    esp_err_t err = filesystem_size(fs_path, &fw_size);
-
-    if (err != ESP_OK || fw_size == 0)
-    {
-        ESP_LOGE(TAG, "fw file '%s' unavailable (%s)", fs_path,
-                 esp_err_to_name(err));
-        return (err != ESP_OK) ? err : ESP_ERR_INVALID_SIZE;
-    }
-
-    if (s_fw_buf != NULL && s_fw_cap < fw_size + 1)
-    {
-        heap_caps_free(s_fw_buf); /* a bigger image than the last one */
-        s_fw_buf = NULL;
-    }
-
-    if (s_fw_buf == NULL)
-    {
-        s_fw_buf = heap_caps_malloc(fw_size + 1,
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        s_fw_cap = fw_size + 1;
-    }
-
-    if (s_fw_buf == NULL)
-    {
-        s_fw_cap = 0;
-        return ESP_ERR_NO_MEM;
-    }
-
-    size_t got = 0;
-
-    err = filesystem_read(fs_path, s_fw_buf, fw_size + 1, &got);
-
-    if (err != ESP_OK)
-    {
-        return err;
-    }
-
-    return fw_update_run(s_fw_buf, got, ver, OBD_FW_RULE_NEWER, fs_path);
-}
-
-/* The packaged image (EMBED_TXTFILES appends a NUL). Bumping the
- * packaged version = new file in CMakeLists + this constant + the
- * current list in obd_chip_fw_version.c. */
-extern const char _binary_V2_3_24_txt_start[];
-extern const char _binary_V2_3_24_txt_end[];
-
-const char *obd_chip_builtin_fw_version(void)
-{
-    return OBD_FW_BUILTIN_VERSION;
-}
-
-esp_err_t obd_chip_firmware_update_builtin(obd_fw_rule_t rule)
-{
-    size_t len = (size_t)(_binary_V2_3_24_txt_end -
-                          _binary_V2_3_24_txt_start);
-
-    return fw_update_run(_binary_V2_3_24_txt_start, len,
-                         OBD_FW_BUILTIN_VERSION, rule, "builtin "
-                         OBD_FW_BUILTIN_VERSION);
-}
-

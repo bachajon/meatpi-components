@@ -255,6 +255,13 @@ esp_err_t obd_chip_protocol_save(char proto);
 esp_err_t obd_chip_claim(obd_claim_t type, TickType_t timeout);
 esp_err_t obd_chip_release(void);
 
+/** How many tasks wait for the chip right now. A claim is polled, not
+ *  queued: a waiter looks every 10 ms and gets the chip when it finds it
+ *  free. A requester that claims again within microseconds of its release
+ *  keeps a waiter out for as long as it goes on, so it reads this before a
+ *  request and leaves a gap of a few looks (AutoPID does, 2026-11-21). */
+uint8_t obd_chip_waiters(void);
+
 /**
  * Hold the chip for a multi-command transaction from the CALLING task
  * (2026-09-16: the UDS AT transport sends 7 setup commands + the request;
@@ -374,6 +381,20 @@ const char *obd_chip_builtin_fw_version(void);
  *  half-written image strands it in its bootloader (issue #1023). */
 bool obd_chip_update_in_progress(void);
 
+/** True while the chip is kept for a firmware update (2026-11-21, issue
+ *  #1075): the user's update job from its first step until the chip is up
+ *  again behind it, and any run, the start-up's own included, while it
+ *  writes the chip. Not during the start-up's version check, which every
+ *  boot runs. A chip user that polls stays off the chip while this reads
+ *  true (AutoPID does); whoever asks anyway is refused at once. */
+bool obd_chip_kept_for_update(void);
+
+/** True in a start that began with the power coming on (the reset reason is
+ *  power-on): the chip came up from nothing with the device, no wake and no
+ *  restart behind it. The user's update is accepted in such a start only
+ *  (Ali, 2026-11-21, issue #1075); GET /api/obd_chip `fw.power_on`. */
+bool obd_chip_power_on_start(void);
+
 typedef struct
 {
     bool        running;
@@ -382,6 +403,9 @@ typedef struct
     const char *source;    /* "builtin V2.3.24" or the file path          */
     bool        done_once; /* a run finished since boot (last_err valid)  */
     esp_err_t   last_err;
+    bool        no_answer; /* the last run got no answer to its version
+                              question on the wire: nothing was written, and
+                              that is no failed update (2026-11-21)       */
     const char *chip;      /* the chip's VTVERS as last read ("" = none)  */
 } obd_chip_fw_status_t;
 
@@ -390,9 +414,14 @@ void obd_chip_fw_status(obd_chip_fw_status_t *out);
 /** Run the user's update (OBD_FW_RULE_NEWER) on its own task (the console
  *  / HTTP entry, 2026-10-28): @p fs_path NULL = the packaged image, else a
  *  file whose name carries its version (ESP_ERR_INVALID_ARG without one).
- *  ESP_ERR_INVALID_STATE while one runs. A reflashed chip comes back
- *  through a fresh bring-up afterwards. */
-esp_err_t obd_chip_firmware_update_start(const char *fs_path);
+ *  ESP_ERR_INVALID_STATE while one runs. ESP_ERR_NOT_ALLOWED in a start
+ *  that did not begin with the power coming on (obd_chip_power_on_start),
+ *  unless @p any_start is set: the console's and the bench's word, never
+ *  the web page's. The job waits for AutoPID's poll in flight, keeps the
+ *  chip for itself (every other user is refused meanwhile), and a chip it
+ *  warm-started or wrote comes back through a fresh bring-up before the
+ *  others get it again. */
+esp_err_t obd_chip_firmware_update_start(const char *fs_path, bool any_start);
 
 /** Bare-wire diagnostic (the `obd_chip probe` command, issue #1023): send
  *  @p cmd (with its CR) at @p baud (0 = as is) and collect what comes back

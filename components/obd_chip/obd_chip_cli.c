@@ -81,8 +81,13 @@ static void print_status(void)
         {
             cmdline_printf("warning: the chip's firmware is older than the "
                            "packaged %s: obd_chip update writes it "
-                           "(or System > Maintenance)\n",
-                           obd_chip_builtin_fw_version());
+                           "(or System > Maintenance)%s\n",
+                           obd_chip_builtin_fw_version(),
+                           obd_chip_power_on_start()
+                               ? ""
+                               : ", in a start that began with the power "
+                                 "coming on: unplug the adapter for a minute "
+                                 "first");
         }
     }
     else
@@ -154,6 +159,11 @@ static void print_status(void)
                        (unsigned long)fw.lines, (unsigned long)fw.total,
                        fw.source);
     }
+    else if (fw.done_once && fw.no_answer)
+    {
+        cmdline_printf("update:  idle; not checked: the chip did not answer "
+                       "(nothing was written)\n");
+    }
     else if (fw.done_once)
     {
         cmdline_printf("update:  idle; last %s: %s\n", fw.source,
@@ -168,6 +178,7 @@ static void print_status(void)
 static int do_update(int argc, char **argv)
 {
     const char *path = NULL;
+    bool any_start = false;
 
     for (int i = 2; i < argc; i++)
     {
@@ -184,14 +195,28 @@ static int do_update(int argc, char **argv)
         {
             path = argv[++i];
         }
+        else if (strcmp(argv[i], "--any-start") == 0)
+        {
+            any_start = true;
+        }
         else
         {
-            cmdline_printf("usage: obd_chip update [--file <path>]\n");
+            cmdline_printf("usage: obd_chip update [--file <path>] "
+                           "[--any-start]\n");
             return 1;
         }
     }
 
-    esp_err_t err = obd_chip_firmware_update_start(path);
+    esp_err_t err = obd_chip_firmware_update_start(path, any_start);
+
+    if (err == ESP_ERR_NOT_ALLOWED)
+    {
+        cmdline_printf("this start did not begin with the power coming on: "
+                       "unplug the adapter, wait one minute, plug it back in "
+                       "and run the update then (--any-start writes the chip "
+                       "in this start)\n");
+        return 1;
+    }
 
     if (err == ESP_ERR_INVALID_STATE)
     {
@@ -511,7 +536,7 @@ static int cmd_obd_chip(int argc, char **argv)
     }
 
     cmdline_printf("usage: obd_chip | obd_chip report | obd_chip update "
-                   "[--file <path>] | obd_chip probe [baud] "
+                   "[--file <path>] [--any-start] | obd_chip probe [baud] "
                    "[scan|auto [seconds]] [command] | obd_chip listen "
                    "<seconds> [baud]\n");
     return 1;
@@ -525,7 +550,8 @@ esp_err_t obd_chip_register_cli(void)
         .help = "OBD chip (MIC3624): state, configuration report, firmware "
                 "update, probe, listen",
         .hint = "Usage: obd_chip | obd_chip report | obd_chip update "
-                "[--file <path>] | obd_chip probe [baud] [scan|auto [seconds]] [command] | "
+                "[--file <path>] [--any-start] | obd_chip probe [baud] "
+                "[scan|auto [seconds]] [command] | "
                 "obd_chip listen <seconds> [baud]",
         .func = cmd_obd_chip,
     };

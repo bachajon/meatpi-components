@@ -40,9 +40,19 @@
  * free at one of its 10 ms looks, so a holder that claims and releases in a
  * tight loop keeps a waiter out for as long as the loop runs. Whoever must
  * be first takes the claim before the others can ask. The EXCLUSIVE holder
+ * A task that waits is counted (obd_chip_waiters, 2026-11-21): a requester
+ * that claims without a pause reads the count and leaves a gap (AutoPID). The EXCLUSIVE holder
  * may claim again (2026-11-11): the bring-up task takes EXCLUSIVE before it
  * opens the bring-up gate, and the start-up firmware check it then runs
  * claims as every caller of the update engine does. One release ends it.
+ *
+ * The reservation (2026-11-21, issue #1075): the user's firmware update keeps
+ * the chip for its task from before its claim until the chip is up again.
+ * Everybody else is refused at once meanwhile (ESP_ERR_INVALID_STATE, what a
+ * held EXCLUSIVE answers), so the update gets the chip when the holder of
+ * the moment lets go, and nobody talks to a chip that restarts behind the
+ * write. A holder inside its transaction still ends it: its nested requests
+ * are granted as before.
  */
 #include "obd_chip.h"
 
@@ -67,6 +77,8 @@ static volatile claim_state_t s_claim = CLAIM_NONE;
 static TaskHandle_t s_txn_task;
 static int64_t      s_txn_start_us;
 static TaskHandle_t s_excl_task; /* the EXCLUSIVE holder, NULL without one */
+static TaskHandle_t s_reserved;  /* the chip is kept for this task, or NULL */
+static volatile uint8_t s_waiters; /* tasks inside a claim's wait right now */
 
 /** Book a granted claim (the claim lock held). */
 static void claim_take(int type, TaskHandle_t self)
@@ -79,11 +91,14 @@ esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
 {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    esp_err_t result;
+    bool waiting = false;
 
     while (true)
     {
         bool granted = false;
         bool monitor_blocks = false;
+        bool kept_out = false;
 
         portENTER_CRITICAL(&s_claim_lock);
 
@@ -92,6 +107,11 @@ esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
             s_txn_task == self)
         {
             granted = true;
+        }
+        /* kept for a firmware update: only its task gets the chip */
+        else if (s_reserved != NULL && s_reserved != self)
+        {
+            kept_out = true;
         }
         /* a transaction whose end() never ran can't brick the chip: steal
            the COMMAND claim after the max hold (fail-open, like obd_gate) */
@@ -122,24 +142,51 @@ esp_err_t obd_core_claim(int type, uint32_t timeout_ms)
 
         if (granted)
         {
-            return ESP_OK;
+            result = ESP_OK;
+            break;
         }
 
         /* v1 policy "manual": a held MONITOR is never auto-interrupted,
-           commands fail fast so callers can surface "bus busy" (task §5) */
-        if (monitor_blocks)
+           commands fail fast so callers can surface "bus busy" (task §5);
+           a chip kept for a firmware update answers the same way */
+        if (monitor_blocks || kept_out)
         {
-            return ESP_ERR_INVALID_STATE;
+            result = ESP_ERR_INVALID_STATE;
+            break;
         }
 
         if (xTaskGetTickCount() >= deadline)
         {
-            return (s_claim == CLAIM_EXCLUSIVE) ? ESP_ERR_INVALID_STATE
-                                                : ESP_ERR_TIMEOUT;
+            result = (s_claim == CLAIM_EXCLUSIVE) ? ESP_ERR_INVALID_STATE
+                                                  : ESP_ERR_TIMEOUT;
+            break;
+        }
+
+        /* counted from its first look that found the chip taken */
+        if (!waiting)
+        {
+            waiting = true;
+            portENTER_CRITICAL(&s_claim_lock);
+            s_waiters++;
+            portEXIT_CRITICAL(&s_claim_lock);
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+
+    if (waiting)
+    {
+        portENTER_CRITICAL(&s_claim_lock);
+        s_waiters--;
+        portEXIT_CRITICAL(&s_claim_lock);
+    }
+
+    return result;
+}
+
+uint8_t obd_chip_waiters(void)
+{
+    return s_waiters;
 }
 
 void obd_core_release(void)
@@ -160,6 +207,18 @@ void obd_core_release(void)
 bool obd_core_exclusive_held(void)
 {
     return s_claim == CLAIM_EXCLUSIVE;
+}
+
+void obd_core_reserve(bool on)
+{
+    portENTER_CRITICAL(&s_claim_lock);
+    s_reserved = on ? xTaskGetCurrentTaskHandle() : NULL;
+    portEXIT_CRITICAL(&s_claim_lock);
+}
+
+bool obd_core_reserved(void)
+{
+    return s_reserved != NULL;
 }
 
 int obd_core_claim_state(void)

@@ -213,7 +213,7 @@ static void wire_note(const char *what, int baud)
  * opens it again in the usual 350 ms. Not acknowledged = not confirmed:
  * the second try; the caller says so when that fails too.
  */
-static bool chip_soft_reset(char *resp, size_t resp_len)
+bool obd_bringup_soft_reset(char *resp, size_t resp_len)
 {
     for (int attempt = 0; attempt < 2; attempt++)
     {
@@ -370,7 +370,7 @@ esp_err_t obd_bringup_run(int *active_baud)
         }
 
         ESP_LOGI(TAG, "chip awake; warm start (ATWS) instead of hardware reset");
-        reset_done = chip_soft_reset(resp, sizeof(resp));
+        reset_done = obd_bringup_soft_reset(resp, sizeof(resp));
 
         if (!reset_done)
         {
@@ -465,8 +465,8 @@ esp_err_t obd_bringup_run(int *active_baud)
            answers although READY read asleep or never held still. By
            command again, where the reset pin used to do it; a session the
            run before left open on the vehicle's bus must not outlive this
-           (see chip_soft_reset). */
-        reset_done = chip_soft_reset(resp, sizeof(resp));
+           (see obd_bringup_soft_reset). */
+        reset_done = obd_bringup_soft_reset(resp, sizeof(resp));
 
         /* a chip in its download mode (2026-11-12): a firmware update that
            was cut short leaves the chip in its loader, which answers every
@@ -535,11 +535,16 @@ esp_err_t obd_bringup_run(int *active_baud)
             /* accepted (left alone by the start-up update) but older than
                the packaged image: the card on System > Maintenance and
                `obd_chip` say the same (Ali, 2026-10-28) */
+            /* since 2026-11-21 the update is accepted only in a start that
+               began with the power coming on (obd_chip_fw_job.c) */
             ESP_LOGW(TAG, "chip firmware %.*s is older than the packaged %s: "
-                     "update it from System > Maintenance or with "
-                     "obd_chip update",
+                     "%s (System > Maintenance, or obd_chip update)",
                      (int)strcspn(resp, "\r\n>"), resp,
-                     obd_chip_builtin_fw_version());
+                     obd_chip_builtin_fw_version(),
+                     obd_chip_power_on_start()
+                         ? "the update is offered in this start"
+                         : "unplug the adapter for a minute, the update is "
+                           "offered in the start behind that");
         }
     }
 
