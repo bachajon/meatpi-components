@@ -33,6 +33,7 @@ idf_component_register(
          "${comp_dir}/autopid_sched.c"
          "${comp_dir}/autopid_bus_core.c"
          "${comp_dir}/autopid_send_core.c"
+         "${comp_dir}/autopid_send_reply.c"
          "${comp_dir}/autopid_scan_rows.c"
          "${comp_dir}/autopid_bus_guard.c"
          "${comp_dir}/autopid_dialect.c"

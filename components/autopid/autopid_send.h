@@ -54,8 +54,8 @@
  * normal before the chip leaves the bus.
  *
  * The pure half (autopid_send_core.c: the request's JSON, the checks, the
- * chip words, how a reply reads) is host-tested; the device half is
- * autopid_send.c.
+ * chip words, how a reply reads; autopid_send_reply.c: the reply as `reply`
+ * and `replies`) is host-tested; the device half is autopid_send.c.
  */
 #pragma once
 
@@ -170,6 +170,21 @@ size_t ap_send_data(const ap_send_frame_t *f, char *out, size_t cap);
  *  as an answer = on the bus; `CAN ERROR` = nobody acknowledged; an error
  *  word, `?` or nothing = refused. */
 ap_send_result_t ap_send_classify(const char *reply);
+
+/* ---- pure (autopid_send_reply.c, host-tested) ------------------------------- */
+
+/** A chip reply as one line, the prompt and the line ends dropped and the
+ *  lines joined by a space (`reply` of a frame; cut at @p cap). @return the
+ *  length written. */
+size_t ap_send_reply_join(const char *resp, char *out, size_t cap);
+
+/** The next line of a chip reply (2026-11-21): the text up to its line end
+ *  into @p line, the prompt dropped, empty lines skipped, a line longer than
+ *  @p cap cut there. @return where the walk goes on, NULL when no line is
+ *  left (and @p line is ""). Start with @p p = the reply. One line per
+ *  answer of `replies`: an OBD request to 7DF answered by seven ECUs is
+ *  seven lines. */
+const char *ap_send_reply_next(const char *p, char *line, size_t cap);
 
 /** "sent", "no_ack", "error", "not_sent". */
 const char *ap_send_result_word(ap_send_result_t r);

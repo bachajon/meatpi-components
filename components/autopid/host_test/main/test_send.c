@@ -474,6 +474,93 @@ void test_send_what_the_chip_said(void)
     TEST_ASSERT_EQUAL_STRING("can", ap_send_where_word(AP_SEND_CAN));
 }
 
+/* 7DF 02 01 00 00 00 00 00 on a 2012 Chevrolet Volt (2026-11-21): its
+   seven ECUs' answers as the chip printed them, the order of that request
+   (it varies from one to the next). `reply` was cut at 46 characters, in
+   the middle of the second answer. The reply is whole now, and `replies`
+   is one answer a line. */
+void test_send_reply_lines(void)
+{
+    static const char *const ECU[] =
+    {
+        "7E8 06 41 00 BE 7F B8 13 AA", "7EB 06 41 00 80 40 00 01 AA",
+        "7EF 06 41 00 00 00 00 01 AA", "7EC 06 41 00 80 00 00 01 AA",
+        "7E9 06 41 00 80 00 00 01 AA", "7EA 06 41 00 80 00 00 01 AA",
+        "7ED 06 41 00 00 00 00 01 AA",
+    };
+    const size_t n_ecu = sizeof(ECU) / sizeof(ECU[0]);
+    char resp[256] = "";
+    char joined[256] = "";
+    char text[256];
+    char line[64];
+
+    /* as the chip prints it: a space before each line end, the prompt */
+    for (size_t i = 0; i < n_ecu; i++)
+    {
+        strcat(resp, ECU[i]);
+        strcat(resp, " \r");
+        strcat(joined, (i > 0) ? " " : "");
+        strcat(joined, ECU[i]);
+    }
+
+    strcat(resp, "\r>");
+
+    /* `reply`: whole, one line */
+    TEST_ASSERT_EQUAL_UINT(strlen(joined),
+                           ap_send_reply_join(resp, text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING(joined, text);
+
+    /* what the 48-byte field kept: the second answer cut off */
+    TEST_ASSERT_EQUAL_UINT(46, ap_send_reply_join(resp, text, 48));
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 7F B8 13 AA 7EB 06 41 00 80 40",
+                             text);
+    TEST_ASSERT_EQUAL_UINT(195, strlen(joined)); /* the whole reply */
+
+    /* `replies`: one answer a line, every one of them, in order */
+    const char *p = resp;
+    size_t got = 0;
+
+    while ((p = ap_send_reply_next(p, line, sizeof(line))) != NULL)
+    {
+        TEST_ASSERT_TRUE(got < n_ecu);
+        TEST_ASSERT_EQUAL_STRING(ECU[got], line);
+        got++;
+    }
+
+    TEST_ASSERT_EQUAL_UINT(n_ecu, got);
+    TEST_ASSERT_EQUAL_STRING("", line);
+
+    /* nobody answered: one line; the prompt and blank lines are none */
+    p = ap_send_reply_next("NO DATA\r\r>", line, sizeof(line));
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_STRING("NO DATA", line);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, line, sizeof(line)));
+    TEST_ASSERT_NULL(ap_send_reply_next("\r\r>", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_NULL(ap_send_reply_next("", line, sizeof(line)));
+    TEST_ASSERT_NULL(ap_send_reply_next(NULL, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_UINT(0, ap_send_reply_join(NULL, text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING("", text);
+
+    /* before CAN: the init line and the answer are two lines */
+    p = ap_send_reply_next("BUS INIT: OK\r48 6B 10 41 00 BE\r", line,
+                           sizeof(line));
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK", line);
+    p = ap_send_reply_next(p, line, sizeof(line));
+    TEST_ASSERT_EQUAL_STRING("48 6B 10 41 00 BE", line);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, line, sizeof(line)));
+
+    /* a line longer than the buffer is cut there, and the walk goes on
+       with the next line */
+    char small[8];
+
+    p = ap_send_reply_next("7E8 06 41 00\r7E9\r", small, sizeof(small));
+    TEST_ASSERT_EQUAL_STRING("7E8 06", small);
+    p = ap_send_reply_next(p, small, sizeof(small));
+    TEST_ASSERT_EQUAL_STRING("7E9", small);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, small, sizeof(small)));
+}
+
 void run_send_tests(void)
 {
     RUN_TEST(test_send_hex);
@@ -484,4 +571,5 @@ void run_send_tests(void)
     RUN_TEST(test_send_where_the_chip_goes);
     RUN_TEST(test_send_words_are_ram_and_undone);
     RUN_TEST(test_send_what_the_chip_said);
+    RUN_TEST(test_send_reply_lines);
 }
