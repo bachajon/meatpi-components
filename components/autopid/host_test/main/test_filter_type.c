@@ -6,12 +6,17 @@
  *        custom one. The line a test of a filter shows for a captured
  *        frame (ap_flt_frame_line), read back by the monitor-line parser.
  *        And the protocol a window opens on (ap_flt_window_proto): the
- *        one of the id's width, as the legacy firmware chose it.
+ *        one of the id's width, as the legacy firmware chose it. And the
+ *        bus of a filter (2026-11-21, GitHub issue #1078): the car's own,
+ *        another one refused while the filter is on and switched off in a
+ *        stored file.
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "unity.h"
 
+#include "autopid_bus.h"
 #include "autopid_private.h"
 
 /* ~1 MB (the 2048-parameter pool): static, never on the task stack */
@@ -188,6 +193,82 @@ void test_flt_window_proto(void)
     }
 }
 
+/* A filter listens on the car's own bus (2026-11-21, GitHub issue #1078):
+   its window is the car's OBD protocol, so a `bus` of sw on a filter of
+   0x1026C0CB (a GMLAN single-wire frame) was read by nobody, and the filter
+   listened on the HS bus and never filled. Refused while the filter is on;
+   a stored file is switched off once, and the rest of it loads. */
+void test_filter_bus_is_the_cars_own(void)
+{
+    char err[96] = "";
+    int off = -1;
+
+    TEST_ASSERT_TRUE(ap_filter_bus_ok(NULL));
+    TEST_ASSERT_TRUE(ap_filter_bus_ok(""));
+    TEST_ASSERT_TRUE(ap_filter_bus_ok("obd"));
+    TEST_ASSERT_FALSE(ap_filter_bus_ok("sw"));
+    TEST_ASSERT_FALSE(ap_filter_bus_ok("ms"));
+    TEST_ASSERT_FALSE(ap_filter_bus_ok("ch"));
+    TEST_ASSERT_FALSE(ap_filter_bus_ok("hs"));
+    TEST_ASSERT_FALSE(ap_filter_bus_ok("SW"));
+
+    /* on, with another bus: refused, whole in the parser's 96 bytes */
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(
+        "{\"filters\":[{\"frame_id\":270975179,\"bus\":\"sw\","
+        PRM("hvac") "}]}", &s_cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("filter 1026C0CB: a filter listens on bus obd "
+                             "only (ms, sw, ch: not yet); switch it off", err);
+
+    /* the car's own, said or not, and another one on a filter that is off;
+       a bus that is not text is none, as before */
+    load("{\"filters\":["
+         "{\"frame_id\":288,\"bus\":\"obd\"," PRM("odo") "},"
+         "{\"frame_id\":289," PRM("b") "},"
+         "{\"frame_id\":270975179,\"bus\":\"sw\",\"enabled\":false,"
+         PRM("hvac") "},"
+         "{\"frame_id\":290,\"bus\":7," PRM("c") "}]}");
+    TEST_ASSERT_EQUAL(4, s_cfg.n_filters);
+    TEST_ASSERT_TRUE(s_cfg.filters[0].enabled);
+    TEST_ASSERT_FALSE(s_cfg.filters[2].enabled);
+
+    /* the loader's repair: a stored file with such a filter on loads with
+       that filter off and every other one as it was */
+    static const char STORED[] =
+        "{\"filters\":["
+        "{\"frame_id\":270975179,\"bus\":\"sw\"," PRM("hvac") "},"
+        "{\"frame_id\":288,\"bus\":\"obd\"," PRM("odo") "},"
+        "{\"frame_id\":275857472,\"bus\":\"ms\",\"enabled\":false,"
+        PRM("refused") "}]}";
+
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(STORED, &s_cfg, err,
+                                                  sizeof(err)));
+
+    char *fixed = ap_config_repair_filter_bus(STORED, &off);
+
+    TEST_ASSERT_NOT_NULL(fixed);
+    TEST_ASSERT_EQUAL(1, off);
+    load(fixed);
+    TEST_ASSERT_EQUAL(3, s_cfg.n_filters);
+    TEST_ASSERT_FALSE(s_cfg.filters[0].enabled);
+    TEST_ASSERT_TRUE(s_cfg.filters[1].enabled);
+    TEST_ASSERT_FALSE(s_cfg.filters[2].enabled);
+
+    /* once: the repaired text needs no second repair */
+    int again = -1;
+
+    TEST_ASSERT_NULL(ap_config_repair_filter_bus(fixed, &again));
+    TEST_ASSERT_EQUAL(0, again);
+    free(fixed);
+
+    /* nothing to repair, and a text that is no JSON: left to the parser */
+    TEST_ASSERT_NULL(ap_config_repair_filter_bus(
+        "{\"filters\":[{\"frame_id\":288," PRM("odo") "}]}", &off));
+    TEST_ASSERT_EQUAL(0, off);
+    TEST_ASSERT_NULL(ap_config_repair_filter_bus("{}", &off));
+    TEST_ASSERT_NULL(ap_config_repair_filter_bus("nonsense", &off));
+    TEST_ASSERT_EQUAL(0, off);
+}
+
 void run_filter_type_tests(void)
 {
     RUN_TEST(test_filter_type_from_the_profile_tag);
@@ -195,4 +276,5 @@ void run_filter_type_tests(void)
     RUN_TEST(test_filter_type_gated_filter_is_never_picked);
     RUN_TEST(test_flt_frame_line);
     RUN_TEST(test_flt_window_proto);
+    RUN_TEST(test_filter_bus_is_the_cars_own);
 }

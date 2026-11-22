@@ -227,6 +227,24 @@ esp_err_t autopid_config_load(ap_config_t *cfg)
         (void)filesystem_write(AP_CONFIG_PATH, buf, got);
     }
 
+    /* a filter switched on with a bus of ms, sw or ch, stored before
+       2026-11-21: nobody read that bus and the filter listened on the car's
+       own one (GitHub issue #1078). Switched off the same way, so the rest
+       of the tables keep polling */
+    fixed = ap_config_repair_filter_bus(buf, &switched_off);
+
+    if (fixed != NULL)
+    {
+        ESP_LOGW(TAG, "config file: %d filter%s with a bus other than obd "
+                      "switched off and the file rewritten: a filter listens "
+                      "on the car's own bus only",
+                 switched_off, switched_off == 1 ? "" : "s");
+        free(buf);
+        buf = fixed;
+        got = strlen(buf);
+        (void)filesystem_write(AP_CONFIG_PATH, buf, got);
+    }
+
     char perr[96] = "";
 
     err = ap_config_parse(buf, cfg, perr, sizeof(perr));
