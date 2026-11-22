@@ -515,6 +515,13 @@ void dl_files_make(char *out, size_t len, const char *prefix,
  * leaves *off alone only for an exact hit. */
 int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
                     bool exact, long *off);
+/* the `since` query value of both routes, raw from the query string
+ * (2026-11-21): percent-decoded ("%3A" is the cursor's colon), then
+ * "<epoch>:<offset>" (exact) or "<epoch>" (seconds, or milliseconds over
+ * 1e11, returned as seconds) or empty (0). False for anything else: the
+ * route answers 400. Outputs are 0/false on a refusal. */
+bool dl_export_parse_since(const char *raw, int64_t *epoch, long *off,
+                           bool *exact);
 
 /* ---- data_logger_export.c: GET /api/logger/export ------------------------ */
 struct httpd_req;
@@ -535,6 +542,9 @@ esp_err_t dl_export_get_handler(struct httpd_req *req);
 /* the 400 of both routes when the params stream is sqlite or binary: an
    expected answer, sent without a log line (data_logger_export.c) */
 esp_err_t dl_export_refuse_format(struct httpd_req *req);
+/* the 400 of both routes for a `since` that dl_export_parse_since()
+   refuses (2026-11-21), sent the same way */
+esp_err_t dl_export_refuse_since(struct httpd_req *req);
 void dl_export_stats(data_logger_stats_t *out);   /* the export_* fields */
 /* the params files' epochs, ascending (the walk both routes share) */
 int dl_export_list_epochs(int64_t *out, int cap, const char *ext);

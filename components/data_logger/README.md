@@ -132,7 +132,15 @@ Actions:
   remembers the time of its last import), which starts at the newest file
   opened at or before it (the pure `dl_export_start()` in
   `data_logger_cursor.c`, host-tested); nothing or 0 starts at the oldest
-  file. `name` (2026-09-06) filters to one parameter (the value after the
+  file. Since 2026-11-21 `since` is percent-decoded before it is read
+  (`dl_export_parse_since()`, same file, host-tested; the GPX route
+  shares it): a client that encodes its query sends the cursor's colon as
+  `%3A`, which was read as a plain epoch, restarted the export at that
+  file and handed the same `_cursor` back, so a client that followed it
+  looped. A value that is neither form (`abc`, `12:`, `:5`, a sign, a
+  trailing character) is answered 400 `since is <epoch> or
+  <epoch>:<offset>` instead of being read as far as it parses.
+  `name` (2026-09-06) filters to one parameter (the value after the
   last `.` or the full `source.name`); the cursor walks every line either
   way, bounded per request by 512 KB read / 64 KB emitted / `limit` lines
   (cap 2000). Every read window re-seeks to the cursor (the old loop
@@ -302,7 +310,7 @@ no longer depends on the flash worker (`filesystem`, the stream helpers).
 
 ## Testing
 
-- Host: `host_test/` (45 tests: file-name/prefix rules, the export's start, line and window rules, hex filter
+- Host: `host_test/` (47 tests: file-name/prefix rules, the export's start, `since` parse, line and window rules, hex filter
   parse, `.wdl` + csv frame-encoder golden vectors, the recovery
   helpers (torn text/.wdl tails, set-aside names, salvage sanity, CRC,
   the floor under an open, the fault's detail, no corrupt verdict under
