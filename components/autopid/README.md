@@ -1267,6 +1267,22 @@ No row can ask for the wake mode, and no automatic path sends it: the
 polling of a parked car must never wake it. `wake` exists in a request of
 can.send alone.
 
+**On a car (2026-11-21, a 2012 Chevrolet Volt, 6.0.0-beta.14).** `sent`
+says the frame went out and somebody acknowledged it, not that a module
+acted on it, so the gaps between frames are the car's to choose. On that
+car, behind the wake frame (`100`, `wake`) and the network wake (`621`
+`00 FF FF FF FF FF 00 00`), a body command (lock, flash) was ignored
+about 120 ms after the wake and carried out with about 1 s, while a
+remote start wanted its command about 0.15 s after `621` (with 1 s the
+car locked and flashed but did not start, twice); each frame's `gap_ms`
+carries such a pause. And the data goes out as given, with the chip's CAN
+formatting off: an OBD request is padded to eight bytes by whoever sends
+it. `7DF` with `02 01 00` was answered by four of that car's seven ECUs
+(7EC, 7ED and 7EF ignore a short frame), with `02 01 00 00 00 00 00 00`
+by all seven. A network wake (`621`) sent while the car is already awake
+may come back `error` with `BUS BUSY`; the car is awake all the same, so a
+script can let that one frame fail.
+
 ### What comes back
 
 `autopid_can_send()` returns `ESP_OK` when every frame is on the bus,
