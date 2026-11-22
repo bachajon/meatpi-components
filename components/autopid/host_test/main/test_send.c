@@ -158,6 +158,20 @@ void test_send_parse_refusals(void)
     TEST_ASSERT_NOT_NULL(strstr(s_err, "without data"));
     TEST_ASSERT_FALSE(parse("{\"bus\":\"obd\",\"id\":\"7DF\",\"data\":\"\"}"));
 
+    /* the data's sentence says which rule it broke (2026-11-21: one
+       sentence said all three) */
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"0\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data has half a byte: two hex digits "
+                             "a byte (\"80 01 FF\")", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"8 0\"}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "half a byte"));
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"8G\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data is hex digits (\"80 01 FF\") and "
+                             "has another character", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\","
+                            "\"data\":\"010203040506070809\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data is 8 bytes at most", s_err);
+
     /* the wake mode is the single-wire transceiver's, nobody else's */
     TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"100\",\"data\":\"00\","
                             "\"wake\":true}"));
@@ -181,6 +195,39 @@ void test_send_parse_refusals(void)
                             "\"data\":\"01\"}"));
     TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"bus_kbps\":-5,\"id\":\"1\","
                             "\"data\":\"01\"}"));
+
+    /* a key the request does not know (2026-11-21): refused, with the keys
+       it does. It was ignored and the request answered ok: a gap_ms beside
+       frames, an at_ms or a repeat in a frame, each sent as if not there */
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"01\","
+                            "\"repeat\":3}"));
+    TEST_ASSERT_EQUAL_STRING("unknown key \"repeat\" (bus, bus_kbps, id, ext, "
+                             "data, wake, gap_ms)", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"ID\":\"7DF\",\"data\":\"01\"}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "unknown key \"ID\""));
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"gap_ms\":300,"
+                            "\"frames\":[{\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_EQUAL_STRING("gap_ms is a key of each frame in frames", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"note\":\"x\","
+                            "\"frames\":[{\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_EQUAL_STRING("unknown key \"note\" (bus, bus_kbps, frames)",
+                             s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"frames\":["
+                            "{\"id\":\"100\",\"data\":\"00\"},"
+                            "{\"id\":\"621\",\"data\":\"00\",\"at_ms\":300}]}"));
+    TEST_ASSERT_EQUAL_STRING("frame 2: unknown key \"at_ms\" (id, ext, data, "
+                             "wake, gap_ms)", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"frames\":["
+                            "{\"bus\":\"sw\",\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "frame 1: unknown key \"bus\""));
+
+    /* every key it knows, in both forms */
+    TEST_ASSERT_TRUE(parse("{\"bus\":\"sw\",\"bus_kbps\":0,\"id\":\"100\","
+                           "\"ext\":false,\"data\":\"00\",\"wake\":true,"
+                           "\"gap_ms\":300}"));
+    TEST_ASSERT_TRUE(parse("{\"bus\":\"sw\",\"bus_kbps\":0,\"frames\":["
+                           "{\"id\":\"100\",\"ext\":false,\"data\":\"00\","
+                           "\"wake\":true,\"gap_ms\":300}]}"));
 }
 
 void test_send_parse_sequence(void)

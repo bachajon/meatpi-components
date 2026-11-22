@@ -1190,6 +1190,16 @@ poller parked, one job at a time).
 | `frames` | in place of `id` and `data`: 1 to 8 frames, each with `id`, `data`, and optionally `ext`, `wake`, `gap_ms` |
 | `gap_ms` | in `frames`: from this frame's start to the next one's, 0 to 2000 (5000 for all of a request) |
 
+Any other key is refused (400) with the keys that are allowed there
+(2026-11-21): `unknown key "repeat" (bus, bus_kbps, id, ext, data, wake,
+gap_ms)`, `frame 2: unknown key "at_ms" (id, ext, data, wake, gap_ms)`,
+and for a frame's key beside `frames`, `gap_ms is a key of each frame in
+frames`. Until then such a key was ignored and the request answered ok, so
+a `gap_ms` beside `frames`, or an `at_ms` or a `repeat` in a frame, went
+out as if it were not there. A `data` that is refused says why: `has half
+a byte`, `is hex digits ("80 01 FF") and has another character` or `is 8
+bytes at most`.
+
 | `bus` | Goes out on | Through |
 |---|---|---|
 | `can` | pins 6 and 14 | WiCAN's own CAN controller (`can_manager`): it must be enabled and on the bus. No chip involved, so it works while an app holds the chip, and it takes about 3 ms |
