@@ -848,6 +848,19 @@ chain, the allowed chains, the CAN ERROR count, the words the chip stores),
 these buses, J1939 formatting, listening rows, a `bus` for a filter (a
 monitor window is the car's own bus).
 
+**A filter's `bus` (2026-11-21, GitHub issue #1078).** Until then the
+parser did not read it: a filter with `"bus": "sw"` (a GMLAN single-wire
+frame such as 0x1026C0CB) was taken, listened on the car's own bus, where
+that id is never sent, and never filled. The tables now refuse a filter
+that is switched on with a bus other than `obd` (`filter 1026C0CB: a
+filter listens on bus obd only (ms, sw, ch: not yet); switch it off`); a
+filter that is switched off may keep it. A file stored before is not
+refused at boot, which would empty the tables: the loader switches such a
+filter off once, rewrites the file and says so in a W line, and the rest of
+the tables poll as before (`ap_filter_bus_ok()`,
+`ap_config_repair_filter_bus()` in `autopid_bus_core.c`, host-tested in
+`test_filter_type.c`). The web UI writes no `bus` on a filter.
+
 ### No chain of the tables sends a word the chip stores (2026-11-11)
 
 A protocol preset (`STP nn`, `VTP nnn`) and a link word (`ATLNK..`) are

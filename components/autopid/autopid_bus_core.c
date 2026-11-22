@@ -467,6 +467,55 @@ char *ap_config_repair_store(const char *json, int *switched_off)
     return out;
 }
 
+bool ap_filter_bus_ok(const char *word)
+{
+    ap_row_bus_t bus = AP_BUS_OBD;
+
+    return ap_bus_parse(word, &bus) && bus == AP_BUS_OBD;
+}
+
+char *ap_config_repair_filter_bus(const char *json, int *switched_off)
+{
+    cJSON *root = cJSON_Parse(json);
+    char *out = NULL;
+    int n = 0;
+
+    *switched_off = 0;
+
+    if (root == NULL)
+    {
+        return NULL; /* not ours to judge: the parser says what is wrong */
+    }
+
+    cJSON *f = NULL;
+
+    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(root, "filters"))
+    {
+        const cJSON *bus = cJSON_GetObjectItemCaseSensitive(f, "bus");
+
+        /* as the parser reads them: anything but `false` is a filter that
+           is on, and a bus that is not text is none */
+        if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(f, "enabled")) ||
+            ap_filter_bus_ok(cJSON_IsString(bus) ? bus->valuestring : NULL))
+        {
+            continue;
+        }
+
+        cJSON_DeleteItemFromObjectCaseSensitive(f, "enabled");
+        cJSON_AddFalseToObject(f, "enabled");
+        n++;
+    }
+
+    if (n > 0)
+    {
+        out = cJSON_PrintUnformatted(root);
+    }
+
+    cJSON_Delete(root);
+    *switched_off = (out != NULL) ? n : 0;
+    return out;
+}
+
 bool ap_bus_chain_allowed(const char *chain)
 {
     if (chain == NULL)
