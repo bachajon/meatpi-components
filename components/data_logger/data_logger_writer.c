@@ -290,6 +290,10 @@ static void write_batch(int idx)
         return;
     }
 
+    /* the batch is on the card: the ring's read position follows it to
+       the PSRAM chip (a reset must not find the one from before it) */
+    dl_core_commit_indices();
+
     st->written += n;
     st->file_rows += n;
 

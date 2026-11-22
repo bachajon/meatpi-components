@@ -34,8 +34,10 @@ void test_record_layout_is_32_bytes_with_the_stamps_in_the_padding(void)
     TEST_ASSERT_EQUAL_size_t(32, sizeof(dl_record_t));
     TEST_ASSERT_EQUAL_size_t(24, offsetof(dl_record_t, kind));
     TEST_ASSERT_EQUAL_size_t(25, offsetof(dl_record_t, flags));
+    TEST_ASSERT_EQUAL_size_t(26, offsetof(dl_record_t, check));
     TEST_ASSERT_EQUAL_size_t(28, offsetof(dl_record_t, mono_ms));
-    TEST_ASSERT_EQUAL_UINT32(2, DL_PS_VERSION); /* the envelope moved on */
+    /* the envelope moved on: 2 with the stamps, 3 with the record's check */
+    TEST_ASSERT_EQUAL_UINT32(3, DL_PS_VERSION);
 }
 
 void test_rebase_adds_the_steps_that_came_after_the_record(void)

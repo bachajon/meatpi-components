@@ -30,9 +30,85 @@
  *        rules; data_logger_export.c applies them. Kept apart from
  *        data_logger_files.c, which sits at the 700-line rule.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "data_logger_private.h"
+
+/* A query value as a client sends it. A browser's encodeURIComponent and a
+ * script's URL library write the cursor's colon as %3A and a space in a
+ * parameter name as %20; httpd hands the value over as it came. Until
+ * 2026-11-22 the route read it raw: an encoded cursor was a plain epoch
+ * (the first page again, for ever), an encoded name matched no row. A '%'
+ * that two hex digits do not follow stays as it is. */
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+
+    return -1;
+}
+
+void dl_export_unescape(char *s)
+{
+    char *out = s;
+
+    if (s == NULL)
+    {
+        return;
+    }
+
+    while (*s != '\0')
+    {
+        int hi = (s[0] == '%') ? hex_digit(s[1]) : -1;
+        int lo = (hi >= 0) ? hex_digit(s[2]) : -1;
+
+        if (lo >= 0 && (hi != 0 || lo != 0)) /* never a NUL into the text */
+        {
+            *out++ = (char)(hi * 16 + lo);
+            s += 3;
+        }
+        else
+        {
+            *out++ = *s++;
+        }
+    }
+
+    *out = '\0';
+}
+
+void dl_export_parse_since(char *val, int64_t *epoch, long *off, bool *exact)
+{
+    long long e = 0;
+    long o = 0;
+
+    dl_export_unescape(val);
+    /* "<epoch>:<offset>" = a cursor of ours (exact); a bare number = a
+     * moment in time (seconds, or milliseconds: a client's watermark), the
+     * rows from then on */
+    *exact = strchr(val, ':') != NULL;
+    (void)sscanf(val, "%lld:%ld", &e, &o);
+
+    if (!*exact && e > 100000000000LL)
+    {
+        e /= 1000; /* milliseconds given */
+    }
+
+    *epoch = (int64_t)e;
+    *off = o;
+}
 
 int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
                     bool exact, long *off)

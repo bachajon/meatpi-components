@@ -67,8 +67,10 @@
 #define DL_BYTES_PER_ROW   26 /* measured: 100 KB / 4000 rows          */
 #define DL_BYTES_PER_FRAME 44 /* sqlite frames-table size estimate     */
 /* the PSRAM .noinit envelope's layout version: 2 since the record grew
- * its monotonic stamp (2026-10-13); a version-1 ring is discarded once */
-#define DL_PS_VERSION 2u
+ * its monotonic stamp (2026-10-13); 3 since every record carries a check
+ * and the rings count their pushes (2026-11-22); an older ring is
+ * discarded once */
+#define DL_PS_VERSION 3u
 
 /* record kinds */
 #define DL_REC_PARAM 0
@@ -84,7 +86,11 @@
 #define DL_FRAME_RTR 0x02
 
 /* one queued record (PSRAM rings; 32 bytes on the S3 and on the host:
- * the stamp and the flags sit in what used to be padding) */
+ * the stamp, the flags and the check sit in what used to be padding).
+ * `check` binds the record's fields to each other and to its place in
+ * the ring's sequence of pushes (dl_recover_record_check): a record that
+ * reached the PSRAM chip only in part before a reset, or a slot that
+ * still holds its previous record, does not pass it (2026-11-22). */
 typedef struct
 {
     int64_t ts_ms;               /* wall clock, epoch ms, at production */
@@ -105,6 +111,7 @@ typedef struct
     } u;
     uint8_t  kind;               /* DL_REC_PARAM / DL_REC_FRAME       */
     uint8_t  flags;              /* DL_REC_*                          */
+    uint16_t check;              /* dl_recover_record_check()         */
     uint32_t mono_ms;            /* esp_timer ms at production (wraps
                                     at 49.7 days: compared modulo)    */
 } dl_record_t;
@@ -465,6 +472,7 @@ bool              dl_core_pop(int st, dl_record_t *rec);
 uint32_t          dl_core_fill(int st);
 dl_param_entry_t *dl_core_param(int idx);
 void              dl_core_forget_db_ids(void);  /* after every open of the params file */
+void              dl_core_commit_indices(void); /* after a batch reached the card */
 
 /* ---- recovery helpers (data_logger_recover.c: PURE, host-tested) ---------- */
 size_t   dl_recover_text_keep(const char *buf, size_t len);
@@ -475,6 +483,20 @@ bool     dl_recover_is_corrupt_name(const char *fname, const char *prefix,
 bool     dl_recover_record_sane(const dl_record_t *r);
 bool     dl_recover_ring_sane(uint32_t cap, uint32_t cap_limit, uint32_t head,
                               uint32_t tail, uint32_t *fill);
+/* a record's check for the push number `seq` of its ring: over every field
+ * the record's kind defines (never the padding) and over `seq` */
+uint16_t dl_recover_record_check(const dl_record_t *r, uint32_t seq);
+/* the records a ring carried over a reset, judged one by one: `fill`
+ * records from `tail` on, the last of them pushed as number
+ * `next_seq - 1`. A record stays when it is of `kind`, in range, passes
+ * its check for its place and (a param record) names a registry slot in
+ * use (`params`, DL_MAX_PARAMS entries; NULL = not judged). The kept
+ * records are moved together from `tail` on, marked DL_REC_ABS and
+ * checked anew for the numbers `next_seq - kept` .. `next_seq - 1`.
+ * Returns how many stayed. */
+uint32_t dl_recover_ring_keep(dl_record_t *buf, uint32_t cap, uint32_t tail,
+                              uint32_t fill, uint32_t next_seq, int kind,
+                              const dl_param_entry_t *params);
 uint32_t dl_recover_crc32_update(uint32_t crc, const void *data, size_t len);
 /* an open is tried only with DL_OPEN_RAM_MIN bytes in one free block of the
  * DMA-capable internal heap (the largest one is what the caller passes) */
@@ -523,6 +545,11 @@ struct httpd_req;
    against a page's line and byte budgets through a sink (one call per
    line; false = the client went away). The walk returns the bytes
    consumed: 0 with `stop` set when the first complete line did not fit. */
+/* a query value's %XX decoded in place (the cursor's colon, a name's space) */
+void dl_export_unescape(char *s);
+/* the `since` value of a request, decoded: a cursor "<epoch>:<offset>"
+ * (exact) or a moment in seconds or milliseconds (epoch in seconds, off 0) */
+void dl_export_parse_since(char *val, int64_t *epoch, long *off, bool *exact);
 bool dl_export_line_matches(const char *line, size_t len, const char *name,
                             bool csv);
 bool dl_export_line_is_marker(const char *line, size_t len, bool csv);

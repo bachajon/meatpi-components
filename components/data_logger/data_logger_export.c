@@ -199,9 +199,12 @@ esp_err_t dl_export_get_handler(struct httpd_req *req)
         return dl_export_refuse_format(req);
     }
 
-    char query[160] = "";
+    /* a parameter's `source.name` is up to 47 bytes; a client may send any
+       of them percent-encoded (three bytes each), and a value that does not
+       fit its buffer would read as "no filter": every row */
+    char query[320] = "";
     char val[48];
-    char name[48] = "";
+    char name[160] = "";
     int64_t since_epoch = 0;
     long since_off = 0;
     bool exact = false;
@@ -220,16 +223,9 @@ esp_err_t dl_export_get_handler(struct httpd_req *req)
         if (httpd_query_key_value(query, "since", val, sizeof(val)) ==
                 ESP_OK)
         {
-            /* "<epoch>:<offset>" = a cursor of ours (exact); a bare number
-             * = a moment in time (seconds, or milliseconds: a client's
-             * watermark), the rows from then on */
-            exact = strchr(val, ':') != NULL;
-            sscanf(val, "%lld:%ld", (long long *)&since_epoch, &since_off);
-
-            if (!exact && since_epoch > 100000000000LL)
-            {
-                since_epoch /= 1000; /* milliseconds given */
-            }
+            /* a cursor of ours or a moment in time, as the client wrote
+             * it (the colon may come as %3A) */
+            dl_export_parse_since(val, &since_epoch, &since_off, &exact);
         }
 
         if (httpd_query_key_value(query, "limit", val, sizeof(val)) ==
@@ -248,6 +244,8 @@ esp_err_t dl_export_get_handler(struct httpd_req *req)
         {
             name[0] = '\0';
         }
+
+        dl_export_unescape(name); /* a space comes as %20 */
     }
 
     int64_t epochs[DL_EXPORT_MAX_FILES];

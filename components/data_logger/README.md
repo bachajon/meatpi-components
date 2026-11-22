@@ -40,6 +40,16 @@ touches a file.
   setting picks none / on-change / every-sample. Params appear as
   `autopid.<name>`. For SELECTIVE per-param logging use the rule path
   instead (`on autopid.param match {param} → logger.write`).
+- **device → params** (2026-11-22): `data_logger_device_sink(name, value,
+  changed)` takes what the unit measures itself, under the key its status
+  push uses. main wires the battery voltage: one sample every 10 s as
+  `device.batt_voltage`, the number the push carries (two decimals). The
+  same `autopid_log` gate decides: `all` takes every sample, `changed` one
+  that moved 0.05 V since the last one taken, `off` none. It is there so
+  that the record of a drive holds the battery voltage next to the car's
+  parameters: the Home Assistant integration fills the device's Battery
+  Voltage sensor from it (store and forward), which stayed flat across a
+  drive before.
 - **CAN → frames**: `can_log` subscribes into can_manager's RX fan-out
   (needs can_manager `enabled`; `silent` mode recommended for passive
   logging). `can_filter`/`can_mask`/`can_ext` (hex strings) select
@@ -114,7 +124,8 @@ Actions:
   written/dropped/errors/rotations) + a `can{}` block (enabled, file,
   file_rows, files, queued, frames_written, frames_dropped,
   rotations) + a `clock{}` block (valid, source, steps_this_boot,
-  rotations_by_clock, journal_bytes, journal: the "Time" section).
+  rotations_by_clock, journal_bytes, journal: the "Time" section) +
+  `salvaged`, `salvage_dropped`, `corrupt` (ROBUSTNESS.md).
 - `GET /api/logger/export?stream=params&since=<cursor>&limit=N[&name=<param>]`
   (`data_logger_export.c`): incremental pull of the params stream (jsonl
   and, since 2026-09-06, csv: 400 for the other engines, whose files the
@@ -125,7 +136,12 @@ Actions:
   line ahead of each file's rows, the rows verbatim
   (`{"ts":<epoch ms>,"param":"<source>.<name>","value":n}`, or
   `ts_ms,source.name,value` for csv), then a FINAL
-  `{"_cursor":"<epoch>:<offset>","more":bool}` meta line. `since` takes
+  `{"_cursor":"<epoch>:<offset>","more":bool}` meta line. The values of
+  `since` and `name` are percent-decoded (2026-11-22, pure
+  `dl_export_parse_since()` / `dl_export_unescape()`, host-tested: until
+  then a cursor whose colon came as `%3A` was read as a plain epoch and
+  answered with the file's first page again, for ever, and a `name` with
+  a space, which a browser sends as `%20`, matched no row). `since` takes
   that cursor back (exact: a retired epoch resumes at the next newer file
   from its start) or, since 2026-11-06, a plain epoch (seconds or
   milliseconds: "the rows from that moment", for a client that only
@@ -266,10 +282,14 @@ their torn tail cut on resume; a corrupt file is set aside as
 `<name>.corrupt` (fault `logger_file_corrupt`, best-effort salvage into a
 fresh file of the old name, `tools/db_recover.py` for the thorough pass)
 and logging goes on in a new file; the registry and both rings live in a
-PSRAM `.noinit` envelope so a crash or watchdog loses nothing queued
-(`salvaged` in `/api/logger`); `data_logger_stop()` is synchronous and
-an `esp_restart` shutdown hook calls it, so sleep entry and every
-planned restart close the files first.
+PSRAM `.noinit` envelope so a crash or watchdog loses as little of what
+is queued as can be (`salvaged` in `/api/logger`); every queued record
+carries a check and the next boot drops one that did not reach the PSRAM
+chip whole before the reset (`salvage_dropped`, case 6: without it such a
+record was written under another parameter's name); `data_logger_stop()`
+is synchronous and an `esp_restart` shutdown hook calls it and then
+writes the envelope to the chip, so sleep entry and every planned restart
+close the files first and carry the rest over intact.
 
 **A unit short of internal RAM (case 14, 2026-11-14).** The logger takes
 the internal RAM its files need once, at its start, and keeps it: the

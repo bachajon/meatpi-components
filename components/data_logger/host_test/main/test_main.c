@@ -25,6 +25,9 @@ void test_corrupt_names_round_trip(void);
 void test_record_sanity(void);
 void test_ring_sanity_and_fill_recovery(void);
 void test_crc32_known_vector(void);
+void test_record_check_binds_the_fields_and_the_push_number(void);
+void test_ring_keep_takes_whole_records_only(void);
+void test_ring_keep_drops_the_torn_and_the_stale_record(void);
 void test_open_floor_is_one_kilobyte_in_one_block(void);
 void test_fault_detail_tells_the_memory_from_the_card(void);
 void test_corrupt_is_no_verdict_under_the_floor(void);
@@ -264,6 +267,65 @@ static void test_export_start_rule(void)
     TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 3, 500, false, &off));
     /* no files at all */
     TEST_ASSERT_EQUAL_INT(0, dl_export_start(epochs, 0, 2000, true, &off));
+}
+
+static void test_export_query_values_are_decoded(void)
+{
+    int64_t epoch = -1;
+    long off = -1;
+    bool exact = false;
+    char a[48] = "1795281264:567175";
+    char b[48] = "1795281264%3A567175";
+    char c[48] = "1795281264%3a0";
+    char d[48] = "1795281264";
+    char e[48] = "1795281264123";
+    char f[48] = "";
+
+    dl_export_parse_since(a, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(exact);
+    TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
+    TEST_ASSERT_EQUAL_INT(567175, (int)off);
+    /* the colon encoded: the same cursor, not a plain epoch */
+    epoch = -1; off = -1; exact = false;
+    dl_export_parse_since(b, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(exact);
+    TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
+    TEST_ASSERT_EQUAL_INT(567175, (int)off);
+    dl_export_parse_since(c, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(exact);
+    TEST_ASSERT_EQUAL_INT(0, (int)off);
+    /* a moment in seconds, in milliseconds, nothing */
+    dl_export_parse_since(d, &epoch, &off, &exact);
+    TEST_ASSERT_FALSE(exact);
+    TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
+    TEST_ASSERT_EQUAL_INT(0, (int)off);
+    dl_export_parse_since(e, &epoch, &off, &exact);
+    TEST_ASSERT_FALSE(exact);
+    TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
+    dl_export_parse_since(f, &epoch, &off, &exact);
+    TEST_ASSERT_FALSE(exact);
+    TEST_ASSERT_EQUAL_INT64(0, epoch);
+
+    char n1[32] = "Battery%20SOC";
+    char n2[32] = "A%2BB%2fC";
+    char n3[32] = "50%";
+    char n4[32] = "bad%zzend%4";
+    char n5[32] = "nul%00byte";
+    char n6[32] = "plain_name";
+
+    dl_export_unescape(n1);
+    TEST_ASSERT_EQUAL_STRING("Battery SOC", n1);
+    dl_export_unescape(n2);
+    TEST_ASSERT_EQUAL_STRING("A+B/C", n2);
+    dl_export_unescape(n3);
+    TEST_ASSERT_EQUAL_STRING("50%", n3);
+    dl_export_unescape(n4);
+    TEST_ASSERT_EQUAL_STRING("bad%zzend%4", n4);
+    dl_export_unescape(n5);
+    TEST_ASSERT_EQUAL_STRING("nul%00byte", n5);
+    dl_export_unescape(n6);
+    TEST_ASSERT_EQUAL_STRING("plain_name", n6);
+    dl_export_unescape(NULL);
 }
 
 static void test_scan_tracks_oldest_newest_count(void)
@@ -570,6 +632,7 @@ void app_main(void)
     RUN_TEST(test_make_clamps_negative_epoch);
     RUN_TEST(test_export_start_rule);
     RUN_TEST(test_export_walk_budget);
+    RUN_TEST(test_export_query_values_are_decoded);
     RUN_TEST(test_scan_tracks_oldest_newest_count);
     RUN_TEST(test_scan_ignores_foreign_entries);
     RUN_TEST(test_scan_isolates_streams_by_prefix);
@@ -593,6 +656,9 @@ void app_main(void)
     RUN_TEST(test_record_sanity);
     RUN_TEST(test_ring_sanity_and_fill_recovery);
     RUN_TEST(test_crc32_known_vector);
+    RUN_TEST(test_record_check_binds_the_fields_and_the_push_number);
+    RUN_TEST(test_ring_keep_takes_whole_records_only);
+    RUN_TEST(test_ring_keep_drops_the_torn_and_the_stale_record);
     RUN_TEST(test_open_floor_is_one_kilobyte_in_one_block);
     RUN_TEST(test_fault_detail_tells_the_memory_from_the_card);
     RUN_TEST(test_corrupt_is_no_verdict_under_the_floor);
