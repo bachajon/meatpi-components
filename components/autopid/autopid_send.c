@@ -66,16 +66,27 @@ static const char *TAG = "autopid";
 #define SEND_BUS_TIMEOUT  pdMS_TO_TICKS(6000) /* a K-line bus may start first */
 #define SEND_CTRL_WAIT_MS 150  /* for the controller to report the frame sent */
 #define SEND_REPLY_LEN    48
+#define SEND_RESP_LEN     256  /* what the chip said to one frame            */
+#define SEND_LINE_LEN     64   /* one line of it, in `replies`               */
 
 typedef struct
 {
     ap_send_result_t result;
     int32_t          at_ms;                 /* from the first frame's start */
-    char             reply[SEND_REPLY_LEN]; /* what the chip said, one line */
+    char             reply[SEND_REPLY_LEN]; /* short: what the chip said, or
+                                               why not (`err`, and `reply`
+                                               of a frame not kept whole)   */
 } send_out_t;
 
 /* the transcript of the chip send in flight; under the chip job */
 static char s_tr[SEND_TR_LEN] EXT_RAM_BSS_ATTR;
+
+/* what the chip said to each frame, whole (2026-11-21: `reply` was the at
+   most 47 characters of send_out_t, and the answers of a request to 7DF
+   that seven ECUs answered were cut off); under the chip job, read by
+   build_reply() before the job is released. "" = the chip said nothing to
+   that frame or it was never sent. */
+static char s_resp[AP_SEND_FRAMES_MAX][SEND_RESP_LEN] EXT_RAM_BSS_ATTR;
 
 static esp_err_t refuse(esp_err_t code, char *err, size_t err_len,
                         const char *msg)
@@ -86,34 +97,6 @@ static esp_err_t refuse(esp_err_t code, char *err, size_t err_len,
     }
 
     return code;
-}
-
-/** One line of a chip reply: the prompt and the line ends dropped. */
-static void reply_line(const char *resp, char *out, size_t cap)
-{
-    size_t n = 0;
-
-    for (const char *p = resp; *p != '\0' && n + 1 < cap; p++)
-    {
-        if (*p == '\r' || *p == '\n')
-        {
-            if (n > 0 && out[n - 1] != ' ')
-            {
-                out[n++] = ' ';
-            }
-        }
-        else if (*p != '>')
-        {
-            out[n++] = *p;
-        }
-    }
-
-    while (n > 0 && out[n - 1] == ' ')
-    {
-        n--;
-    }
-
-    out[n] = '\0';
 }
 
 /** Wait until @p due_us (esp_timer), when that is still ahead. */
@@ -258,8 +241,9 @@ static void send_chip(const ap_send_req_t *req, char proto, send_out_t *out,
         const ap_send_frame_t *f = &req->f[i];
         uint16_t key = ap_send_key(req, i, proto);
         char words[40];
-        char resp[256];
+        char *resp = s_resp[i];
 
+        resp[0] = '\0';
         out[i].result = AP_SEND_NOT_SENT;
 
         if (stop)
@@ -320,12 +304,13 @@ static void send_chip(const ap_send_req_t *req, char proto, send_out_t *out,
         out[i].at_ms = (int32_t)((now - t0) / 1000);
         due = now + (int64_t)f->gap_ms * 1000;
 
-        esp_err_t err = ap_base_request_tr(words, resp, sizeof(resp),
+        esp_err_t err = ap_base_request_tr(words, resp, SEND_RESP_LEN,
                                            precan ? SEND_BUS_TIMEOUT
                                                   : SEND_CAN_TIMEOUT, tr);
 
         if (err != ESP_OK)
         {
+            resp[0] = '\0'; /* the sentence below is the reply */
             out[i].result = AP_SEND_ERROR;
             snprintf(out[i].reply, sizeof(out[i].reply), "%s",
                      (err == ESP_ERR_INVALID_STATE)
@@ -336,7 +321,7 @@ static void send_chip(const ap_send_req_t *req, char proto, send_out_t *out,
         }
 
         out[i].result = ap_send_classify(resp);
-        reply_line(resp, out[i].reply, sizeof(out[i].reply));
+        ap_send_reply_join(resp, out[i].reply, sizeof(out[i].reply));
     }
 
     /* home, with what the send set put back: the baseline prelude carries
@@ -416,6 +401,30 @@ static bool job_acquire_wait(void)
 
 /* ---- the result ------------------------------------------------------------- */
 
+/** A frame's `reply` and `replies` out of what the chip said to it, whole
+ *  (s_resp, under the chip job): `reply` one line as before, `replies` one
+ *  answer a line. */
+static void add_chip_reply(cJSON *fo, const char *resp)
+{
+    char text[SEND_RESP_LEN];
+    char line[SEND_LINE_LEN];
+
+    if (ap_send_reply_join(resp, text, sizeof(text)) == 0)
+    {
+        return;
+    }
+
+    cJSON_AddStringToObject(fo, "reply", text);
+
+    cJSON *lines = cJSON_AddArrayToObject(fo, "replies");
+
+    for (const char *p = ap_send_reply_next(resp, line, sizeof(line));
+         p != NULL; p = ap_send_reply_next(p, line, sizeof(line)))
+    {
+        cJSON_AddItemToArray(lines, cJSON_CreateString(line));
+    }
+}
+
 static cJSON *build_reply(const ap_send_req_t *req, const send_out_t *out,
                           int64_t elapsed_us, const char *transcript)
 {
@@ -437,7 +446,13 @@ static cJSON *build_reply(const ap_send_req_t *req, const send_out_t *out,
                                 ap_send_result_word(out[i].result));
         cJSON_AddNumberToObject(fo, "at_ms", out[i].at_ms);
 
-        if (out[i].reply[0] != '\0')
+        /* a chip send (transcript set) keeps what the chip said whole; the
+           sentence of a frame the chip or the controller refused stays */
+        if (transcript != NULL && s_resp[i][0] != '\0')
+        {
+            add_chip_reply(fo, s_resp[i]);
+        }
+        else if (out[i].reply[0] != '\0')
         {
             cJSON_AddStringToObject(fo, "reply", out[i].reply);
         }

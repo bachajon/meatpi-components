@@ -22,6 +22,7 @@ idf_component_register(
          "autopid_bus_core.c"
          "autopid_bus.c"
          "autopid_send_core.c"
+         "autopid_send_reply.c"
          "autopid_send.c"
          "autopid_bus_guard.c"
          "autopid_dialect.c"
