@@ -105,6 +105,33 @@ static cJSON *response_obj(void)
     cJSON_AddStringToObject(o, "last_error", s.last_error);
     cJSON_AddStringToObject(o, "last_error_time", s.last_error_time);
 
+    /* why (2026-11-22): one entry per address that did not take the last
+       push, in the order tried; empty when the first address took it. With
+       `status` "ok" an entry means the failover delivered. */
+    cJSON *fails = cJSON_AddArrayToObject(o, "failures");
+
+    for (int i = 0; fails != NULL && i < s.fail_n && i < HW_URLS; i++)
+    {
+        cJSON *f = cJSON_CreateObject();
+
+        if (f == NULL)
+        {
+            break;
+        }
+
+        cJSON_AddNumberToObject(f, "slot", (double)s.fails[i].slot);
+        cJSON_AddStringToObject(f, "reason", s.fails[i].reason);
+        cJSON_AddStringToObject(f, "code", s.fails[i].code);
+
+        if (s.fails[i].http != 0)
+        {
+            cJSON_AddNumberToObject(f, "http", (double)s.fails[i].http);
+        }
+
+        cJSON_AddStringToObject(f, "time", s.fails[i].time);
+        cJSON_AddItemToArray(fails, f);
+    }
+
     /* settings in the push reply (2026-11-14): the revision the pushes
        report ("" = none, or the settings were changed since it was stored)
        and what became of the reply bodies since boot */

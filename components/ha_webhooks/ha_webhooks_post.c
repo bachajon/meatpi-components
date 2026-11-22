@@ -332,20 +332,24 @@ static hw_reply_t gone_process(const hw_config_t *sent, const char *url,
 /** Try each configured URL in order; first 2xx wins. Fills @p err;
  *  sets @p rejected on an HA identity rejection (HTTP 403) and @p reply to
  *  what the delivering reply said about the webhook settings, or to what
- *  became of a 410 (HW_REPLY_REMOVED: the webhook is cleared). */
+ *  became of a 410 (HW_REPLY_REMOVED: the webhook is cleared). Every
+ *  address that did not take the push leaves why in @p fails (@p fail_n of
+ *  them, in the order tried). */
 static bool post_failover(const hw_config_t *c, const void *body,
                           size_t body_len, bool gzipped,
                           char err[HW_ERR_LEN], char okstatus[HW_STATUS_LEN],
-                          bool *rejected, hw_reply_t *reply)
+                          bool *rejected, hw_reply_t *reply,
+                          hw_fail_t fails[HW_URLS], uint8_t *fail_n)
 {
     static const char *const GZIP_HEADERS[] = { "Content-Encoding: gzip" };
-    const char *urls[2] = { c->url, c->url2 };
+    const char *urls[HW_URLS] = { c->url, c->url2 };
 
     err[0] = '\0';
     *rejected = false;
     *reply = HW_REPLY_NONE;
+    *fail_n = 0;
 
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < HW_URLS; i++)
     {
         if (urls[i][0] == '\0')
         {
@@ -379,6 +383,9 @@ static bool post_failover(const hw_config_t *c, const void *body,
             http_client_manager_free(&resp);
             return true;
         }
+
+        hw_fail_note(&fails[*fail_n], i + 1, r, &resp);
+        (*fail_n)++;
 
         if (r == ESP_OK && resp.status_code == 403)
         {
@@ -536,8 +543,10 @@ static void poster_task(void *arg)
         char okstatus[HW_STATUS_LEN] = "";
         bool rejected = false;
         hw_reply_t reply = HW_REPLY_NONE;
+        hw_fail_t fails[HW_URLS];
+        uint8_t fail_n = 0;
         bool ok = post_failover(&c, send_buf, send_len, gzipped, err,
-                                okstatus, &rejected, &reply);
+                                okstatus, &rejected, &reply, fails, &fail_n);
 
         free(gz);
         free(body);
@@ -546,6 +555,11 @@ static void poster_task(void *arg)
         hw_stats_t st;
 
         hw_stats_get(&st);
+        /* why each address failed this time; none when the first one took
+           the push (the failover delivering leaves the first one's reason) */
+        st.fail_n = fail_n;
+        memset(st.fails, 0, sizeof(st.fails));
+        memcpy(st.fails, fails, fail_n * sizeof(fails[0]));
 
         if (reply != HW_REPLY_NONE)
         {
@@ -602,7 +616,10 @@ static void poster_task(void *arg)
 
             if (reply != HW_REPLY_REMOVED)
             {
-                ESP_LOGW(TAG, "webhook POST failed: %s", err);
+                char why[2 * (HW_REASON_LEN + HW_FAIL_CODE_LEN + 8)];
+
+                hw_fail_words(fails, fail_n, why, sizeof(why));
+                ESP_LOGW(TAG, "webhook POST failed: %s (%s)", err, why);
             }
         }
 
