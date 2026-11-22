@@ -66,6 +66,13 @@ void test_reset_line_has_one_driver_and_two_last_resort_calls(void);
 void test_settle_a_reset_boot_is_waited_out(void);
 void test_settle_a_stuck_chip_is_down_and_a_restless_one_keeps_moving(void);
 void test_settle_a_glitch_restarts_the_count(void);
+/* test_client.c: an app's hold on the chip (issue #1078) */
+void test_client_clock_as_before(void);
+void test_client_monitor_holds_until_the_cap(void);
+void test_client_monitor_ends_at_the_apps_next_byte(void);
+void test_client_monitor_ends_at_the_prompt(void);
+void test_client_monitor_words(void);
+void test_client_bare_cr_repeats_the_last_line(void);
 void test_fault_a_silent_chip_is_latched_however_it_ended(void);
 void test_fault_codes_and_details_fit_the_fault_store(void);
 void test_vtvers_a_damaged_store_is_not_a_chip_to_recover(void);
@@ -137,6 +144,12 @@ void app_main(void)
     RUN_TEST(test_settle_a_reset_boot_is_waited_out);
     RUN_TEST(test_settle_a_stuck_chip_is_down_and_a_restless_one_keeps_moving);
     RUN_TEST(test_settle_a_glitch_restarts_the_count);
+    RUN_TEST(test_client_clock_as_before);
+    RUN_TEST(test_client_monitor_holds_until_the_cap);
+    RUN_TEST(test_client_monitor_ends_at_the_apps_next_byte);
+    RUN_TEST(test_client_monitor_ends_at_the_prompt);
+    RUN_TEST(test_client_monitor_words);
+    RUN_TEST(test_client_bare_cr_repeats_the_last_line);
     RUN_TEST(test_fault_a_silent_chip_is_latched_however_it_ended);
     RUN_TEST(test_fault_codes_and_details_fit_the_fault_store);
     RUN_TEST(test_vtvers_a_damaged_store_is_not_a_chip_to_recover);

@@ -146,6 +146,8 @@ void obd_core_fanout(const uint8_t *data, size_t len)
     bool gate = obd_gate_enabled();
     int64_t now = esp_timer_get_time();
 
+    obd_client_rx(data, len); /* a prompt ends an app's monitor */
+
     /* the reset interception's failsafes: a reset the chip never answered
        (arm again at the next one), an ATM0 whose prompt never came (the
        chip went away under it: let the bytes through again) */

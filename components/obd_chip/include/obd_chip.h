@@ -147,8 +147,24 @@ esp_err_t obd_chip_send(const uint8_t *data, size_t len);
  */
 void obd_chip_client_touch(void);
 
-/** Milliseconds since the last obd_chip_client_touch(); UINT32_MAX when
- *  no external client ever wrote. */
+/** How long a monitor an app opened counts as activity at most
+ *  (obd_chip_client_write); nothing on the chip's side knows when an app
+ *  went away in the middle of one. */
+#define OBD_CLIENT_MONITOR_HOLD_MS 120000
+
+/**
+ * The bytes an app wrote to the chip (2026-11-21, GitHub issue #1078):
+ * obd_chip_client_touch(), and the app's monitor. A monitor (ATMA, STMA,
+ * ... obd_chip_is_monitor_cmd) writes nothing while it runs, and the poller
+ * took the chip back ten seconds into it. A line that is a monitor command
+ * opens one; the app's next byte (not LF) or the chip's prompt ends it.
+ * The bridge glue calls this in place of obd_chip_client_touch().
+ */
+void obd_chip_client_write(const uint8_t *data, size_t len);
+
+/** Milliseconds since the last obd_chip_client_touch() or _write();
+ *  0 while an app's monitor runs (OBD_CLIENT_MONITOR_HOLD_MS at most);
+ *  UINT32_MAX when no external client ever wrote. */
 uint32_t obd_chip_client_idle_ms(void);
 
 /** The K-line session of obd_chip_request() (ISO 9141-2 and ISO 14230-4,

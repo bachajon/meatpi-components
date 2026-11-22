@@ -88,8 +88,10 @@ static esp_err_t obd_ep_send(const uint8_t *d, size_t l)
 {
     /* every byte from a bridged app (TCP/BLE/USB/WS) counts as client
        activity: autopid yields the chip while the app drives it (legacy
-       DEV_AUTOPID_ELM327_APP_BIT parity, see obd_chip.h) */
-    obd_chip_client_touch();
+       DEV_AUTOPID_ELM327_APP_BIT parity, see obd_chip.h), and since
+       2026-11-21 a monitor the app opened counts until it ends (GitHub
+       issue #1078: an ATMA was cut ten seconds in) */
+    obd_chip_client_write(d, l);
     return obd_chip_send(d, l);
 }
 

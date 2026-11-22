@@ -10,6 +10,7 @@ idf_component_register(
          "obd_chip_uart.c"
          "obd_chip_pins.c"
          "obd_chip_settle.c"
+         "obd_chip_client.c"
          "obd_chip_fault.c"
          "obd_chip_cmd.c"
          "obd_chip_parse.c"

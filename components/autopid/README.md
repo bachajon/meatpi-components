@@ -27,7 +27,10 @@ Decisions log there is authoritative; the big ones:
   the app's command landing mid-poll made the chip print `STOPPED` -
   80 of 200 app requests came back wrong, 0 of 200 with autopid off.
   Source of truth is `obd_chip_client_idle_ms()` via the transport's
-  `client_idle_ms` hook (the bridge glue touches it on every app write);
+  `client_idle_ms` hook (the bridge glue touches it on every app write;
+  since 2026-11-21 a monitor the app opened, `ATMA` and the like, counts
+  until it ends, two minutes at most: a sniffing app was cut ten seconds
+  in, GitHub issue #1078, obd_chip/README.md);
   the pure predicate `ap_sched_client_hold()` is host-tested. Visible
   as `stats.paused_client` in `/api/autopid`, `(yielding to an OBD app)`;
   likewise `stats.paused_diag` / `(paused for a diagnostic tool)` while the
@@ -1274,7 +1277,8 @@ word of the chip job, as the Test route gives it.
 
 - An app is using the OBD chip (the terminal, an ELM327 app on a bridge):
   the chip is free ten seconds after the app's last command, the same wait
-  the poller keeps. `can` is not affected.
+  the poller keeps, or when a monitor the app opened ends (two minutes at
+  most, since 2026-11-21). `can` is not affected.
 - Another chip job runs (a test, a scan): the send waits up to 3 s for it.
 - `obd`: the bus guard refuses the car's protocol right now (its sentence
   is the answer), or no car is known yet.
