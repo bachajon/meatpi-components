@@ -1,7 +1,8 @@
 /**
  * @file test_chain.c
  * @brief What a chain of the tables sets on the chip beyond the baseline
- *        (ap_chain_sets) and the chain that puts the baseline back
+ *        (ap_chain_sets), what the runner keeps of it from chain to chain
+ *        (ap_chain_moved) and the chain that puts the baseline back
  *        (ap_chain_restore): autopid_chain.c, issue #964.
  */
 #include <string.h>
@@ -212,6 +213,66 @@ void test_chain_reply_hint_carries_like_the_chip(void)
     TEST_ASSERT_EQUAL_CHAR('9', pin);
 }
 
+void test_chain_moved_follows_the_formatting(void)
+{
+    /* what the runner keeps from chain to chain (mem->moved): a chain's
+       bits are added to what the chains before it moved */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_HEADER | AP_SETS_RAW,
+                          ap_chain_moved(AP_SETS_HEADER, "ATCAF0;"));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW | AP_SETS_HEADER | AP_SETS_FILTER,
+                          ap_chain_moved(AP_SETS_RAW,
+                                         "STFAP 54C,7FF;ATSH24C;ATCRA54C"));
+
+    /* the formatting bit follows the chip: a row's ATCAF1 behind a raw row
+       of its type takes it back, whatever else that row sets stays */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_HEADER,
+                          ap_chain_moved(AP_SETS_RAW, "ATCAF1;ATSH7E0;"));
+    TEST_ASSERT_EQUAL_HEX(0, ap_chain_moved(AP_SETS_RAW, " at caf1 "));
+
+    /* in one chain the LAST word about it counts, as on the chip */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_HEADER,
+                          ap_chain_moved(0, "ATCAF0;ATSH7E0;ATCAF1"));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW, ap_chain_moved(0, "ATCAF1;atcaf0"));
+
+    /* ATCAF1 takes back that bit alone */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_FC_OFF | AP_SETS_TIMING,
+                          ap_chain_moved(AP_SETS_FC_OFF | AP_SETS_RAW |
+                                         AP_SETS_TIMING, "ATCAF1"));
+
+    /* a chain that says nothing about it, a request, nothing at all: the
+       bit stays as it was */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW | AP_SETS_HEADER,
+                          ap_chain_moved(AP_SETS_RAW, "ATSH7E0"));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW, ap_chain_moved(AP_SETS_RAW, "010C"));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW, ap_chain_moved(AP_SETS_RAW, ""));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW, ap_chain_moved(AP_SETS_RAW, NULL));
+    /* words that only look like it */
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW, ap_chain_moved(AP_SETS_RAW, "ATCAF"));
+    TEST_ASSERT_EQUAL_HEX(AP_SETS_RAW,
+                          ap_chain_moved(AP_SETS_RAW, "ATCAF12;ATCAF2"));
+
+    /* why it matters (pull request 7's reply guard reads the bit): a table
+       of three rows of one type on the car's bus, nothing between them
+       that puts the baseline back. The raw row, then `010C` with ATCAF1 in
+       its init */
+    static const uint8_t rpm[] = { 0x41, 0x0C, 0x0C, 0x80 };
+    unsigned moved = ap_chain_moved(0, "ATCAF0");
+
+    TEST_ASSERT_TRUE((moved & AP_SETS_RAW) != 0);
+    TEST_ASSERT_TRUE(ap_payload_matches_cmd(ap_raw_cmd_request("02010C1"),
+                                            rpm, sizeof(rpm)));
+    moved = ap_chain_moved(moved, "ATCAF1");
+    /* read as written: the answer is the row's. Read as a raw frame it
+       would be "length 1, service 0C" and `41 0C` refused */
+    TEST_ASSERT_TRUE((moved & AP_SETS_RAW) == 0);
+    TEST_ASSERT_TRUE(ap_payload_matches_cmd("010C1", rpm, sizeof(rpm)));
+    TEST_ASSERT_FALSE(ap_payload_matches_cmd(ap_raw_cmd_request("010C1"),
+                                             rpm, sizeof(rpm)));
+    /* and the raw row is a raw row again in the next round */
+    moved = ap_chain_moved(moved, "ATCAF0");
+    TEST_ASSERT_TRUE((moved & AP_SETS_RAW) != 0);
+}
+
 void run_chain_tests(void)
 {
     RUN_TEST(test_chain_the_report);
@@ -219,4 +280,5 @@ void run_chain_tests(void)
     RUN_TEST(test_chain_reads_like_the_chip);
     RUN_TEST(test_chain_restore_builds);
     RUN_TEST(test_chain_reply_hint_carries_like_the_chip);
+    RUN_TEST(test_chain_moved_follows_the_formatting);
 }

@@ -425,7 +425,7 @@ esp_err_t ap_runner_test(int type, uint16_t bus, const char *type_init,
     esp_err_t err = ap_base_request_tr(cmd_s, raw, raw_len, AP_REQ_TIMEOUT,
                                        &tr);
 
-    mem->moved |= ap_chain_sets(cmd_s); /* an AT command as the cmd */
+    mem->moved = ap_chain_moved(mem->moved, cmd_s); /* an AT cmd as the cmd */
 
     if (ap_guard_cmd_resets(cmd_s, strlen(cmd_s)))
     {
@@ -458,7 +458,8 @@ static bool row_ask(const ap_pid_t *pid, const ap_param_t *params)
     esp_err_t err = ap_be()->request(pid->cmd, resp, sizeof(resp),
                                      AP_REQ_TIMEOUT);
 
-    mem->moved |= ap_chain_sets(pid->cmd); /* an AT command as the cmd */
+    /* an AT command as the cmd */
+    mem->moved = ap_chain_moved(mem->moved, pid->cmd);
 
     if (ap_guard_cmd_resets(pid->cmd, strlen(pid->cmd)))
     {
@@ -495,7 +496,9 @@ static bool row_ask(const ap_pid_t *pid, const ap_param_t *params)
        the whole frame: the service the guard compares sits behind the
        ISO-TP length byte, and a frame with no service to compare (a GMLAN
        $AA packet read, a raw frame of another kind) has only the row's own
-       receive filter for a guard */
+       receive filter for a guard. The bit follows the chip: an ATCAF1 of
+       the tables takes it back (ap_chain_moved), so a row with formatting
+       on behind a raw row of its type is read as written */
     const char *request = pid->cmd;
 
     if ((mem->moved & AP_SETS_RAW) != 0)
