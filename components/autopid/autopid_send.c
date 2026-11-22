@@ -418,10 +418,20 @@ static void add_chip_reply(cJSON *fo, const char *resp)
 
     cJSON *lines = cJSON_AddArrayToObject(fo, "replies");
 
+    if (lines == NULL)
+    {
+        return; /* no memory: `reply` carries the answer */
+    }
+
     for (const char *p = ap_send_reply_next(resp, line, sizeof(line));
          p != NULL; p = ap_send_reply_next(p, line, sizeof(line)))
     {
-        cJSON_AddItemToArray(lines, cJSON_CreateString(line));
+        cJSON *entry = cJSON_CreateString(line);
+
+        if (entry != NULL && !cJSON_AddItemToArray(lines, entry))
+        {
+            cJSON_Delete(entry);
+        }
     }
 }
 

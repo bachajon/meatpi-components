@@ -289,7 +289,7 @@ green afterwards). What changed, and what to keep doing:
   "[disconnected]". Verified end to end on hardware (enable → Submit →
   reboot → Connect → `help`).
 - **Terminal output keeps up with a monitor** (2026-11-21, GitHub issue
-  #1078). `ATMA` in the ELM327 terminal on a busy bus (about 2,800
+  #1085). `ATMA` in the ELM327 terminal on a busy bus (about 2,800
   frames/s on a 2012 Chevrolet Volt) froze the tab: every WebSocket
   message became a text node and a forced layout, and the page kept all
   of them. The output is now one text node written at most once per

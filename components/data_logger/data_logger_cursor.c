@@ -133,26 +133,6 @@ int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
     return idx;
 }
 
-static int since_nibble(char c)
-{
-    if (c >= '0' && c <= '9')
-    {
-        return c - '0';
-    }
-
-    if (c >= 'a' && c <= 'f')
-    {
-        return c - 'a' + 10;
-    }
-
-    if (c >= 'A' && c <= 'F')
-    {
-        return c - 'A' + 10;
-    }
-
-    return -1;
-}
-
 /* one run of decimal digits at *p (at most 18: no int64 overflow);
    false when there is none or it is longer */
 static bool since_digits(const char **p, int64_t *out)
@@ -201,8 +181,8 @@ bool dl_export_parse_since(const char *raw, int64_t *epoch, long *off,
 
         if (c == '%')
         {
-            int hi = since_nibble(p[1]);
-            int lo = (hi < 0) ? -1 : since_nibble(p[2]);
+            int hi = hex_digit(p[1]);
+            int lo = (hi < 0) ? -1 : hex_digit(p[2]);
 
             if (lo < 0)
             {

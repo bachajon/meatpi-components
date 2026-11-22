@@ -8,7 +8,7 @@
  *        MDF4 prelude/record + BLF builders: byte-level golden
  *        vectors); the recovery decisions (test_recover.c) and the
  *        clock rules (test_clock.c); the export's `since` parse
- *        (2026-11-21). Expected: 47 Tests 0 Failures 0 Ignored.
+ *        (2026-11-21). Expected: 51 Tests 0 Failures 0 Ignored.
  */
 #include <string.h>
 
@@ -285,28 +285,28 @@ static void test_export_query_values_are_decoded(void)
     char e[48] = "1795281264123";
     char f[48] = "";
 
-    dl_export_parse_since(a, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(a, &epoch, &off, &exact));
     TEST_ASSERT_TRUE(exact);
     TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
     TEST_ASSERT_EQUAL_INT(567175, (int)off);
     /* the colon encoded: the same cursor, not a plain epoch */
     epoch = -1; off = -1; exact = false;
-    dl_export_parse_since(b, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(b, &epoch, &off, &exact));
     TEST_ASSERT_TRUE(exact);
     TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
     TEST_ASSERT_EQUAL_INT(567175, (int)off);
-    dl_export_parse_since(c, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(c, &epoch, &off, &exact));
     TEST_ASSERT_TRUE(exact);
     TEST_ASSERT_EQUAL_INT(0, (int)off);
     /* a moment in seconds, in milliseconds, nothing */
-    dl_export_parse_since(d, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(d, &epoch, &off, &exact));
     TEST_ASSERT_FALSE(exact);
     TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
     TEST_ASSERT_EQUAL_INT(0, (int)off);
-    dl_export_parse_since(e, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(e, &epoch, &off, &exact));
     TEST_ASSERT_FALSE(exact);
     TEST_ASSERT_EQUAL_INT64(1795281264, epoch);
-    dl_export_parse_since(f, &epoch, &off, &exact);
+    TEST_ASSERT_TRUE(dl_export_parse_since(f, &epoch, &off, &exact));
     TEST_ASSERT_FALSE(exact);
     TEST_ASSERT_EQUAL_INT64(0, epoch);
 

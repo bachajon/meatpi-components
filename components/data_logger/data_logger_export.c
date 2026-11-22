@@ -177,9 +177,10 @@ esp_err_t dl_export_refuse_format(struct httpd_req *req)
 esp_err_t dl_export_refuse_since(struct httpd_req *req)
 {
     /* sent as the format's 400 above (2026-11-21): a client's mistake, told
-     * to the client, not a fault of the device */
+     * to the client, not a fault of the device. As plain text: a browser
+     * that takes the sentence for HTML shows "since is or :" */
     httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, "since is <epoch> or <epoch>:<offset>",
                            HTTPD_RESP_USE_STRLEN);
 }
