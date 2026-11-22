@@ -288,6 +288,14 @@ green afterwards). What changed, and what to keep doing:
   for the header Submit. A refused socket prints why instead of a bare
   "[disconnected]". Verified end to end on hardware (enable → Submit →
   reboot → Connect → `help`).
+- **Terminal output keeps up with a monitor** (2026-11-21, GitHub issue
+  #1078). `ATMA` in the ELM327 terminal on a busy bus (about 2,800
+  frames/s on a 2012 Chevrolet Volt) froze the tab: every WebSocket
+  message became a text node and a forced layout, and the page kept all
+  of them. The output is now one text node written at most once per
+  animation frame and capped at the last 200,000 characters, cut at a line
+  boundary behind an `[earlier output dropped]` line; what waits for the
+  next frame (a hidden tab draws none) is capped the same way.
 - Page fixes from the pass: Settings split into WiFi Access Point ·
   WiFi Network (Station, Scan → click to pick) · Bluetooth cards;
   Connections rows are one line ([iface] ⇄ [conn] + switch); Dashboard
