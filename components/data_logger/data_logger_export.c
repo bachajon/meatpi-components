@@ -174,6 +174,16 @@ esp_err_t dl_export_refuse_format(struct httpd_req *req)
                            HTTPD_RESP_USE_STRLEN);
 }
 
+esp_err_t dl_export_refuse_since(struct httpd_req *req)
+{
+    /* sent as the format's 400 above (2026-11-21): a client's mistake, told
+     * to the client, not a fault of the device */
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, "since is <epoch> or <epoch>:<offset>",
+                           HTTPD_RESP_USE_STRLEN);
+}
+
 esp_err_t dl_export_get_handler(struct httpd_req *req)
 {
     const dl_cfg_t *cfg = dl_settings_config();
@@ -220,12 +230,20 @@ esp_err_t dl_export_get_handler(struct httpd_req *req)
             return ESP_FAIL;
         }
 
-        if (httpd_query_key_value(query, "since", val, sizeof(val)) ==
-                ESP_OK)
+        /* "<epoch>:<offset>" = a cursor of ours (exact); a bare number = a
+         * moment in time (seconds, or milliseconds: a client's watermark),
+         * the rows from then on. Decoded and checked by
+         * dl_export_parse_since() (2026-11-21: "%3A" for the colon read
+         * as a plain epoch and restarted the export); a value too long
+         * for val is no cursor either. */
+        esp_err_t got = httpd_query_key_value(query, "since", val,
+                                              sizeof(val));
+
+        if (got == ESP_ERR_HTTPD_RESULT_TRUNC ||
+            (got == ESP_OK &&
+             !dl_export_parse_since(val, &since_epoch, &since_off, &exact)))
         {
-            /* a cursor of ours or a moment in time, as the client wrote
-             * it (the colon may come as %3A) */
-            dl_export_parse_since(val, &since_epoch, &since_off, &exact);
+            return dl_export_refuse_since(req);
         }
 
         if (httpd_query_key_value(query, "limit", val, sizeof(val)) ==

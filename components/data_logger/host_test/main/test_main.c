@@ -7,8 +7,8 @@
  *        non-sqlite engine (.wdl, csv, candump, asc, jsonl rows +
  *        MDF4 prelude/record + BLF builders: byte-level golden
  *        vectors); the recovery decisions (test_recover.c) and the
- *        clock rules (test_clock.c). Expected: 40 Tests 0 Failures
- *        0 Ignored.
+ *        clock rules (test_clock.c); the export's `since` parse
+ *        (2026-11-21). Expected: 47 Tests 0 Failures 0 Ignored.
  */
 #include <string.h>
 
@@ -31,6 +31,10 @@ void test_ring_keep_drops_the_torn_and_the_stale_record(void);
 void test_open_floor_is_one_kilobyte_in_one_block(void);
 void test_fault_detail_tells_the_memory_from_the_card(void);
 void test_corrupt_is_no_verdict_under_the_floor(void);
+
+/* test_export.c */
+void test_export_since_parse(void);
+void test_export_since_encoded_cursor_resumes(void);
 
 /* test_clock.c */
 void test_record_layout_is_32_bytes_with_the_stamps_in_the_padding(void);
@@ -631,6 +635,8 @@ void app_main(void)
     RUN_TEST(test_make_zero_pads_for_lexical_order);
     RUN_TEST(test_make_clamps_negative_epoch);
     RUN_TEST(test_export_start_rule);
+    RUN_TEST(test_export_since_parse);
+    RUN_TEST(test_export_since_encoded_cursor_resumes);
     RUN_TEST(test_export_walk_budget);
     RUN_TEST(test_export_query_values_are_decoded);
     RUN_TEST(test_scan_tracks_oldest_newest_count);

@@ -24,13 +24,14 @@
  * @file data_logger_cursor.c
  * @brief The export route's pure rules (2026-11-06, store and forward):
  *        where in a stream's file list a GET /api/logger/export request
- *        starts for its `since` value, which lines of a file window go
+ *        starts for its `since` value (and, since 2026-11-21, how that
+ *        value is read off the query string), which lines of a file window go
  *        out (the name filter, the clock-step marker) and how a window is
  *        walked against the page's budgets. Host-tested with the file-name
  *        rules; data_logger_export.c applies them. Kept apart from
  *        data_logger_files.c, which sits at the 700-line rule.
  */
-#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "data_logger_private.h"
@@ -89,27 +90,6 @@ void dl_export_unescape(char *s)
     *out = '\0';
 }
 
-void dl_export_parse_since(char *val, int64_t *epoch, long *off, bool *exact)
-{
-    long long e = 0;
-    long o = 0;
-
-    dl_export_unescape(val);
-    /* "<epoch>:<offset>" = a cursor of ours (exact); a bare number = a
-     * moment in time (seconds, or milliseconds: a client's watermark), the
-     * rows from then on */
-    *exact = strchr(val, ':') != NULL;
-    (void)sscanf(val, "%lld:%ld", &e, &o);
-
-    if (!*exact && e > 100000000000LL)
-    {
-        e /= 1000; /* milliseconds given */
-    }
-
-    *epoch = (int64_t)e;
-    *off = o;
-}
-
 int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
                     bool exact, long *off)
 {
@@ -151,6 +131,146 @@ int dl_export_start(const int64_t *epochs, int n, int64_t since_epoch,
 
     *off = 0;
     return idx;
+}
+
+static int since_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+
+    return -1;
+}
+
+/* one run of decimal digits at *p (at most 18: no int64 overflow);
+   false when there is none or it is longer */
+static bool since_digits(const char **p, int64_t *out)
+{
+    int64_t v = 0;
+    int n = 0;
+
+    while (**p >= '0' && **p <= '9')
+    {
+        if (++n > 18)
+        {
+            return false;
+        }
+
+        v = v * 10 + (**p - '0');
+        (*p)++;
+    }
+
+    *out = v;
+    return n > 0;
+}
+
+/* `since` as it came off the query string (2026-11-21). The HTTP server
+ * hands a query value over still percent-encoded, and a client that
+ * encodes its query (Python's urlencode, JavaScript's encodeURIComponent)
+ * sends the cursor's colon as "%3A". The route looked for a ':' in the raw
+ * value, found none, read the cursor as a plain epoch and started over at
+ * that file: the same first page and the same _cursor again, so a client
+ * that followed _cursor looped forever (seen on a WiCAN PRO, 6.0.0-beta.12
+ * and beta.14: one backfill read the same rows about 600 times). Now
+ * the value is decoded first and must be one of the two forms; anything
+ * else is refused (400) instead of guessed at. */
+bool dl_export_parse_since(const char *raw, int64_t *epoch, long *off,
+                           bool *exact)
+{
+    char buf[48];
+    size_t o = 0;
+
+    *epoch = 0;
+    *off = 0;
+    *exact = false;
+
+    for (const char *p = raw; *p != '\0'; p++)
+    {
+        char c = *p;
+
+        if (c == '%')
+        {
+            int hi = since_nibble(p[1]);
+            int lo = (hi < 0) ? -1 : since_nibble(p[2]);
+
+            if (lo < 0)
+            {
+                return false;
+            }
+
+            c = (char)((hi << 4) | lo);
+            p += 2;
+
+            if (c == '\0')
+            {
+                return false; /* "%00": would end the value early */
+            }
+        }
+
+        if (o + 1 >= sizeof(buf))
+        {
+            return false;
+        }
+
+        buf[o++] = c;
+    }
+
+    buf[o] = '\0';
+
+    if (o == 0)
+    {
+        return true; /* "since=": nothing, the oldest file */
+    }
+
+    const char *p = buf;
+    int64_t e = 0;
+    int64_t f = 0;
+    bool cursor = false;
+
+    if (!since_digits(&p, &e))
+    {
+        return false;
+    }
+
+    if (*p == ':')
+    {
+        p++;
+
+        /* a file offset; bounded to what a 32-bit long holds on the
+           device */
+        if (!since_digits(&p, &f) || f > INT32_MAX)
+        {
+            return false;
+        }
+
+        cursor = true;
+    }
+
+    if (*p != '\0')
+    {
+        return false; /* outputs untouched: still 0 / false */
+    }
+
+    if (!cursor && e > 100000000000LL)
+    {
+        e /= 1000; /* milliseconds given: a client's watermark */
+    }
+
+    *epoch = e;
+    *off = (long)f;
+    *exact = cursor;
+    return true;
 }
 
 /* ?name=<param> filter (dashboard history, 2026-09-06): a record's
