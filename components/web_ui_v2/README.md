@@ -910,8 +910,8 @@ one. `filterTable(type)` in `web/index.html` builds the list of one tab:
   `0x284` is hex, a plain number is decimal (`644`), letters without `0x`
   are hex (`1DA`); 1 to 0x1FFFFFFF. The field shows the hex reading at
   once, so a `284` meant as hex is seen as `0x11C` before Apply. A field
-  the page cannot read as an ID is marked and stored as 0, which the
-  firmware refuses on Apply. The listen time is
+  the page cannot read as an ID is marked and stored as 0; such a filter
+  stops Apply on the page (2026-11-23, below). The listen time is
   held to 50..60000. Opened: Group, Cycle (ms) with the group's rate as
   the placeholder, and the parameter table of a PID (switch, name,
   expression, unit, live value, remove), `Add parameter`.
@@ -944,9 +944,41 @@ one. `filterTable(type)` in `web/index.html` builds the list of one tab:
   (`FLT_INFO`, a text per tab that names the tab's switch), not text on the
   page.
 
-Probe: `tools/webui_preview/probe_can_filters.mjs` (61 checks); on the
+Probe: `tools/webui_preview/probe_can_filters.mjs` (86 checks); on the
 device `.\test.ps1 canfilters`, whose page leg is
 `tools/testbench/obd/can_filters_page.mjs`.
+
+**2026-11-23, a CAN filter without an ID stops Apply on the page.** A
+user's report: on Standard PIDs, with seven scanned PIDs ticked, Apply
+Configuration answered "Rejected: filter 0: frame_id required"; the same
+PIDs added one by one after a reload went through. Reproduced on the bench
+unit's own page (6.0.0-beta.14): one click on Add CAN filter on Custom PIDs
+(a row with no ID yet), then Apply on Standard PIDs. Apply sends the tables
+of every tab (`PUT /api/autopid/config` takes the whole configuration), the
+device refuses it whole for a filter whose `frame_id` is not a number from
+1 up, and it can name that filter by its position alone; the line showed
+under a tab that has no CAN filters list. The reload dropped the unsaved
+row, which is why the second try worked.
+
+- **`saveCfg()` looks first.** A filter whose ID the page cannot read
+  (`!Number(f.frame_id)`, the rule that marks the ID field) is not sent,
+  and neither is anything else.
+- **The page goes to the row** (`askFilterId()`): the filter's tab opens
+  (Custom PIDs, or Vehicle Specific for a filter tagged `profile: true`)
+  with the row open and the cursor in its ID field. When Apply was pressed
+  on that tab the pane is not built again (`curFlt.ask()`: a staged
+  profile's banner and its Discard live in the pane), and a search that
+  hides the row does not hide it (`matches()`).
+- **It says what is missing.** The line under the list (`.flt-ask`): "Not
+  sent: the CAN filter NewFilter has no CAN ID. Enter the ID of the frame
+  it reads, or remove the filter, then Apply Configuration again." It goes
+  when the filter has an ID or is removed. The toast names the filter and
+  its tab.
+- **Raw Config sends the JSON as typed** (`saveCfg(true)`): there the
+  device's own words name the JSON ("filter 2: frame_id required").
+- **Not chosen:** leaving such a filter out of what Apply sends. A stored
+  filter whose ID field was emptied would be deleted on the device without
+  a word.
 
 **2026-11-21, evening (Ali's decisions on the open points of #1075):**
 
