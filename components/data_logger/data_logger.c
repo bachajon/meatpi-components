@@ -47,6 +47,7 @@
 #include <time.h>
 
 #include "esp_attr.h"
+#include "esp_cache.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -69,6 +70,11 @@ static StaticSemaphore_t s_lock_buf;   /* internal: FreeRTOS object */
  * Params and frames are SEPARATE rings so a busy CAN bus can never
  * evict param records; the frame ring's live length comes from the
  * ring_len setting (static at the cap: caps not rationing). */
+#define DL_PS_CACHE_LINE 32 /* a data cache line of the S3 as configured
+                               (32 bytes): a record and a ring's indices
+                               are aligned to it, so neither spans two
+                               lines (see the envelope's notes below) */
+
 typedef struct
 {
     dl_record_t *buf;
@@ -77,7 +83,9 @@ typedef struct
     uint32_t     tail;
     uint32_t     fill;
     uint32_t     dropped;
-} dl_ring_t;
+    uint32_t     seq;     /* pushes so far: the next record's number, the
+                             one its check is made with */
+} __attribute__((aligned(DL_PS_CACHE_LINE))) dl_ring_t;
 
 /* ---- PSRAM .noinit envelope (2026-09-07, ROBUSTNESS.md case 6) ------------
    The registry and both rings survive warm resets: after a panic, a
@@ -88,7 +96,20 @@ typedef struct
    EN-pin resets leave random or bit-rotten PSRAM; the envelope catches
    that and starts clean. Same pattern as restart_tracker / log_manager's
    ring, including the 64-byte MSPI tuning guard that must lead the object.
-   Version 2 since 2026-10-13 (the record grew its monotonic stamp). */
+   Version 2 since 2026-10-13 (the record grew its monotonic stamp).
+
+   Version 3 since 2026-11-22. PSRAM sits behind the CPU's data cache and
+   a reset drops the lines that were not written to the chip yet (the S3's
+   esp_restart() writes nothing back). The records lay across two cache
+   lines each, split between "stamp and value" and "which parameter": the
+   newest record of a restart came back with its stamp and value and the
+   parameter number of the record that slot held a ring length before
+   (hadrive run 3: `autopid.EngineRPM` = 95, the oil temperature; 2 of 24
+   restarts on the bench). Since then: a record and a ring's indices are
+   each one cache line (the alignment below), every record carries a check
+   over its fields and its push number (dl_recover_record_check), the
+   shutdown hook writes the envelope to the chip (ps_commit), and the
+   adoption keeps a record only when its check holds. */
 #define DL_PS_MAGIC   0x53504C44u /* "DLPS" */
 
 typedef struct
@@ -99,12 +120,19 @@ typedef struct
     uint32_t         param_cap;
     uint32_t         frame_cap;
     uint32_t         reg_crc;          /* used + names of params[]         */
-    dl_ring_t        param_ring;
-    dl_ring_t        frame_ring;
+    dl_ring_t        param_ring;       /* the two rings' indices sit    */
+    dl_ring_t        frame_ring;       /* side by side: one write-back  */
     dl_param_entry_t params[DL_MAX_PARAMS];
-    dl_record_t      param_slots[DL_RING_LEN];
-    dl_record_t      frame_slots[DL_CAN_RING_MAX];
+    dl_record_t      param_slots[DL_RING_LEN]
+                         __attribute__((aligned(DL_PS_CACHE_LINE)));
+    dl_record_t      frame_slots[DL_CAN_RING_MAX]
+                         __attribute__((aligned(DL_PS_CACHE_LINE)));
 } dl_psram_t;
+
+_Static_assert(sizeof(dl_ring_t) == DL_PS_CACHE_LINE,
+               "a ring's indices must stay one cache line");
+_Static_assert(sizeof(dl_record_t) == DL_PS_CACHE_LINE,
+               "a record must stay one cache line");
 
 static dl_psram_t s_ps EXT_RAM_NOINIT_ATTR;
 #define s_params     (s_ps.params)
@@ -142,30 +170,68 @@ static void ps_reset(void)
     s_ps.reg_crc = reg_crc_calc();
 }
 
-/* drop everything from the first record that does not look like one */
-static void ring_trim(dl_ring_t *r)
+/* The records a ring carried over a reset: each is kept only when its
+ * check holds for its place (dl_recover_ring_keep), the rest is dropped
+ * and counted. The kept ones were stamped against the previous boot's
+ * monotonic clock: they are marked absolute, their wall stamps stay as
+ * they are whatever this boot's clock does (the writer never re-bases
+ * them). Returns how many were dropped. */
+static uint32_t ring_adopt(dl_ring_t *r, int kind)
 {
-    for (uint32_t i = 0; i < r->fill; i++)
+    uint32_t kept = dl_recover_ring_keep(
+        r->buf, r->cap, r->tail, r->fill, r->seq, kind,
+        (kind == DL_REC_PARAM) ? s_ps.params : NULL);
+    uint32_t lost = r->fill - kept;
+
+    r->fill = kept;
+    r->head = (r->tail + kept) % r->cap;
+    r->dropped = 0;
+    return lost;
+}
+
+/* Write what the cache still holds of the envelope to the PSRAM chip: the
+ * indices and the registry, then the queued part of each ring. A reset
+ * drops the cache; this is what the next boot adopts. */
+static void ring_commit(const dl_ring_t *r)
+{
+    const int flags = ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                      ESP_CACHE_MSYNC_FLAG_UNALIGNED;
+    uint32_t first = (r->fill <= r->cap - r->tail) ? r->fill
+                                                   : r->cap - r->tail;
+
+    if (first > 0)
     {
-        if (!dl_recover_record_sane(&r->buf[(r->tail + i) % r->cap]))
-        {
-            r->fill = i;
-            r->head = (r->tail + i) % r->cap;
-            return;
-        }
+        (void)esp_cache_msync(&r->buf[r->tail], first * sizeof(dl_record_t),
+                              flags);
+    }
+
+    if (r->fill > first)
+    {
+        (void)esp_cache_msync(r->buf, (r->fill - first) * sizeof(dl_record_t),
+                              flags);
     }
 }
 
-/* records carried over a reset were stamped against the previous boot's
- * monotonic clock: their wall stamps stay as they are, whatever this
- * boot's clock does (the writer never re-bases them) */
-static void ring_mark_absolute(dl_ring_t *r)
+static void ps_commit(void)
 {
-    for (uint32_t i = 0; i < r->fill; i++)
+    /* a restart never waits for a producer: without the lock the indices
+       may move meanwhile, and the record that moved them has its check */
+    bool locked = xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE;
+
+    ring_commit(&s_ps.param_ring);
+    ring_commit(&s_ps.frame_ring);
+    (void)esp_cache_msync(&s_ps, offsetof(dl_psram_t, param_slots),
+                          ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                          ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+
+    if (locked)
     {
-        r->buf[(r->tail + i) % r->cap].flags |= DL_REC_ABS;
+        xSemaphoreGive(s_lock);
     }
 }
+
+/* records carried over a reset that did not pass their check */
+static uint32_t s_salvage_dropped;
 
 /* returns the number of records carried over from before a warm reset */
 static uint32_t ps_adopt(void)
@@ -202,12 +268,8 @@ static uint32_t ps_adopt(void)
 
     s_ps.param_ring.buf = s_ps.param_slots;
     s_ps.frame_ring.buf = s_ps.frame_slots;
-    ring_trim(&s_ps.param_ring);
-    ring_trim(&s_ps.frame_ring);
-    ring_mark_absolute(&s_ps.param_ring);
-    ring_mark_absolute(&s_ps.frame_ring);
-    s_ps.param_ring.dropped = 0;
-    s_ps.frame_ring.dropped = 0;
+    s_salvage_dropped = ring_adopt(&s_ps.param_ring, DL_REC_PARAM) +
+                        ring_adopt(&s_ps.frame_ring, DL_REC_FRAME);
 
     for (int i = 0; i < DL_MAX_PARAMS; i++)
     {
@@ -225,6 +287,8 @@ static data_logger_stats_t s_stats;  /* enabled, running, salvaged; the
                                         streams and the storage counters
                                         are the writer's and the store's */
 static bool s_hooked;                /* esp_restart shutdown handler in place */
+
+static void hook_once(void);
 
 /* ---- rings ------------------------------------------------------------------ */
 
@@ -246,7 +310,11 @@ static esp_err_t ring_push(dl_ring_t *r, const dl_record_t *rec)
         }
     }
 
-    r->buf[r->head] = *rec;
+    dl_record_t *slot = &r->buf[r->head];
+
+    *slot = *rec;
+    slot->check = dl_recover_record_check(slot, r->seq);
+    r->seq++;
     r->head = (r->head + 1) % r->cap;
     r->fill++;
     xSemaphoreGive(s_lock);
@@ -303,6 +371,21 @@ dl_param_entry_t *dl_core_param(int idx)
     return (idx >= 0 && idx < DL_MAX_PARAMS) ? &s_params[idx] : NULL;
 }
 
+/* After a batch reached the card: the rings' indices go to the PSRAM chip,
+ * so that a reset finds the read position behind that batch. Until then the
+ * chip may hold the position from before it, and the next boot would adopt
+ * the batch's records again (they pass their checks: they ARE the records
+ * of those places) and write them a second time. Two cache lines, once a
+ * batch. A reset between the card's commit and this leaves that one batch
+ * twice in the file; a reset before the commit leaves it queued, as it
+ * should be. */
+void dl_core_commit_indices(void)
+{
+    (void)esp_cache_msync(&s_ps.param_ring, 2 * sizeof(dl_ring_t),
+                          ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                          ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
 void dl_core_forget_db_ids(void)
 {
     for (int i = 0; i < DL_MAX_PARAMS; i++)
@@ -328,6 +411,11 @@ void dl_core_apply(const dl_cfg_t *cfg)
         s_frame_ring.head = 0;
         s_frame_ring.tail = 0;
         s_frame_ring.fill = 0;
+    }
+
+    if (cfg->enabled)
+    {
+        hook_once(); /* records queue from here on, started or not */
     }
 
     dl_writer_bind(cfg);
@@ -356,20 +444,44 @@ esp_err_t data_logger_init(void)
                  (unsigned long)carried);
     }
 
+    if (s_salvage_dropped > 0)
+    {
+        s_stats.salvage_dropped = s_salvage_dropped;
+        ESP_LOGW(TAG, "%lu queued record(s) did not reach the PSRAM chip "
+                 "whole before the last reset: dropped",
+                 (unsigned long)s_salvage_dropped);
+    }
+
     dl_events_register();
     return dl_settings_register();
 }
 
 /* esp_restart() runs this before the reset: user restart, settings
  * apply, OTA, CLI, factory reset: the files are flushed and closed the
- * way sleep entry does it (ROBUSTNESS.md case 7). Panics never get here;
- * the PSRAM envelope covers those (case 6). */
+ * way sleep entry does it (ROBUSTNESS.md case 7), and what is queued
+ * after that (a producer that still ran, a logger a settings write
+ * enabled that starts at the next boot) is written to the PSRAM chip:
+ * the reset drops the cache. Panics never get here; the PSRAM envelope
+ * and the records' checks cover those (case 6). */
 static void dl_on_shutdown(void)
 {
     if (s_stats.running)
     {
         ESP_LOGI(TAG, "restart: flushing and closing the log files");
         data_logger_stop();
+    }
+
+    ps_commit();
+}
+
+/* registered once, the first time records can be queued (the logger
+ * starts, or a settings write enables it): a build with the logger off
+ * leaves the shutdown handler's slot to others (IDF has five) */
+static void hook_once(void)
+{
+    if (!s_hooked && esp_register_shutdown_handler(dl_on_shutdown) == ESP_OK)
+    {
+        s_hooked = true;
     }
 }
 
@@ -398,10 +510,7 @@ esp_err_t data_logger_start(void)
         dl_journal_set_boot(s_rt.boot_count);
     }
 
-    if (!s_hooked && esp_register_shutdown_handler(dl_on_shutdown) == ESP_OK)
-    {
-        s_hooked = true;
-    }
+    hook_once();
 
     if (dl_writer_start() != ESP_OK)
     {
@@ -516,14 +625,13 @@ esp_err_t data_logger_write(dl_param_t param, double value)
                       value, 0);
 }
 
-/* autopid value sink: main wires it to autopid_set_value_sink().
- * Poller/filter task context: registry lookup + ring push, no IO. */
-void data_logger_autopid_sink(const char *name, const char *unit,
-                              double value, bool changed)
+/* the value sinks' common part: the `autopid_log` gate (off: nothing,
+ * changed: when the producer says so, all: every sample), the registry
+ * lookup and the ring push. No IO. */
+static void value_sink(const char *source, const char *name, double value,
+                       bool changed)
 {
     const dl_cfg_t *cfg = dl_settings_config();
-
-    (void)unit;
 
     if (cfg->autopid_log == 0 || (cfg->autopid_log == 1 && !changed) ||
         !cfg->enabled)
@@ -533,12 +641,29 @@ void data_logger_autopid_sink(const char *name, const char *unit,
 
     dl_param_t param;
 
-    if (data_logger_register_param("autopid", name, &param) != ESP_OK)
+    if (data_logger_register_param(source, name, &param) != ESP_OK)
     {
         return; /* registry full: counted nowhere, params are bounded */
     }
 
     (void)data_logger_write(param, value);
+}
+
+/* autopid value sink: main wires it to autopid_set_value_sink().
+ * Poller/filter task context: registry lookup + ring push, no IO. */
+void data_logger_autopid_sink(const char *name, const char *unit,
+                              double value, bool changed)
+{
+    (void)unit;
+    value_sink("autopid", name, value, changed);
+}
+
+/* device value sink (2026-11-22): what the unit measures itself, under the
+ * name its status push uses, so the record of a drive holds it next to
+ * the car's parameters (`device.batt_voltage`). Same gate. */
+void data_logger_device_sink(const char *name, double value, bool changed)
+{
+    value_sink("device", name, value, changed);
 }
 
 esp_err_t data_logger_stats(data_logger_stats_t *out)

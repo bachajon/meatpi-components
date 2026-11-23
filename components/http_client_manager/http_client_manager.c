@@ -387,11 +387,12 @@ esp_http_client_handle_t hc_client_for(const http_client_request_t *req,
 }
 
 /** Open the connection, send the body, read up to @p cap bytes into
- *  @p buf. Runs entirely on the caller's task under the limiter. */
+ *  @p buf. Runs entirely on the caller's task under the limiter. A failed
+ *  request leaves why in @p fail. */
 static esp_err_t do_request(const http_client_request_t *req,
                             uint8_t *buf, size_t cap, size_t *out_len,
                             int *out_status, bool *out_truncated,
-                            hc_conn_t *conn)
+                            hc_conn_t *conn, http_client_fail_t *fail)
 {
     esp_http_client_handle_t client = hc_client_for(req, NULL);
 
@@ -440,6 +441,11 @@ static esp_err_t do_request(const http_client_request_t *req,
     if (err == ESP_OK && got >= cap)
     {
         *out_truncated = !esp_http_client_is_complete_data_received(client);
+    }
+
+    if (err != ESP_OK)
+    {
+        hc_fail_read(client, err, fail); /* the cleanup takes it away */
     }
 
     esp_http_client_cleanup(client);
@@ -493,15 +499,19 @@ esp_err_t http_client_manager_request(const http_client_request_t *req,
     int status = -1;
     bool truncated = false;
     hc_conn_t conn = { 0 };
+    http_client_fail_t fail = { 0 };
     esp_err_t err = do_request(req, buf, cap, &len, &status, &truncated,
-                               &conn);
+                               &conn, &fail);
 
     xSemaphoreGive(s_limiter);
 
     if (err != ESP_OK)
     {
         heap_caps_free(buf);
-        ESP_LOGD(TAG, "%s failed: %s", req->url, esp_err_to_name(err));
+        out->fail = fail;
+        ESP_LOGD(TAG, "%s failed: %s (%s)", req->url, esp_err_to_name(err),
+                 http_client_manager_fail_reason_str(
+                     http_client_manager_fail_reason(err, &fail)));
         return err;
     }
 

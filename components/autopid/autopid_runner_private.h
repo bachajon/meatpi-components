@@ -60,8 +60,11 @@ typedef struct
                                 request                                    */
     unsigned moved;          /* what the chains of the tables set on the
                                 chip beyond the baseline since it last went
-                                out (AP_SETS_* bits, ap_chain_sets): put
-                                back before the next row type (issue #964) */
+                                out (AP_SETS_* bits, ap_chain_moved): put
+                                back before the next row type (issue #964).
+                                AP_SETS_RAW follows the chip (an ATCAF1 of
+                                the tables takes it back): a reply is read
+                                as a raw frame's while it is set           */
     bool     chain_cut;      /* a chain was stopped behind a reset: no
                                 verdict for the protocol in effect         */
     uint16_t bus;            /* where the chip was taken to for a row

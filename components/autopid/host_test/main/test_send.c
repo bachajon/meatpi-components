@@ -158,6 +158,20 @@ void test_send_parse_refusals(void)
     TEST_ASSERT_NOT_NULL(strstr(s_err, "without data"));
     TEST_ASSERT_FALSE(parse("{\"bus\":\"obd\",\"id\":\"7DF\",\"data\":\"\"}"));
 
+    /* the data's sentence says which rule it broke (2026-11-21: one
+       sentence said all three) */
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"0\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data has half a byte: two hex digits "
+                             "a byte (\"80 01 FF\")", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"8 0\"}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "half a byte"));
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"8G\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data is hex digits (\"80 01 FF\") and "
+                             "has another character", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\","
+                            "\"data\":\"010203040506070809\"}"));
+    TEST_ASSERT_EQUAL_STRING("frame 1: data is 8 bytes at most", s_err);
+
     /* the wake mode is the single-wire transceiver's, nobody else's */
     TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"100\",\"data\":\"00\","
                             "\"wake\":true}"));
@@ -181,6 +195,39 @@ void test_send_parse_refusals(void)
                             "\"data\":\"01\"}"));
     TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"bus_kbps\":-5,\"id\":\"1\","
                             "\"data\":\"01\"}"));
+
+    /* a key the request does not know (2026-11-21): refused, with the keys
+       it does. It was ignored and the request answered ok: a gap_ms beside
+       frames, an at_ms or a repeat in a frame, each sent as if not there */
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"id\":\"7DF\",\"data\":\"01\","
+                            "\"repeat\":3}"));
+    TEST_ASSERT_EQUAL_STRING("unknown key \"repeat\" (bus, bus_kbps, id, ext, "
+                             "data, wake, gap_ms)", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"ms\",\"ID\":\"7DF\",\"data\":\"01\"}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "unknown key \"ID\""));
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"gap_ms\":300,"
+                            "\"frames\":[{\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_EQUAL_STRING("gap_ms is a key of each frame in frames", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"note\":\"x\","
+                            "\"frames\":[{\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_EQUAL_STRING("unknown key \"note\" (bus, bus_kbps, frames)",
+                             s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"frames\":["
+                            "{\"id\":\"100\",\"data\":\"00\"},"
+                            "{\"id\":\"621\",\"data\":\"00\",\"at_ms\":300}]}"));
+    TEST_ASSERT_EQUAL_STRING("frame 2: unknown key \"at_ms\" (id, ext, data, "
+                             "wake, gap_ms)", s_err);
+    TEST_ASSERT_FALSE(parse("{\"bus\":\"sw\",\"frames\":["
+                            "{\"bus\":\"sw\",\"id\":\"100\",\"data\":\"00\"}]}"));
+    TEST_ASSERT_NOT_NULL(strstr(s_err, "frame 1: unknown key \"bus\""));
+
+    /* every key it knows, in both forms */
+    TEST_ASSERT_TRUE(parse("{\"bus\":\"sw\",\"bus_kbps\":0,\"id\":\"100\","
+                           "\"ext\":false,\"data\":\"00\",\"wake\":true,"
+                           "\"gap_ms\":300}"));
+    TEST_ASSERT_TRUE(parse("{\"bus\":\"sw\",\"bus_kbps\":0,\"frames\":["
+                           "{\"id\":\"100\",\"ext\":false,\"data\":\"00\","
+                           "\"wake\":true,\"gap_ms\":300}]}"));
 }
 
 void test_send_parse_sequence(void)
@@ -474,6 +521,93 @@ void test_send_what_the_chip_said(void)
     TEST_ASSERT_EQUAL_STRING("can", ap_send_where_word(AP_SEND_CAN));
 }
 
+/* 7DF 02 01 00 00 00 00 00 on a 2012 Chevrolet Volt (2026-11-21): its
+   seven ECUs' answers as the chip printed them, the order of that request
+   (it varies from one to the next). `reply` was cut at 46 characters, in
+   the middle of the second answer. The reply is whole now, and `replies`
+   is one answer a line. */
+void test_send_reply_lines(void)
+{
+    static const char *const ECU[] =
+    {
+        "7E8 06 41 00 BE 7F B8 13 AA", "7EB 06 41 00 80 40 00 01 AA",
+        "7EF 06 41 00 00 00 00 01 AA", "7EC 06 41 00 80 00 00 01 AA",
+        "7E9 06 41 00 80 00 00 01 AA", "7EA 06 41 00 80 00 00 01 AA",
+        "7ED 06 41 00 00 00 00 01 AA",
+    };
+    const size_t n_ecu = sizeof(ECU) / sizeof(ECU[0]);
+    char resp[256] = "";
+    char joined[256] = "";
+    char text[256];
+    char line[64];
+
+    /* as the chip prints it: a space before each line end, the prompt */
+    for (size_t i = 0; i < n_ecu; i++)
+    {
+        strcat(resp, ECU[i]);
+        strcat(resp, " \r");
+        strcat(joined, (i > 0) ? " " : "");
+        strcat(joined, ECU[i]);
+    }
+
+    strcat(resp, "\r>");
+
+    /* `reply`: whole, one line */
+    TEST_ASSERT_EQUAL_UINT(strlen(joined),
+                           ap_send_reply_join(resp, text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING(joined, text);
+
+    /* what the 48-byte field kept: the second answer cut off */
+    TEST_ASSERT_EQUAL_UINT(46, ap_send_reply_join(resp, text, 48));
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 7F B8 13 AA 7EB 06 41 00 80 40",
+                             text);
+    TEST_ASSERT_EQUAL_UINT(195, strlen(joined)); /* the whole reply */
+
+    /* `replies`: one answer a line, every one of them, in order */
+    const char *p = resp;
+    size_t got = 0;
+
+    while ((p = ap_send_reply_next(p, line, sizeof(line))) != NULL)
+    {
+        TEST_ASSERT_TRUE(got < n_ecu);
+        TEST_ASSERT_EQUAL_STRING(ECU[got], line);
+        got++;
+    }
+
+    TEST_ASSERT_EQUAL_UINT(n_ecu, got);
+    TEST_ASSERT_EQUAL_STRING("", line);
+
+    /* nobody answered: one line; the prompt and blank lines are none */
+    p = ap_send_reply_next("NO DATA\r\r>", line, sizeof(line));
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_STRING("NO DATA", line);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, line, sizeof(line)));
+    TEST_ASSERT_NULL(ap_send_reply_next("\r\r>", line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("", line);
+    TEST_ASSERT_NULL(ap_send_reply_next("", line, sizeof(line)));
+    TEST_ASSERT_NULL(ap_send_reply_next(NULL, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_UINT(0, ap_send_reply_join(NULL, text, sizeof(text)));
+    TEST_ASSERT_EQUAL_STRING("", text);
+
+    /* before CAN: the init line and the answer are two lines */
+    p = ap_send_reply_next("BUS INIT: OK\r48 6B 10 41 00 BE\r", line,
+                           sizeof(line));
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK", line);
+    p = ap_send_reply_next(p, line, sizeof(line));
+    TEST_ASSERT_EQUAL_STRING("48 6B 10 41 00 BE", line);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, line, sizeof(line)));
+
+    /* a line longer than the buffer is cut there, and the walk goes on
+       with the next line */
+    char small[8];
+
+    p = ap_send_reply_next("7E8 06 41 00\r7E9\r", small, sizeof(small));
+    TEST_ASSERT_EQUAL_STRING("7E8 06", small);
+    p = ap_send_reply_next(p, small, sizeof(small));
+    TEST_ASSERT_EQUAL_STRING("7E9", small);
+    TEST_ASSERT_NULL(ap_send_reply_next(p, small, sizeof(small)));
+}
+
 void run_send_tests(void)
 {
     RUN_TEST(test_send_hex);
@@ -484,4 +618,5 @@ void run_send_tests(void)
     RUN_TEST(test_send_where_the_chip_goes);
     RUN_TEST(test_send_words_are_ram_and_undone);
     RUN_TEST(test_send_what_the_chip_said);
+    RUN_TEST(test_send_reply_lines);
 }

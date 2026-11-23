@@ -141,7 +141,9 @@ static unsigned command_sets(const char *body)
     return 0;
 }
 
-unsigned ap_chain_sets(const char *chain)
+/** The bits a chain sets, and in @p caf (when not NULL) its LAST word about
+ *  the CAN formatting: 0 = `ATCAF0`, 1 = `ATCAF1`, left alone = none. */
+static unsigned chain_scan(const char *chain, int *caf)
 {
     unsigned sets = 0;
     char cmd[CMD_MAX];
@@ -165,6 +167,12 @@ unsigned ap_chain_sets(const char *chain)
             if (!overflow && n > 2 && cmd[0] == 'A' && cmd[1] == 'T')
             {
                 sets |= command_sets(cmd + 2);
+
+                if (caf != NULL && strncmp(cmd + 2, "CAF", 3) == 0 &&
+                    (cmd[5] == '0' || cmd[5] == '1') && cmd[6] == '\0')
+                {
+                    *caf = cmd[5] - '0';
+                }
             }
 
             n = 0;
@@ -190,6 +198,27 @@ unsigned ap_chain_sets(const char *chain)
     }
 
     return sets;
+}
+
+unsigned ap_chain_sets(const char *chain)
+{
+    return chain_scan(chain, NULL);
+}
+
+unsigned ap_chain_moved(unsigned moved, const char *chain)
+{
+    int caf = -1;
+
+    moved |= chain_scan(chain, &caf);
+
+    /* the tables put the formatting back themselves: nothing of it is left
+       to undo, and a reply is read as a formatted one again */
+    if (caf == 1)
+    {
+        moved &= ~AP_SETS_RAW;
+    }
+
+    return moved;
 }
 
 size_t ap_chain_restore(unsigned sets, const char *prelude, char *out,

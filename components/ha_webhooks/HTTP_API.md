@@ -63,10 +63,46 @@ Current config + runtime stats.
   "status": "ok", "last_post": "2026-07-09T12:00:00Z", "retries": 0,
   "success_count": 42, "fail_count": 1,
   "last_error": "", "last_error_time": "",
+  "failures": [],
   "rev": "9f8e7d6c",
   "reply": { "applied": 1, "ignored": 0, "last": "applied" }
 }
 ```
+- **`failures`** (2026-11-22): why the last push did not go through, one
+  entry per address that did not take it, in the order they were tried:
+  ```json
+  "failures": [
+    { "slot": 1, "reason": "no_answer",  "code": "esp-tls 0x8004 errno 104", "time": "2026-11-22T05:06:53Z" },
+    { "slot": 2, "reason": "tls_closed", "code": "tls -0x7280",              "time": "2026-11-22T05:06:53Z" }
+  ]
+  ```
+  `slot` 1 is `url`, 2 is the failover (`url2`). Empty when the first
+  address took the push. With `status` `ok` an entry means the failover
+  delivered (the normal state on the road, where the local address does not
+  answer); with `failed` there is one per address the device holds.
+  `last_error` and `status` are as before (`esp_err=ESP_ERR_HTTP_CONNECT`
+  for every connection that did not open, `http=<status>` for an answer that
+  was not a 2xx): this is what tells the cases apart. `reason` is one word:
+
+  | `reason` | What happened | `code` |
+  |---|---|---|
+  | `dns` | the name in the address was not found | `esp-tls 0x8001` |
+  | `no_answer` | the connection was refused, or nothing answered in time | `esp-tls 0x8004 errno <n>`, `esp-tls 0x8006` |
+  | `tls_closed` | the far end closed the connection during the TLS handshake, without an alert (an https address by IP at a far end that routes by name, a proxy that does not let the device in, a Home Assistant that refuses the hello) | `tls -0x7280` |
+  | `tls_refused` | the far end answered the hello with an alert | `tls -0x7780` |
+  | `not_https` | an https address on a port that speaks plain http | `tls -0x7200` |
+  | `cert_untrusted` | the built-in bundle holds no root for the certificate | `tls -0x3000` |
+  | `cert` | the certificate check said no: the certificate is for another name, or (with `cert_set`) it is not under the set's CA; the device cannot tell which | `tls -0x2700` |
+  | `tls` | another handshake failure | `tls -0x<code>` |
+  | `no_reply` | the connection opened and no status line came back in time | `no status` |
+  | `http` | an answer that was not a 2xx; the entry also carries `"http": <status>` | `http <status>` |
+  | `other` | anything else | the `esp_err` name |
+
+  `code` is for a support request, not for a program. The words come from
+  `http_client_manager` (its README has the measurements). A certificate's
+  dates are not checked by this firmware, so there is no reason for an
+  expired one. The web interface's Home Assistant card shows a line per
+  entry while `status` is `failed`.
 - **`rev`** (2026-11-14): the revision the pushes report, `""` when none is
   stored or the settings were changed since it was stored. (A device whose
   webhook is pinned still shows its stored one here; its pushes carry no

@@ -82,12 +82,70 @@ typedef enum
     HTTP_CLIENT_DELETE,
 } http_client_method_t;
 
+/**
+ * Why a request's transport failed (2026-11-22): what esp-tls kept about a
+ * connection that did not open, or about a request that got no answer.
+ * Enough to tell a name that was not found from a far end that closed the
+ * handshake or a certificate that was not accepted; every one of them comes
+ * back from the request as the same ESP_ERR_HTTP_CONNECT. All zero after a
+ * request that went through.
+ */
+typedef struct
+{
+    int      tls_err;    /* esp-tls's own word (ESP_ERR_ESP_TLS_*,
+                            ESP_ERR_MBEDTLS_*); 0 = none                    */
+    int      tls_code;   /* the TLS library's code as a positive number
+                            (0x7280 for -0x7280); 0 = none                  */
+    uint32_t cert_flags; /* the certificate check's flags
+                            (MBEDTLS_X509_BADCERT_*) where esp-tls hands
+                            them over; 0 or 0xFFFFFFFF = none. IDF 6.1 does
+                            not for a handshake that failed (it asks for the
+                            peer certificate first, and there is none before
+                            the handshake is done), so the reason is worked
+                            out without them                                */
+    int      sock_errno; /* the socket's errno; 0 = none                    */
+    bool     opened;     /* the connection was open: the request left and
+                            the answer did not come                         */
+} http_client_fail_t;
+
+/** What a failed request comes down to, for a person. */
+typedef enum
+{
+    HTTP_CLIENT_FAIL_NONE = 0,       /* the request went through            */
+    HTTP_CLIENT_FAIL_DNS,            /* the name was not found              */
+    HTTP_CLIENT_FAIL_NO_ANSWER,      /* refused, unreachable, or no answer
+                                        to the connection in time           */
+    HTTP_CLIENT_FAIL_TLS_CLOSED,     /* the far end closed the connection
+                                        during the handshake, no alert      */
+    HTTP_CLIENT_FAIL_TLS_REFUSED,    /* the far end answered the hello with
+                                        an alert                            */
+    HTTP_CLIENT_FAIL_NOT_TLS,        /* the port does not speak TLS         */
+    HTTP_CLIENT_FAIL_CERT_UNTRUSTED, /* the built-in bundle holds no root
+                                        the certificate's chain ends at     */
+    HTTP_CLIENT_FAIL_CERT,           /* the certificate check said no: the
+                                        name in it is another one, or (with
+                                        a certificate set or an explicit CA)
+                                        the chain does not end at that CA.
+                                        The two cannot be told apart: see
+                                        cert_flags                          */
+    HTTP_CLIENT_FAIL_TLS_OTHER,      /* another handshake failure           */
+    HTTP_CLIENT_FAIL_NO_REPLY,       /* connected, the answer did not come  */
+    HTTP_CLIENT_FAIL_OTHER,
+} http_client_fail_reason_t;
+
+/** A code a person can pass on to support, as text: "tls -0x7280",
+ *  "tls -0x2700 flags 0x8", "esp-tls 0x8006 errno 113". */
+#define HTTP_CLIENT_FAIL_CODE_LEN 48
+
 typedef struct
 {
     char *data;        /* PSRAM, NUL-terminated; free via _free()       */
     size_t len;
     int status_code;   /* -1 when the transport failed                  */
     bool truncated;    /* the body went on past max_response (2026-10-18) */
+    /* why the transport failed (2026-11-22); zero after a request that
+       went through. The one part of the response a failed request fills. */
+    http_client_fail_t fail;
     /* where the request went (2026-11-14): read from the connection's
        socket once the headers were in. ha_webhooks takes settings from a
        push's reply only where it would take a registration.              */
@@ -136,11 +194,29 @@ esp_err_t http_client_manager_stop(void);
  * Perform @p req synchronously. On ESP_OK, @p out holds the (possibly
  * truncated at max_response) body and status_code: release with
  * http_client_manager_free(). Transport failures return an error and a
- * zeroed response. HTTP error statuses (4xx/5xx) return ESP_OK with the
- * status_code set: the caller decides what an error is.
+ * response that is zeroed but for `fail` (why it failed) and status_code
+ * -1. HTTP error statuses (4xx/5xx) return ESP_OK with the status_code set:
+ * the caller decides what an error is.
  */
 esp_err_t http_client_manager_request(const http_client_request_t *req,
                                       http_client_response_t *out);
+
+/** What a request that returned @p err failed on, from the response's
+ *  `fail`. Pure (host tested). HTTP_CLIENT_FAIL_NONE for ESP_OK. */
+http_client_fail_reason_t http_client_manager_fail_reason(
+    esp_err_t err, const http_client_fail_t *f);
+
+/** A short stable word for a reason, for an API field or a log line:
+ *  "dns", "no_answer", "tls_closed", "tls_refused", "not_https",
+ *  "cert_untrusted", "cert", "tls", "no_reply", "other"; "" for
+ *  HTTP_CLIENT_FAIL_NONE. */
+const char *http_client_manager_fail_reason_str(http_client_fail_reason_t r);
+
+/** The code for support into @p out (HTTP_CLIENT_FAIL_CODE_LEN is enough):
+ *  the TLS library's code and, for a certificate, the check's flags; else
+ *  esp-tls's own code and the socket's errno. "" when @p f holds nothing. */
+void http_client_manager_fail_code(const http_client_fail_t *f, char *out,
+                                   size_t cap);
 
 /** GET convenience. */
 esp_err_t http_client_manager_get(const char *url,

@@ -51,6 +51,28 @@ extern "C" {
 #define HW_REV_LEN       17    /* a revision: 16 characters + NUL          */
 #define HW_REV_SUM_LEN   9     /* its fingerprint: 8 hex characters + NUL  */
 #define HW_REPLY_MAX     2048  /* a longer reply body is ignored           */
+#define HW_REASON_LEN    16    /* a failure's reason: one word             */
+#define HW_FAIL_CODE_LEN 48    /* its code for support (as long as
+                                  http_client_manager's)                   */
+#define HW_URLS          2     /* url and url2                             */
+
+/** Why one address did not take a push (2026-11-22). Until then every kind
+ *  of failure read "failed" and `esp_err=ESP_ERR_HTTP_CONNECT`, and a field
+ *  report needed the device log to tell a far end that closed the TLS
+ *  handshake from a name that was not found. */
+typedef struct
+{
+    uint8_t  slot;                    /* 1 = url, 2 = url2 (the failover)  */
+    int16_t  http;                    /* the answer's status when it was
+                                         not a 2xx, else 0                 */
+    char     reason[HW_REASON_LEN];   /* http_client_manager's word ("dns",
+                                         "no_answer", "tls_closed", ...),
+                                         "no_reply", or "http" for an
+                                         answer that was not a 2xx         */
+    char     code[HW_FAIL_CODE_LEN];  /* for support: "tls -0x7280",
+                                         "esp-tls 0x8006", "http 502"      */
+    char     time[HW_TS_LEN];
+} hw_fail_t;
 
 /** Boot-applied + live config (settings-backed, mutable by the URL push). */
 typedef struct
@@ -91,6 +113,12 @@ typedef struct
     uint32_t reply_ignored;          /* reply bodies refused              */
     char     reply_last[HW_STATUS_LEN]; /* hw_reply_str() of the last
                                         reply that carried a body         */
+    uint8_t  fail_n;                 /* the addresses that did not take the
+                                        last push: 0 when the first one
+                                        did, 1 when the failover delivered
+                                        (or there is one address), 2 when
+                                        nothing did                       */
+    hw_fail_t fails[HW_URLS];        /* why, in the order they were tried */
 } hw_stats_t;
 
 /* ---- the registration object, the revision, the reply (ha_webhooks_reg.c) -
@@ -259,6 +287,20 @@ void      hw_poster_resync(void);
 
 /** UTC ISO8601 into a HW_TS_LEN buffer. */
 void hw_format_utc(char out[HW_TS_LEN]);
+
+/* ---- why an address failed (ha_webhooks_fail.c) --------------------------- */
+
+/** Why the address in @p slot (1 or 2) did not take the push, into @p f:
+ *  the transport's reason from http_client_manager for a request that
+ *  returned @p r, or the answer's status. @p resp is the request's
+ *  `http_client_response_t` (untyped here: this header is host tested
+ *  without http_client_manager). */
+void hw_fail_note(hw_fail_t *f, int slot, esp_err_t r, const void *resp);
+
+/** The failures of a cycle for the log line: "1 no_answer [esp-tls 0x8006],
+ *  2 tls_closed [tls -0x7280]". No address in it: it carries the webhook
+ *  id. */
+void hw_fail_words(const hw_fail_t *fails, int n, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

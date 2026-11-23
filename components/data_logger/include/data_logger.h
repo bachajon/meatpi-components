@@ -99,6 +99,7 @@ typedef struct
     uint32_t can_rotations;      /**< CAN-file rotations since boot     */
     /* robustness (2026-09-07, ROBUSTNESS.md) */
     uint32_t salvaged;           /**< records carried over a warm reset      */
+    uint32_t salvage_dropped;    /**< carried records that failed their check */
     uint32_t corrupt;            /**< *.corrupt files set aside on the card   */
     /* the clock (2026-10-13, issue #984; README "Time") */
     bool     clock_valid;        /**< the system clock was set this boot     */
@@ -157,6 +158,13 @@ esp_err_t data_logger_stats(data_logger_stats_t *out);
  *  `autopid.<name>` lazily. Poller-task context, never blocks. */
 void data_logger_autopid_sink(const char *name, const char *unit,
                               double value, bool changed);
+
+/** A value of the device itself for the params stream, logged as
+ *  `device.<name>` with `<name>` the key of the status push (main wires
+ *  the battery voltage: `device.batt_voltage`). Gated like the autopid
+ *  path by `autopid_log`: `off` nothing, `changed` when the caller says
+ *  so, `all` every call. Any task, never blocks. */
+void data_logger_device_sink(const char *name, double value, bool changed);
 
 /** Optional /api/logger status route (§9.1: main wires it in HTTP
  *  compositions only). */

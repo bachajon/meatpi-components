@@ -75,6 +75,12 @@ typedef struct
  *  there is no socket or the addresses cannot be read. */
 void hc_conn_read(esp_http_client_handle_t client, hc_conn_t *out);
 
+/** Why @p client's request failed with @p err: what esp-tls kept, read
+ *  before the client is cleaned up (http_client_manager_conn.c). Reading
+ *  clears esp-tls's record. */
+void hc_fail_read(esp_http_client_handle_t client, esp_err_t err,
+                  http_client_fail_t *out);
+
 /** The concurrency limiter (4 requests device-wide). */
 void hc_limiter_take(void);
 void hc_limiter_give(void);

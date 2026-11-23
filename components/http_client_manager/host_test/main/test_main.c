@@ -2,13 +2,15 @@
  * @file test_main.c
  * @brief Host tests for http_client_manager's pure helpers: URL
  *        validation, base64 (RFC 4648 vectors), Bearer/Basic building,
- *        header splitting, the redirect rule and the class of an address a
- *        request went to. Expected: 7 Tests 0 Failures 0 Ignored.
+ *        header splitting, the redirect rule, the class of an address a
+ *        request went to, and why a request failed (the reason and the code
+ *        for support). Expected: 9 Tests 0 Failures 0 Ignored.
  */
 #include <string.h>
 
 #include "unity.h"
 
+#include "http_client_manager.h"
 #include "http_client_manager_private.h"
 
 void setUp(void)
@@ -158,9 +160,170 @@ static void test_private_addresses(void)
     TEST_ASSERT_FALSE(hc_ip6_private(loop));
 }
 
+#define CERT_NAME_FLAG    0x0004u /* MBEDTLS_X509_BADCERT_CN_MISMATCH */
+#define CERT_UNTRUST_FLAG 0x0008u /* MBEDTLS_X509_BADCERT_NOT_TRUSTED */
+
+static http_client_fail_reason_t why(int tls_err, int tls_code,
+                                     uint32_t flags, bool opened)
+{
+    const http_client_fail_t f =
+    {
+        .tls_err = tls_err,
+        .tls_code = tls_code,
+        .cert_flags = flags,
+        .opened = opened,
+    };
+
+    return http_client_manager_fail_reason(ESP_FAIL, &f);
+}
+
+/* why a request failed (2026-11-22): every connection that does not open is
+   ESP_ERR_HTTP_CONNECT; what esp-tls kept beside it tells the cases apart.
+   The values are the ones the bench unit gave for each far end. */
+static void test_fail_reason(void)
+{
+    const uint32_t none = HC_CERT_NO_RESULT;
+
+    /* a request that went through has no reason, whatever is left over */
+    const http_client_fail_t junk = { .tls_code = HC_MBED_CONN_EOF };
+
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NONE,
+                      http_client_manager_fail_reason(ESP_OK, &junk));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_OTHER,
+                      http_client_manager_fail_reason(ESP_FAIL, NULL));
+
+    /* before the handshake: the name, the connection */
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_DNS,
+                      why(HC_TLS_ERR_RESOLVE, 0, 0, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NO_ANSWER,
+                      why(HC_TLS_ERR_CONNECT, 0, 0, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NO_ANSWER,
+                      why(HC_TLS_ERR_TIMEOUT, 0, 0, false));
+
+    /* the field report: the far end closed during the handshake */
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_TLS_CLOSED,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_CONN_EOF, none, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_TLS_CLOSED,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_NET_RESET, none, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_TLS_REFUSED,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_FATAL_ALERT, none,
+                          false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NOT_TLS,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_INVALID_RECORD, none,
+                          false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NO_ANSWER,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_SSL_TIMEOUT, none,
+                          false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_TLS_OTHER,
+                      why(HC_TLS_ERR_HANDSHAKE, 0x7100, none, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_TLS_OTHER,
+                      why(HC_TLS_ERR_HANDSHAKE, 0, 0, false));
+
+    /* the certificate: the bundle that finds no root ends with -0x3000;
+       every other "no" of the check is -0x2700, and the flags that would
+       say which (esp-tls gives none after a failed handshake: 0, as the
+       bench unit had it) do not change the reason when they are there */
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT_UNTRUSTED,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_FATAL, 0, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT_UNTRUSTED,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_FATAL, none,
+                          false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_VERIFY, 0, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_VERIFY, none,
+                          false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_VERIFY,
+                          CERT_NAME_FLAG, false));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_CERT,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_X509_VERIFY,
+                          CERT_UNTRUST_FLAG, false));
+
+    /* the connection was open: the request left, the answer did not come */
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NO_REPLY, why(0, 0, 0, true));
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_NO_REPLY,
+                      why(HC_TLS_ERR_HANDSHAKE, HC_MBED_CONN_EOF, none, true));
+    /* nothing kept */
+    TEST_ASSERT_EQUAL(HTTP_CLIENT_FAIL_OTHER, why(0, 0, 0, false));
+
+    /* every reason has its own word, none empty but "none" */
+    TEST_ASSERT_EQUAL_STRING(
+        "", http_client_manager_fail_reason_str(HTTP_CLIENT_FAIL_NONE));
+
+    for (int a = HTTP_CLIENT_FAIL_DNS; a <= HTTP_CLIENT_FAIL_OTHER; a++)
+    {
+        const char *wa = http_client_manager_fail_reason_str(a);
+
+        TEST_ASSERT_TRUE(wa[0] != '\0');
+
+        for (int b = a + 1; b <= HTTP_CLIENT_FAIL_OTHER; b++)
+        {
+            TEST_ASSERT_TRUE(
+                strcmp(wa, http_client_manager_fail_reason_str(b)) != 0);
+        }
+    }
+
+    TEST_ASSERT_EQUAL_STRING(
+        "tls_closed",
+        http_client_manager_fail_reason_str(HTTP_CLIENT_FAIL_TLS_CLOSED));
+}
+
+static void test_fail_code(void)
+{
+    char out[HTTP_CLIENT_FAIL_CODE_LEN];
+    http_client_fail_t f = { .tls_err = HC_TLS_ERR_HANDSHAKE,
+                             .tls_code = HC_MBED_CONN_EOF,
+                             .cert_flags = HC_CERT_NO_RESULT };
+
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("tls -0x7280", out);
+
+    /* the flags only where the certificate check gave some */
+    f.tls_code = HC_MBED_X509_VERIFY;
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("tls -0x2700", out);
+    f.cert_flags = CERT_UNTRUST_FLAG;
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("tls -0x2700 flags 0x8", out);
+    f.cert_flags = CERT_UNTRUST_FLAG | CERT_NAME_FLAG;
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("tls -0x2700 flags 0xC", out);
+    f.tls_code = HC_MBED_NET_RESET;
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("tls -0x0050", out);
+
+    /* no TLS code: esp-tls's own, with the socket's errno when there is one */
+    f = (http_client_fail_t){ .tls_err = HC_TLS_ERR_TIMEOUT };
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("esp-tls 0x8006", out);
+    f = (http_client_fail_t){ .tls_err = HC_TLS_ERR_CONNECT, .sock_errno = 113 };
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("esp-tls 0x8004 errno 113", out);
+    f = (http_client_fail_t){ .sock_errno = 11, .opened = true };
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("errno 11", out);
+
+    /* nothing kept, no room, no struct */
+    f = (http_client_fail_t){ 0 };
+    strcpy(out, "x");
+    http_client_manager_fail_code(&f, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("", out);
+    strcpy(out, "x");
+    http_client_manager_fail_code(NULL, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("", out);
+    f = (http_client_fail_t){ .tls_code = HC_MBED_CONN_EOF };
+    http_client_manager_fail_code(&f, out, 6);
+    TEST_ASSERT_EQUAL_STRING("tls -", out);
+    http_client_manager_fail_code(&f, out, 0); /* nothing written */
+    TEST_ASSERT_EQUAL_STRING("tls -", out);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_fail_reason);
+    RUN_TEST(test_fail_code);
     RUN_TEST(test_url_validation);
     RUN_TEST(test_base64_rfc_vectors);
     RUN_TEST(test_bearer);

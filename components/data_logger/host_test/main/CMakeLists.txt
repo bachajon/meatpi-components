@@ -7,6 +7,7 @@ idf_component_register(
     SRCS "test_main.c"
          "test_recover.c"
          "test_clock.c"
+         "test_export.c"
          "${comp_dir}/data_logger_files.c"
          "${comp_dir}/data_logger_cursor.c"
          "${comp_dir}/data_logger_recover.c"

@@ -29,7 +29,7 @@ idf_component_register(
     # rtc_manager's clock steps and the restart tracker's boot count.
     # /api/logger and the `logger` command are optional (main wires them).
     PRIV_REQUIRES sqlite3 external_storage event_manager dev_status_manager
-                  esp_timer rtc_manager restart_tracker
+                  esp_timer esp_mm rtc_manager restart_tracker
                   http_server_manager settings_manager log_manager
                   cmdline_manager can_manager
 )
