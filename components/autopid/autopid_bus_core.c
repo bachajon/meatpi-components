@@ -471,7 +471,18 @@ bool ap_filter_bus_ok(const char *word)
 {
     ap_row_bus_t bus = AP_BUS_OBD;
 
-    return ap_bus_parse(word, &bus) && bus == AP_BUS_OBD;
+    return ap_bus_parse(word, &bus);
+}
+
+uint16_t ap_filter_bus_key(const ap_filter_t *f)
+{
+    if (f->bus == AP_BUS_OBD || f->bus >= AP_BUS_COUNT)
+    {
+        return 0;
+    }
+
+    return (uint16_t)(AP_BUS_KEY(f->bus, f->bus_rate) |
+                      (f->is_extended ? AP_BUS_KEY_EXT : 0));
 }
 
 char *ap_config_repair_filter_bus(const char *json, int *switched_off)
@@ -492,11 +503,18 @@ char *ap_config_repair_filter_bus(const char *json, int *switched_off)
     cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(root, "filters"))
     {
         const cJSON *bus = cJSON_GetObjectItemCaseSensitive(f, "bus");
+        const cJSON *kbps = cJSON_GetObjectItemCaseSensitive(f, "bus_kbps");
+        ap_row_bus_t b = AP_BUS_OBD;
+        uint8_t rate = 0;
 
         /* as the parser reads them: anything but `false` is a filter that
-           is on, and a bus that is not text is none */
+           is on, a bus that is not text is none, a speed that is not a
+           number is none (since 2026-11-22 both are read) */
         if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(f, "enabled")) ||
-            ap_filter_bus_ok(cJSON_IsString(bus) ? bus->valuestring : NULL))
+            (ap_bus_parse(cJSON_IsString(bus) ? bus->valuestring : NULL, &b) &&
+             ap_bus_rate_parse((uint8_t)b,
+                               cJSON_IsNumber(kbps) ? kbps->valuedouble : 0,
+                               &rate)))
         {
             continue;
         }

@@ -177,26 +177,35 @@ int ap_chain_strip_store(char *chain);
  *  does not parse (the parser then says what is wrong). */
 char *ap_config_repair_store(const char *json, int *switched_off);
 
-/* A filter listens on the car's own bus (2026-11-21, GitHub issue #1078):
- * its monitor window is the car's OBD protocol (flt_window), so a `bus` of
- * ms, sw or ch on a filter was read by nobody, and the filter listened on
- * the HS bus for an id that lives elsewhere and never filled. The tables
- * refuse such a filter while it is switched on; one switched off may keep
- * it, and the loader switches a stored one off once and says so
- * (ap_config_repair_filter_bus), as for the words the chip stores. */
+/* The bus of a filter (GitHub issue #1078). Until 2026-11-21 a filter's
+ * `bus` was read by nobody: its window was the car's OBD protocol, so a
+ * filter of a GMLAN single-wire frame listened on the HS bus and never
+ * filled. On 2026-11-21 the tables refused such a filter; since 2026-11-22
+ * a filter names its bus as a row does (obd, ms, sw, ch, and `bus_kbps`)
+ * and its window opens there (flt_window): the chip goes to that bus like
+ * a row of it, listens, and comes home with the rows of the car's protocol.
+ * A word this firmware does not know is refused while the filter is on;
+ * the loader switches a stored one off once and says so. */
 
 /** A filter's `bus` as the config gives it (NULL: none, or not text):
- *  true for none and for `obd`, false for any other word. */
+ *  true for none and for a bus this firmware knows, false for any other
+ *  word. */
 bool ap_filter_bus_ok(const char *word);
 
-/** A config text in which a filter that is switched on names a bus other
- *  than obd -> the text with those filters switched off (malloc'd, caller
- *  frees) and their count; NULL and 0 when there is none or the text does
- *  not parse. */
+/** A config text in which a filter that is switched on names a bus this
+ *  firmware does not know, or a `bus_kbps` the parser refuses for it,
+ *  -> the text with those filters switched off
+ *  (malloc'd, caller frees) and their count; NULL and 0 when there is none
+ *  or the text does not parse. */
 char *ap_config_repair_filter_bus(const char *json, int *switched_off);
 
-/** Where scheduler entry @p i asks (AP_BUS_KEY; a filter and a PGN row: 0,
- *  the car's OBD protocol). */
+/** Where a filter's window opens (AP_BUS_KEY): 0 on the car's OBD
+ *  protocol; on another bus its key, with AP_BUS_KEY_EXT for a 29-bit id
+ *  (the slot is defined for the id's width there). */
+uint16_t ap_filter_bus_key(const ap_filter_t *f);
+
+/** Where scheduler entry @p i asks (AP_BUS_KEY; a PGN row: 0, the car's
+ *  OBD protocol; a filter: ap_filter_bus_key, since 2026-11-22). */
 uint16_t ap_sched_entry_bus(const ap_config_t *cfg, int i);
 
 /** A row is asked at most this long before its time to save a change of

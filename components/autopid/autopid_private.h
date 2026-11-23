@@ -128,21 +128,32 @@ typedef enum
     AP_CLASS_CHIP_BUS,     /* a request through the chip on a bus of its own
                               (MS, single-wire, CH CAN: autopid_bus.h); the
                               HS bus guard has no say about it             */
+    AP_CLASS_LISTEN_BUS,   /* a filter on such a bus: the chip listens and
+                              sends nothing, so the voltage pause stops it
+                              only under pause_mode "all" (2026-11-22)     */
 } ap_row_class_t;
 
 #define AP_CLASS_BIT(c)   (1u << (c))
 #define AP_CLASS_ALL      (AP_CLASS_BIT(AP_CLASS_CHIP) | \
                            AP_CLASS_BIT(AP_CLASS_PASSIVE) | \
                            AP_CLASS_BIT(AP_CLASS_BUS_TX) | \
-                           AP_CLASS_BIT(AP_CLASS_CHIP_BUS))
+                           AP_CLASS_BIT(AP_CLASS_CHIP_BUS) | \
+                           AP_CLASS_BIT(AP_CLASS_LISTEN_BUS))
 
 /** Is this the class of a row the chip asks (on any bus)? */
-#define AP_CLASS_IS_CHIP(c) ((c) == AP_CLASS_CHIP || (c) == AP_CLASS_CHIP_BUS)
+#define AP_CLASS_IS_CHIP(c) ((c) == AP_CLASS_CHIP || \
+                             (c) == AP_CLASS_CHIP_BUS || \
+                             (c) == AP_CLASS_LISTEN_BUS)
 
 typedef struct
 {
     uint32_t frame_id;
     bool     is_extended;
+    uint8_t  bus;                         /* ap_row_bus_t, as a row's: where
+                                             the window listens (2026-11-22,
+                                             GitHub issue #1078); in the
+                                             padding: no table grows        */
+    uint8_t  bus_rate;                    /* its rate code (autopid_bus.h)  */
     uint32_t monitor_ms;                  /* ATMA window length             */
     int      group;
     uint32_t period_ms;                   /* 0 = inherit group              */
@@ -417,7 +428,8 @@ typedef struct
  *  holds the job lock with the poller parked. ESP_ERR_TIMEOUT = no frame
  *  with the id in @p monitor_ms; ESP_ERR_INVALID_STATE = the chip is busy;
  *  @p elapsed_us = from ATMA to the first frame. */
-esp_err_t ap_runner_test_filter(uint32_t frame_id, uint32_t monitor_ms,
+esp_err_t ap_runner_test_filter(uint32_t frame_id, uint16_t bus,
+                                uint32_t monitor_ms,
                                 const ap_flt_want_t *want, uint16_t n,
                                 int64_t *elapsed_us, char *transcript,
                                 size_t transcript_len);

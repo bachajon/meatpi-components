@@ -848,18 +848,37 @@ chain, the allowed chains, the CAN ERROR count, the words the chip stores),
 these buses, J1939 formatting, listening rows, a `bus` for a filter (a
 monitor window is the car's own bus).
 
-**A filter's `bus` (2026-11-21, GitHub issue #1078).** Until then the
-parser did not read it: a filter with `"bus": "sw"` (a GMLAN single-wire
-frame such as 0x1026C0CB) was taken, listened on the car's own bus, where
-that id is never sent, and never filled. The tables now refuse a filter
-that is switched on with a bus other than `obd` (`filter 1026C0CB: a
-filter listens on bus obd only (ms, sw, ch: not yet); switch it off`); a
-filter that is switched off may keep it. A file stored before is not
-refused at boot, which would empty the tables: the loader switches such a
-filter off once, rewrites the file and says so in a W line, and the rest of
-the tables poll as before (`ap_filter_bus_ok()`,
+**A filter's `bus` (GitHub issue #1078).** Until 2026-11-21 the parser did
+not read it: a filter with `"bus": "sw"` (a GMLAN single-wire frame such
+as 0x1026C0CB) was taken, listened on the car's own bus, where that id is
+never sent, and never filled; on 2026-11-21 the tables refused it. Since
+2026-11-22 a filter names its bus as a row does (`bus`: obd, ms, sw, ch, and
+`bus_kbps`) and its window opens there: the chip goes to that bus as for a
+row of it (`ap_bus_row_setup()`; a 29-bit id gets the slot defined for its
+width, `AP_BUS_KEY_EXT`), sets the receive filter on the id, listens
+(`ATCAF0`, `ATMA`) and puts the receive filter back. The scheduler groups
+the filter with that bus's rows (`ap_sched_entry_bus()`), the chip comes
+home with the rows of the car's protocol, and `stats.buses.<bus>` counts
+the windows (ok: a frame caught). Its class is `AP_CLASS_LISTEN_BUS`: the
+HS bus guard has no say (a single-wire filter keeps listening while the
+car charges with its HS bus silent), and the voltage
+pause stops it only under `pause_mode` `all`, as it stops the passive
+rows: it sends nothing, and on a 2012 Volt a remote start is decided on
+the single-wire bus while the 12 V is low (its first 13 s, and a refused
+start, which never lifts the pause, were missed). The other pauses (an
+app, a tool, a scan, the chip's update) still hold it, a baseline they
+left owed is sent before its first window, and it opens no window once
+the device is going to sleep (sleep_manager cuts the chip behind the idle
+bit). A row on that bus sends,
+and waits for the voltage pause as before. `POST /api/autopid/test` takes
+the same `bus` and `bus_kbps` in its `filter`, and asks the HS bus guard
+only for a filter on the car's own bus. A bus word this firmware
+does not know, or a `bus_kbps` it cannot make, is refused while the filter
+is on; a file stored before is not refused at boot, which would empty the
+tables: the loader switches such a filter off once, rewrites the file and
+says so in a W line (`ap_filter_bus_ok()`, `ap_filter_bus_key()`,
 `ap_config_repair_filter_bus()` in `autopid_bus_core.c`, host-tested in
-`test_filter_type.c`). The web UI writes no `bus` on a filter.
+`test_filter_type.c`). The web UI writes no `bus` on a filter yet.
 
 ### No chain of the tables sends a word the chip stores (2026-11-11)
 
@@ -1515,8 +1534,10 @@ frame of the window, here one frame per parameter (the one of its
 multiplexer page). Different, and open: v4.50 ran a custom filter whatever
 the custom switch said (here `custom_enabled` gates it since this date),
 and under its low-voltage mode `disable_pid_requests` it went on
-monitoring filters while the requests paused; here a filter is a chip row
-and waits for the voltage pause in both `pause_mode`s.
+monitoring filters while the requests paused; here a filter on the car's
+own bus is a chip row and waits for the voltage pause in both
+`pause_mode`s (a filter on another bus listens through it since
+2026-11-22, see "A filter's `bus`").
 
 **Tests of the changes of 2026-11-14.** Host: `test_filter_type.c` (the
 tag, the two switches, a gated filter never picked, the transcript line

@@ -241,10 +241,11 @@ static char flt_proto_for(bool extended, ap_tr_t *tr)
  *  filter on the one id and the CAN auto formatting off (COMMAND
  *  transactions), the MONITOR claim, ATMA, a frame per wanted slot or
  *  @p monitor_ms, the stop, the chip's settings back, the runner reset.
- *  @p tr (may be NULL): the exchange, for a test. @p first_us (may be
- *  NULL): from ATMA to the first frame with the id. ESP_ERR_TIMEOUT = no
- *  such frame; ESP_ERR_INVALID_STATE = the chip is another master's. */
-static esp_err_t flt_window(uint32_t frame_id, bool extended,
+ *  @p bus: where (ap_filter_bus_key; 0 = the car's OBD protocol). @p tr
+ *  (may be NULL): the exchange, for a test. @p first_us (may be NULL): from
+ *  ATMA to the first frame with the id. ESP_ERR_TIMEOUT = no such frame;
+ *  ESP_ERR_INVALID_STATE = the chip is another master's. */
+static esp_err_t flt_window(uint32_t frame_id, bool extended, uint16_t bus,
                             uint32_t monitor_ms, const ap_flt_want_t *want,
                             uint16_t n, ap_tr_t *tr, int64_t *first_us)
 {
@@ -271,7 +272,21 @@ static esp_err_t flt_window(uint32_t frame_id, bool extended,
         }
     }
 
-    ap_bus_leave(tr); /* a monitor window is about the car's own bus */
+    /* the window's bus (2026-11-22, GitHub issue #1078): the car's own, or
+       a bus of the chip's own as a row of it is asked there. On another bus
+       the slot is defined for the id's width (AP_BUS_KEY_EXT), so the
+       protocol of the id's width below is the car's business only, and the
+       chip stays there after the window: the poller takes it home with
+       the rows of the car's protocol (autopid_bus.h) */
+    if (bus == 0)
+    {
+        ap_bus_leave(tr);
+    }
+    else if (!ap_bus_row_setup(NULL, bus, -1, NULL, NULL, tr))
+    {
+        ap_tr_add(tr, '!', "the chip did not take that bus");
+        return ESP_FAIL;
+    }
 
     /* window setup (COMMAND transactions): headers ON so monitor lines
        carry the CAN id our parser matches, then hardware-filter to the
@@ -284,7 +299,7 @@ static esp_err_t flt_window(uint32_t frame_id, bool extended,
         return ESP_FAIL;
     }
 
-    char proto_back = flt_proto_for(extended, tr);
+    char proto_back = (bus == 0) ? flt_proto_for(extended, tr) : '\0';
 
     snprintf(cmd, sizeof(cmd), extended ? "ATCRA%08lX" : "ATCRA%03lX",
              (unsigned long)frame_id);
@@ -414,8 +429,9 @@ bool ap_runner_run_filter(const ap_filter_t *f, const ap_param_t *params)
         s_want[i].want = params[i].enabled;
     }
 
-    esp_err_t err = flt_window(f->frame_id, f->is_extended, f->monitor_ms,
-                               s_want, n_prm, NULL, NULL);
+    esp_err_t err = flt_window(f->frame_id, f->is_extended,
+                               ap_filter_bus_key(f), f->monitor_ms, s_want,
+                               n_prm, NULL, NULL);
 
     if (err != ESP_OK)
     {
@@ -470,7 +486,8 @@ bool ap_runner_run_filter(const ap_filter_t *f, const ap_param_t *params)
     return any;
 }
 
-esp_err_t ap_runner_test_filter(uint32_t frame_id, uint32_t monitor_ms,
+esp_err_t ap_runner_test_filter(uint32_t frame_id, uint16_t bus,
+                                uint32_t monitor_ms,
                                 const ap_flt_want_t *want, uint16_t n,
                                 int64_t *elapsed_us, char *transcript,
                                 size_t transcript_len)
@@ -492,8 +509,8 @@ esp_err_t ap_runner_test_filter(uint32_t frame_id, uint32_t monitor_ms,
         n = AP_PARAMS_PER;
     }
 
-    esp_err_t err = flt_window(frame_id, frame_id > 0x7FF, monitor_ms, want,
-                               n, &tr, elapsed_us);
+    esp_err_t err = flt_window(frame_id, frame_id > 0x7FF, bus, monitor_ms,
+                               want, n, &tr, elapsed_us);
 
     if (err == ESP_ERR_TIMEOUT)
     {

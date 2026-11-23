@@ -92,6 +92,22 @@ static int64_t s_last_ok_us; /* last successful ECU poll (0 = never) */
    brings it home itself: that is not ours to undo (2026-11-11: the poller
    sent the baseline into the test's request). */
 static bool s_bus_out;
+/* an app, a tool or a chip update left the chip in its state while the
+   voltage pause kept the baseline from going back: owed to a filter that
+   listens through the pause (2026-11-22), before its window */
+static bool s_base_owed;
+
+/* the chip's baseline back after somebody else had it, now when this task
+   is about to use the chip, else owed */
+static void poller_base_back(bool now)
+{
+    if (now)
+    {
+        ap_runner_restore_baseline();
+    }
+
+    s_base_owed = !now;
+}
 
 /* ---- the poller task --------------------------------------------------------------- */
 
@@ -152,10 +168,8 @@ static void poller_task(void *arg)
                    PID inits assume before the first poll (bench
                    2026-09-08: every resumed poll failed on the app's
                    ATS0 otherwise). Only when we are going to poll. */
-                if (ap_core_enabled() && !s_paused_voltage && !s_scan_pause)
-                {
-                    ap_runner_restore_baseline();
-                }
+                poller_base_back(ap_core_enabled() && !s_paused_voltage &&
+                                 !s_scan_pause);
             }
         }
 
@@ -182,11 +196,8 @@ static void poller_task(void *arg)
 
                 /* the UDS chip transport re-addressed the chip (ATSH/
                    ATCRA/ATST): back to our baseline before polling */
-                if (ap_core_enabled() && !s_paused_voltage && !s_scan_pause &&
-                    !s_paused_client)
-                {
-                    ap_runner_restore_baseline();
-                }
+                poller_base_back(ap_core_enabled() && !s_paused_voltage &&
+                                 !s_scan_pause && !s_paused_client);
             }
         }
 
@@ -212,11 +223,9 @@ static void poller_task(void *arg)
             {
                 ESP_LOGI(TAG, "resumed: the OBD chip's firmware update ended");
 
-                if (ap_core_enabled() && !s_paused_voltage && !s_scan_pause &&
-                    !s_paused_client && !s_paused_diag)
-                {
-                    ap_runner_restore_baseline();
-                }
+                poller_base_back(ap_core_enabled() && !s_paused_voltage &&
+                                 !s_scan_pause && !s_paused_client &&
+                                 !s_paused_diag);
             }
         }
 
@@ -261,6 +270,18 @@ static void poller_task(void *arg)
            same pauses, and not for the bus guard below: it listens on the
            HS pins */
         bool bus_ok = chip_ok;
+        /* a filter on such a bus sends nothing: the voltage pause stops it
+           as it stops the passive rows, under pause_mode "all" only
+           (2026-11-22, a 2012 Volt: a remote start is decided on the
+           single-wire bus while the 12 V is low, and a refused one never
+           lifts it). As v4.50 under disable_pid_requests. Not once the
+           device goes to sleep: sleep_manager waits for the idle bit and
+           then cuts the chip, and a window opened in between would be in
+           ATMA when it does (the chip's rows are in the pause by then) */
+        bool listen_ok = enabled && !s_scan_pause && !s_paused_client &&
+                         !s_paused_diag && !s_paused_chip_fw &&
+                         !(s_paused_voltage && ap_settings_pause_all()) &&
+                         (dev_status_manager_get() & DEV_STATUS_BIT_SLEEP) == 0;
 
         /* bus guard: before the chip is pinned to a CAN protocol the native
          * controller listens to the bus. A request at the wrong bitrate
@@ -280,6 +301,7 @@ static void poller_task(void *arg)
         unsigned classes =
             (chip_ok ? AP_CLASS_BIT(AP_CLASS_CHIP) : 0u) |
             (bus_ok ? AP_CLASS_BIT(AP_CLASS_CHIP_BUS) : 0u) |
+            (listen_ok ? AP_CLASS_BIT(AP_CLASS_LISTEN_BUS) : 0u) |
             (passive_ok ? (AP_CLASS_BIT(AP_CLASS_PASSIVE) |
                            AP_CLASS_BIT(AP_CLASS_BUS_TX)) : 0u);
         bool bus_tx_ok = passive_ok && !s_paused_diag;
@@ -298,7 +320,8 @@ static void poller_task(void *arg)
          * pause kept a single requester out for seconds (bench 2026-11-21:
          * half the console's version reads got no answer under 29 rows in
          * one group). Leave it a gap longer than its 10 ms look. */
-        if (chip_ok && ap_be()->waiters != NULL && ap_be()->waiters() > 0)
+        if ((chip_ok || listen_ok) && ap_be()->waiters != NULL &&
+            ap_be()->waiters() > 0)
         {
             stats->yields++;
             vTaskDelay(pdMS_TO_TICKS(AP_WAITER_GAP_MS));
@@ -341,8 +364,11 @@ static void poller_task(void *arg)
 
         ap_core_unlock();
 
-        bool on_bus = is_pid && !pid_copy.j1939 &&
-                      pid_copy.bus != AP_BUS_OBD;
+        /* a filter on another bus too (2026-11-22, GitHub issue #1078):
+           its window opens there as a row of that bus asks there */
+        bool on_bus = (is_pid && !pid_copy.j1939 &&
+                       pid_copy.bus != AP_BUS_OBD) ||
+                      (is_filter && flt_copy.bus != AP_BUS_OBD);
 
         if (!on_bus && bus_ok && s_bus_out)
         {
@@ -439,6 +465,13 @@ static void poller_task(void *arg)
              * cutting the chip/rail (§ sleep prepare) */
             dev_status_manager_clear(DEV_STATUS_BIT_AUTOPID_IDLE);
 
+            if (s_base_owed && s_paused_voltage && is_filter)
+            {
+                /* the first window through the pause after an app: from
+                   the baseline, as a poll after it would be */
+                poller_base_back(true);
+            }
+
             ok = is_pid ? ap_runner_run(&pid_copy, i, params_copy)
                         : ap_runner_run_filter(&flt_copy, params_copy);
 
@@ -459,9 +492,11 @@ static void poller_task(void *arg)
 
             stats->last_poll_us = esp_timer_get_time();
 
-            if (is_pid)
+            if (is_pid || on_bus)
             {
-                ap_bus_note(pid_copy.bus, ok);
+                /* a window on another bus counts for that bus: frames
+                   caught (ok) or none in its time (failed) */
+                ap_bus_note(is_pid ? pid_copy.bus : flt_copy.bus, ok);
                 s_bus_out = (ap_bus_now() != AP_BUS_OBD);
             }
 

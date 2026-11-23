@@ -90,6 +90,27 @@ static esp_err_t test_filter(httpd_req_t *req, const cJSON *flt, char *tr,
                                   "filter: monitor_ms 50..60000");
     }
 
+    /* the filter's bus and speed, as the tables take them (2026-11-22,
+       GitHub issue #1078): the window opens there */
+    const cJSON *fbus = cJSON_GetObjectItemCaseSensitive(flt, "bus");
+    const cJSON *fkbps = cJSON_GetObjectItemCaseSensitive(flt, "bus_kbps");
+    ap_row_bus_t bus = AP_BUS_OBD;
+    ap_filter_t where = { .frame_id = (uint32_t)id->valuedouble };
+
+    where.is_extended = where.frame_id > 0x7FF;
+
+    if (!ap_bus_parse(cJSON_IsString(fbus) ? fbus->valuestring : NULL, &bus) ||
+        !ap_bus_rate_parse((uint8_t)bus,
+                           cJSON_IsNumber(fkbps) ? fkbps->valuedouble : 0,
+                           &where.bus_rate))
+    {
+        return ap_http_send_error(req, "400 Bad Request",
+                                  "filter: bus is obd, ms, sw or ch, and "
+                                  "bus_kbps a speed the chip can make");
+    }
+
+    where.bus = (uint8_t)bus;
+
     if (cJSON_GetArraySize(prms) > AP_PARAMS_PER)
     {
         return ap_http_send_error(req, "400 Bad Request",
@@ -135,7 +156,10 @@ static esp_err_t test_filter(httpd_req_t *req, const cJSON *flt, char *tr,
 
     char guard_reason[176];
 
-    if (!ap_guard_job_ok(guard_reason, sizeof(guard_reason)))
+    /* the bus guard listens on the HS pins: it has no say about a window
+       on another bus's (a single-wire filter while the car charges) */
+    if (where.bus == AP_BUS_OBD &&
+        !ap_guard_job_ok(guard_reason, sizeof(guard_reason)))
     {
         return ap_http_send_error(req, "409 Conflict", guard_reason);
     }
@@ -151,6 +175,7 @@ static esp_err_t test_filter(httpd_req_t *req, const cJSON *flt, char *tr,
     ap_core_scan_pause(true);   /* park the poller around the window */
 
     esp_err_t err = ap_runner_test_filter((uint32_t)id->valuedouble,
+                                          ap_filter_bus_key(&where),
                                           (uint32_t)monitor_ms, s_want, slots,
                                           &elapsed_us, tr, tr_len);
 

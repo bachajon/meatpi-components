@@ -436,17 +436,39 @@ esp_err_t ap_config_parse(const char *json, ap_config_t *cfg, char *err,
             goto out;
         }
 
-        /* the filter's bus (2026-11-21, GitHub issue #1078): its window is
-           the car's own bus, so another one is refused while it is on
-           (ap_filter_bus_ok; the loader switches a stored one off) */
+        /* the filter's bus (GitHub issue #1078): since 2026-11-22 its
+           window opens there, as a row of that bus asks there (autopid_bus.h);
+           a word this firmware does not know is refused while the filter is
+           on (ap_filter_bus_ok; the loader switches a stored one off) */
         const cJSON *fbus = cJSON_GetObjectItemCaseSensitive(item, "bus");
+        ap_row_bus_t fb = AP_BUS_OBD;
 
-        if (f->enabled &&
-            !ap_filter_bus_ok(cJSON_IsString(fbus) ? fbus->valuestring : NULL))
+        if (!ap_bus_parse(cJSON_IsString(fbus) ? fbus->valuestring : NULL,
+                          &fb))
         {
-            cfg_err(err, err_len, "%s: a filter listens on bus obd only (ms, "
-                    "sw, ch: not yet); switch it off%.0d", owner, 0);
-            goto out;
+            if (f->enabled)
+            {
+                cfg_err(err, err_len, "%s: unknown bus (obd, ms, sw or ch)%.0d",
+                        owner, 0);
+                goto out;
+            }
+
+            fb = AP_BUS_OBD; /* switched off: kept, never listened */
+        }
+
+        f->bus = (uint8_t)fb;
+
+        if (!ap_bus_rate_parse(f->bus, get_num(item, "bus_kbps", 0),
+                               &f->bus_rate))
+        {
+            if (f->enabled)
+            {
+                cfg_err(err, err_len, "%s: bus_kbps needs a bus other than "
+                        "obd and a speed the chip can make%.0d", owner, 0);
+                goto out;
+            }
+
+            f->bus_rate = 0; /* switched off: a stored file still loads */
         }
 
         if (f->monitor_ms < 50 || f->monitor_ms > 60000)
