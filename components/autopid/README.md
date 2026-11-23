@@ -861,20 +861,20 @@ the filter with that bus's rows (`ap_sched_entry_bus()`), the chip comes
 home with the rows of the car's protocol, and `stats.buses.<bus>` counts
 the windows (ok: a frame caught). Its class is `AP_CLASS_LISTEN_BUS`: the
 HS bus guard has no say (a single-wire filter keeps listening while the
-car charges with its HS bus silent), and the voltage
-pause stops it only under `pause_mode` `all`, as it stops the passive
-rows: it sends nothing, and on a 2012 Volt a remote start is decided on
-the single-wire bus while the 12 V is low (its first 13 s, and a refused
-start, which never lifts the pause, were missed). The other pauses (an
-app, a tool, a scan, the chip's update) still hold it, a baseline they
-left owed is sent before its first window, and it opens no window once
-the device is going to sleep (sleep_manager cuts the chip behind the idle
-bit). A row on that bus sends,
-and waits for the voltage pause as before. `POST /api/autopid/test` takes
-the same `bus` and `bus_kbps` in its `filter`, and asks the HS bus guard
-only for a filter on the car's own bus. A bus word this firmware
-does not know, or a `bus_kbps` it cannot make, is refused while the filter
-is on; a file stored before is not refused at boot, which would empty the
+car charges with its HS bus silent), and the voltage pause stops it only
+under `pause_mode` `all`, as it stops the passive rows: it sends nothing,
+and on a 2012 Volt a remote start is decided on the single-wire bus while
+the 12 V is low (a filter that waited for the pause missed a start's
+first 13 s, and a refused start, which never lifts the pause, whole). The
+other pauses (an app, a tool, a scan, the chip's update) still hold it, a
+baseline they left owed is sent before its first window, and it opens no
+window once the device is going to sleep (sleep_manager cuts the chip
+behind the idle bit). A row on that bus sends, and waits for the voltage
+pause as before. `POST /api/autopid/test` takes the same `bus` and
+`bus_kbps` in its `filter`, and asks the HS bus guard only for a filter
+on the car's own bus. A bus word this firmware does not know, or a
+`bus_kbps` it cannot make, is refused while the filter is on; a file
+stored before is not refused at boot, which would empty the
 tables: the loader switches such a filter off once, rewrites the file and
 says so in a W line (`ap_filter_bus_ok()`, `ap_filter_bus_key()`,
 `ap_config_repair_filter_bus()` in `autopid_bus_core.c`, host-tested in
