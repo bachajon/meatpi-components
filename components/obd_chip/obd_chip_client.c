@@ -46,18 +46,24 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 
 #include "obd_chip_private.h"
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED; /* internal: spinlock */
 
-static int64_t s_touch_us;     /* the app's last byte; 0 = never          */
-static int64_t s_monitor_us;   /* its monitor opened then; 0 = none open  */
-static char    s_line[24];     /* the line it is typing                   */
-static uint8_t s_n;
-static bool    s_long;         /* that line outgrew s_line: no monitor    */
-static bool    s_last_monitor; /* its last line was one (a bare CR)       */
+/* PSRAM (standard §2): read and written by the bridges' tasks and the RX
+   task, never with the cache off */
+static struct
+{
+    int64_t touch_us;     /* the app's last byte; 0 = never               */
+    int64_t monitor_us;   /* its monitor opened then; 0 = none open       */
+    char    line[24];     /* the line it is typing                        */
+    uint8_t n;
+    bool    too_long;     /* that line outgrew `line`: no monitor         */
+    bool    last_monitor; /* its last line was one (a bare CR repeats it) */
+} s EXT_RAM_BSS_ATTR;
 
 static int64_t stamp(int64_t now_us)
 {
@@ -67,14 +73,14 @@ static int64_t stamp(int64_t now_us)
 void obd_client_touch(int64_t now_us)
 {
     portENTER_CRITICAL(&s_lock);
-    s_touch_us = stamp(now_us);
+    s.touch_us = stamp(now_us);
     portEXIT_CRITICAL(&s_lock);
 }
 
 void obd_client_write(const uint8_t *data, size_t len, int64_t now_us)
 {
     portENTER_CRITICAL(&s_lock);
-    s_touch_us = stamp(now_us);
+    s.touch_us = stamp(now_us);
 
     for (size_t i = 0; data != NULL && i < len; i++)
     {
@@ -85,37 +91,37 @@ void obd_client_write(const uint8_t *data, size_t len, int64_t now_us)
             continue; /* the chip runs nothing on these */
         }
 
-        s_monitor_us = 0; /* any other byte stops a monitor */
+        s.monitor_us = 0; /* any other byte stops a monitor */
 
         if (c != '\r')
         {
-            if (s_n < sizeof(s_line) - 1)
+            if (s.n < sizeof(s.line) - 1)
             {
-                s_line[s_n++] = c;
+                s.line[s.n++] = c;
             }
             else
             {
-                s_long = true;
+                s.too_long = true;
             }
 
             continue;
         }
 
-        bool monitor = s_last_monitor; /* a bare CR repeats the last line */
+        bool monitor = s.last_monitor; /* a bare CR repeats the last line */
 
-        if (s_n > 0 || s_long)
+        if (s.n > 0 || s.too_long)
         {
-            s_line[s_n] = '\0';
-            monitor = !s_long && obd_parse_is_monitor_cmd(s_line);
-            s_last_monitor = monitor;
+            s.line[s.n] = '\0';
+            monitor = !s.too_long && obd_parse_is_monitor_cmd(s.line);
+            s.last_monitor = monitor;
         }
 
-        s_n = 0;
-        s_long = false;
+        s.n = 0;
+        s.too_long = false;
 
         if (monitor)
         {
-            s_monitor_us = stamp(now_us);
+            s.monitor_us = stamp(now_us);
         }
     }
 
@@ -131,15 +137,15 @@ void obd_client_rx(const uint8_t *data, size_t len)
     }
 
     portENTER_CRITICAL(&s_lock);
-    s_monitor_us = 0;
+    s.monitor_us = 0;
     portEXIT_CRITICAL(&s_lock);
 }
 
 uint32_t obd_client_idle_ms(int64_t now_us)
 {
     portENTER_CRITICAL(&s_lock);
-    int64_t touch = s_touch_us;
-    int64_t monitor = s_monitor_us;
+    int64_t touch = s.touch_us;
+    int64_t monitor = s.monitor_us;
     portEXIT_CRITICAL(&s_lock);
 
     if (monitor != 0 &&
@@ -163,11 +169,11 @@ uint32_t obd_client_idle_ms(int64_t now_us)
 void obd_client_test_reset(void)
 {
     portENTER_CRITICAL(&s_lock);
-    s_touch_us = 0;
-    s_monitor_us = 0;
-    s_n = 0;
-    s_long = false;
-    s_last_monitor = false;
+    s.touch_us = 0;
+    s.monitor_us = 0;
+    s.n = 0;
+    s.too_long = false;
+    s.last_monitor = false;
     portEXIT_CRITICAL(&s_lock);
 }
 #endif
