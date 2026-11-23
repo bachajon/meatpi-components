@@ -1272,10 +1272,11 @@ says the frame went out and somebody acknowledged it, not that a module
 acted on it, so the gaps between frames are the car's to choose. On that
 car, behind the wake frame (`100`, `wake`) and the network wake (`621`
 `00 FF FF FF FF FF 00 00`), a body command (lock, flash) was ignored
-about 120 ms after the wake and carried out with about 1 s, while a
-remote start wanted its command about 0.15 s after `621` (with 1 s the
-car locked and flashed but did not start, twice); each frame's `gap_ms`
-carries such a pause. And the data goes out as given, with the chip's CAN
+about 120 ms after the wake and carried out with about 1 s, and a remote
+start was carried out with its command about 0.15 s after `621`; each
+frame's `gap_ms` carries such a pause. A start that locks and flashes the
+car but does not start it was, on that car, its own lockout with the key
+fob inside, not the gap. And the data goes out as given, with the chip's CAN
 formatting off: an OBD request is padded to eight bytes by whoever sends
 it. `7DF` with `02 01 00` was answered by four of that car's seven ECUs
 (7EC, 7ED and 7EF ignore a short frame), with `02 01 00 00 00 00 00 00`
