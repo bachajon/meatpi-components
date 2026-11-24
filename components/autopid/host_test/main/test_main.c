@@ -54,6 +54,9 @@ void run_filter_type_tests(void);
 /* test_send.c: can.send (issue #1072): a request into frames, the refusals,
    the slot definitions with 29-bit ids and the wake mode, the chip's words */
 void run_send_tests(void);
+/* test_test_hold.c: the test route waits for an app's hold on the chip
+   (issue #1078), as the poller and can.send do */
+void run_test_hold_tests(void);
 
 /* ---- helpers ----------------------------------------------------------------- */
 
@@ -2158,6 +2161,7 @@ void app_main(void)
     run_precan_tests();
     run_filter_type_tests();
     run_send_tests();
+    run_test_hold_tests();
 
     UNITY_END();
 }
