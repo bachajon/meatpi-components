@@ -28,6 +28,7 @@ idf_component_register(
          "test_precan.c"
          "test_filter_type.c"
          "test_send.c"
+         "test_group_default.c"
          "${comp_dir}/autopid_proto.c"
          "${comp_dir}/autopid_resp_precan.c"
          "${comp_dir}/autopid_sched.c"

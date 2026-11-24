@@ -221,7 +221,12 @@ esp_err_t ap_config_parse(const char *json, ap_config_t *cfg, char *err,
         ap_group_t *g = &cfg->groups[cfg->n_groups];
 
         copy_str(g->name, sizeof(g->name), item, "name");
-        g->enabled_default = get_bool(item, "enabled", true);
+        /* a group's state at boot and after a PUT (2026-11-24, GitHub
+           issue #1058): the README writes "enabled", the web UI and the
+           setup page "enabled_default", which was ignored; either one
+           false keeps the group off */
+        g->enabled_default = get_bool(item, "enabled", true) &&
+                             get_bool(item, "enabled_default", true);
         g->period_ms = (uint32_t)get_num(item, "period_ms", 1000);
 
         if (g->name[0] == '\0' || find_group(cfg, g->name) >= 0)
