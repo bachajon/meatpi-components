@@ -223,7 +223,9 @@ esp_err_t autopid_dtc_desc(const char *code, char *out, size_t out_cap);
  * the message's three header bytes); `ms`, `sw`, `ch` = MS, single-wire and
  * CH CAN through the chip. `wake` (single-wire CAN) sends that frame in the
  * transceiver's high-voltage wake mode. `gap_ms` = from that frame's start
- * to the next one's. Nothing of it writes the OBD chip's memory.
+ * to the next one's. A key that is none of these is refused, with the keys
+ * allowed there (2026-11-21, GitHub issue #1082). Nothing of it writes the
+ * OBD chip's memory.
  *
  * SYNC: about 0.1 s a frame through the chip plus the way to the bus and
  * back (0.3 to 0.5 s in all), plus the gaps. Never from the event
@@ -233,8 +235,10 @@ esp_err_t autopid_dtc_desc(const char *code, char *out, size_t out_cap);
  * @p reply (may be NULL): on ESP_OK and ESP_FAIL a new object, caller frees:
  * `{"ok","bus","via":"obd_chip"|"can_controller","sent":N,"elapsed_ms",
  * "frames":[{"id","result":"sent"|"no_ack"|"error"|"not_sent","at_ms",
- * "reply"?}],"transcript"?}`. @p err (may be NULL): one sentence when the
- * return is not ESP_OK.
+ * "reply"?,"replies"?}],"transcript"?}`. `reply` = what the chip said to
+ * the frame as one line, or why the frame did not go out; `replies`
+ * (2026-11-21, GitHub issue #1081) = what the chip said, one line an
+ * entry. @p err (may be NULL): one sentence when the return is not ESP_OK.
  *
  * @return ESP_OK = every frame is on the bus (CAN: acknowledged);
  * ESP_FAIL = frames were tried and at least one was not acknowledged or

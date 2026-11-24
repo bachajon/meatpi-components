@@ -62,6 +62,19 @@
  *  nothing. NULL or no AT command = 0. */
 unsigned ap_chain_sets(const char *chain);
 
+/** What the chip is moved off the baseline by once @p chain went out on a
+ *  chip that @p moved said before: the chain's own bits added, and the CAN
+ *  formatting bit as the chain's LAST word about it leaves the chip
+ *  (`ATCAF1` takes AP_SETS_RAW back, whichever chain set it; a chain that
+ *  says nothing about it leaves the bit). AP_SETS_RAW is the one bit that is
+ *  read for more than the restore: the runner reads a row's reply as a raw
+ *  frame's while it is set (ap_raw_cmd_request), so it has to follow the
+ *  chip and not only add up. A row with formatting on that is asked behind
+ *  a raw row of its type, `ATCAF1` in its init, was read as a raw one
+ *  otherwise: `010C` as "length 1, service 0C", its answer `41 0C` refused
+ *  (2026-11-23, with pull request 7). NULL = @p moved. PURE. */
+unsigned ap_chain_moved(unsigned moved, const char *chain);
+
 /** The chain that puts the baseline back for @p sets: @p prelude (which
  *  covers header, filter, protocol and print format) followed by one undo
  *  command per remaining bit (`;ATCEA;ATFCSM0;...`). @return the length

@@ -210,6 +210,100 @@ bool dl_recover_ring_sane(uint32_t cap, uint32_t cap_limit, uint32_t head,
     return true;
 }
 
+/* The rings live in PSRAM behind the CPU's data cache. A reset drops the
+ * cache lines that were not written to the chip yet, one by one: the
+ * newest record can be there with its first half only (its stamp and its
+ * value new, the parameter number still the one of the record this slot
+ * held a ring length ago), or not at all while the ring's indices already
+ * count it. Range checks pass such a record; this check does not: it runs
+ * over the fields of the record's kind and over the number of the push. */
+static uint32_t check_mix(uint32_t h, uint32_t v)
+{
+    h ^= v;
+    h *= 0x01000193u;
+    return h ^ (h >> 15);
+}
+
+uint16_t dl_recover_record_check(const dl_record_t *r, uint32_t seq)
+{
+    uint32_t h = check_mix(0x811C9DC5u, seq);
+    uint64_t ts = (uint64_t)r->ts_ms;
+
+    h = check_mix(h, (uint32_t)ts);
+    h = check_mix(h, (uint32_t)(ts >> 32));
+    h = check_mix(h, (uint32_t)r->kind | ((uint32_t)r->flags << 8));
+    h = check_mix(h, r->mono_ms);
+
+    if (r->kind == DL_REC_PARAM)
+    {
+        uint64_t bits;
+
+        memcpy(&bits, &r->u.p.value, sizeof(bits));
+        h = check_mix(h, (uint32_t)bits);
+        h = check_mix(h, (uint32_t)(bits >> 32));
+        h = check_mix(h, (uint16_t)r->u.p.param);
+    }
+    else
+    {
+        uint32_t d[2];
+
+        memcpy(d, r->u.f.data, sizeof(d));
+        h = check_mix(h, r->u.f.id);
+        h = check_mix(h, d[0]);
+        h = check_mix(h, d[1]);
+        h = check_mix(h, (uint32_t)r->u.f.dlc | ((uint32_t)r->u.f.flags << 8));
+    }
+
+    return (uint16_t)(h ^ (h >> 16));
+}
+
+uint32_t dl_recover_ring_keep(dl_record_t *buf, uint32_t cap, uint32_t tail,
+                              uint32_t fill, uint32_t next_seq, int kind,
+                              const dl_param_entry_t *params)
+{
+    if (buf == NULL || cap == 0 || tail >= cap || fill > cap)
+    {
+        return 0;
+    }
+
+    uint32_t first_seq = next_seq - fill; /* modulo 2^32, like the counter */
+    uint32_t kept = 0;
+
+    for (uint32_t i = 0; i < fill; i++)
+    {
+        const dl_record_t *rec = &buf[(tail + i) % cap];
+
+        if (rec->kind != kind || !dl_recover_record_sane(rec) ||
+            rec->check != dl_recover_record_check(rec, first_seq + i))
+        {
+            continue;
+        }
+
+        if (kind == DL_REC_PARAM && params != NULL &&
+            !params[rec->u.p.param].used)
+        {
+            continue; /* the registry is older than this record */
+        }
+
+        if (kept != i)
+        {
+            buf[(tail + kept) % cap] = *rec;
+        }
+
+        kept++;
+    }
+
+    for (uint32_t i = 0; i < kept; i++)
+    {
+        dl_record_t *rec = &buf[(tail + i) % cap];
+
+        rec->flags |= DL_REC_ABS;
+        rec->check = dl_recover_record_check(rec, next_seq - kept + i);
+    }
+
+    return kept;
+}
+
 uint32_t dl_recover_crc32_update(uint32_t crc, const void *data, size_t len)
 {
     const uint8_t *p = data;

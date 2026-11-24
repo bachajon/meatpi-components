@@ -22,7 +22,11 @@
 
 /**
  * @file http_client_manager_conn.c
- * @brief Where a request went (2026-11-14): the two ends of the open
+ * @brief What became of a request's connection, read from the client while
+ *        it still exists. Why it failed (2026-11-22, hc_fail_read): what
+ *        esp-tls kept about a connection that did not open; the reason is
+ *        worked out by the pure http_client_manager_fail.c. And where a
+ *        request went (2026-11-14, hc_conn_read): the two ends of the open
  *        connection, read from its socket. The response carries whether the
  *        server's address is a private one and which of the device's own
  *        addresses the request left from; ha_webhooks decides with them
@@ -34,10 +38,59 @@
 
 #include <string.h>
 
+#include "esp_tls_errors.h"
 #include "lwip/sockets.h"
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509.h"
 
 #include "http_client_manager_engine.h"
 #include "http_client_manager_private.h"
+
+/* The numbers http_client_manager_fail.c works a reason out of are the
+   libraries' own: a library that moves one stops the build here. */
+_Static_assert(HC_TLS_ERR_RESOLVE == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME,
+               "esp-tls code");
+_Static_assert(HC_TLS_ERR_CONNECT == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST,
+               "esp-tls code");
+_Static_assert(HC_TLS_ERR_TIMEOUT == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT,
+               "esp-tls code");
+_Static_assert(HC_TLS_ERR_HANDSHAKE == ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,
+               "esp-tls code");
+_Static_assert(HC_MBED_NET_RESET == -(MBEDTLS_ERR_NET_CONN_RESET), "TLS code");
+_Static_assert(HC_MBED_X509_VERIFY == -(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED),
+               "TLS code");
+_Static_assert(HC_MBED_X509_FATAL == -(MBEDTLS_ERR_X509_FATAL_ERROR),
+               "TLS code");
+_Static_assert(HC_MBED_SSL_TIMEOUT == -(MBEDTLS_ERR_SSL_TIMEOUT), "TLS code");
+_Static_assert(HC_MBED_INVALID_RECORD == -(MBEDTLS_ERR_SSL_INVALID_RECORD),
+               "TLS code");
+_Static_assert(HC_MBED_CONN_EOF == -(MBEDTLS_ERR_SSL_CONN_EOF), "TLS code");
+_Static_assert(HC_MBED_FATAL_ALERT == -(MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE),
+               "TLS code");
+
+void hc_fail_read(esp_http_client_handle_t client, esp_err_t err,
+                  http_client_fail_t *out)
+{
+    int code = 0;
+    int flags = 0;
+
+    memset(out, 0, sizeof(*out));
+    /* esp-tls's word for the connection (also for a plain http one: the
+       resolve and the connect are its code), the TLS library's and the
+       certificate check's; the call clears them */
+    out->tls_err = (int)esp_http_client_get_and_clear_last_tls_error(
+        client, &code, &flags);
+    out->tls_code = code;
+    out->cert_flags = (uint32_t)flags;
+
+    int e = esp_http_client_get_errno(client);
+
+    out->sock_errno = (e > 0) ? e : 0;
+    /* every connection that did not open is ESP_ERR_HTTP_CONNECT; any
+       other failure came after it was open */
+    out->opened = err != ESP_ERR_HTTP_CONNECT;
+}
 
 void hc_conn_read(esp_http_client_handle_t client, hc_conn_t *out)
 {

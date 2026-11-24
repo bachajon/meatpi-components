@@ -165,6 +165,26 @@ identical on every product built from the V6 core.
   - **Pinned means deaf.** With `manual_override` the pushes carry no
     `webhook_rev` (Home Assistant then sends nothing) and a reply's settings
     are refused, as a registration is.
+- **Why a push failed (2026-11-22).** A unit whose pushes all failed said
+  `status: failed` and `last_error: esp_err=ESP_ERR_HTTP_CONNECT`, whatever
+  the cause; a field report of that day (a reverse proxy at home, Nabu Casa
+  outside, the far end closing the TLS handshake: `-0x7280` in the device
+  log only) took the log and two rounds of questions to read. The poster
+  now keeps, per address that did not take the last push, a reason word, a
+  code for support and the time (`hw_fail_note()`, `ha_webhooks_fail.c`):
+  the transport's reason from `http_client_manager_fail_reason()`, `http`
+  with the status for an answer that was not a 2xx, `no_reply` for a
+  connection that gave no status line. They are the `failures` of
+  `GET /api/webhook` (`HTTP_API.md` has the words), the `failed <n>:` lines
+  of the `webhook` command, and the tail of the cycle's W line:
+  `webhook POST failed: esp_err=ESP_ERR_HTTP_CONNECT (1 no_answer [esp-tls
+  0x8004 errno 104], 2 tls_closed [tls -0x7280])`. No address in any of
+  them: it carries the webhook id. `last_error` keeps its text (benches and
+  people compare it). The list is the last cycle's: empty when the first
+  address took the push, one entry with `status` `ok` when the failover
+  delivered. The web interface's card says an entry in plain words, one
+  line per address, while the status is `failed`, and keeps the
+  explanation in a bubble (`PUSH_FAIL` in `web_ui_v2/web/index.html`).
 - **Not the generic path.** For routing individual PIDs to arbitrary
   endpoints, use `event_manager` rules (`autopid.param → http.post`). This
   component is the fixed, always-on HA telemetry channel: different shape,
@@ -195,6 +215,19 @@ identical on every product built from the V6 core.
   https by name. `-Untrusted` adds the station's network marked untrusted
   (the DUT's USB-C on the PC). The record: `testing/pushreply.md` in the
   firmware repo.
+- `tools/testbench/ha/push_fail_reason_bench.py` (`.\test.ps1 pushfail`,
+  prints `PUSH FAIL REASON PASS`): why a push failed, on the device. One
+  far end on the Pi per way a push can be turned away (a name that does not
+  exist, a port nothing listens on, an address nobody has, a close after
+  the hello, an alert, plain http behind an https address, a certificate
+  under an unknown root, one for another name, a server that never answers,
+  a 400, a 404, a 502); the reason word and the code of each on
+  `GET /api/webhook`, in the cycle's W line; the failover delivering (one
+  entry, status `ok`), both addresses failing (two entries, in order), and
+  the unit's own page in Chrome saying both in plain words
+  (`push_fail_page.mjs`). The record: `testing/pushfail.md` in the firmware
+  repo. The words themselves over the mock: `probe_push_reason.mjs`
+  (`testing/probe_push_reason.md`).
 - `tools/testbench/ha_webhook_bench.py` (live-suite stage `ha_webhook`): a
   mock HA receiver on the Pi → register via `POST /api/webhook` → assert
   `{status+device_id, autopid_data?, config}` telemetry, failover to
@@ -245,7 +278,9 @@ identical on every product built from the V6 core.
   (8 KB until 2026-11-14). Measured headroom on the 8 KB stack: 3.3 KB
   after plain pushes, 3.1 KB after https pushes, 2.6 KB after a push whose
   reply's settings were stored (the deepest path).
-- **Static, PSRAM**: the live config and the stats (about 1 KB together).
+- **Static, PSRAM**: the live config and the stats (about 1.2 KB together;
+  the stats hold the last push's two failure entries since 2026-11-22,
+  100 bytes each, and a copy of them rides the poster's stack).
 - **Heap, PSRAM**: the diff caches (the previous status, autopid, config
   and gps sections as text), the ROM deflate's state when gzip is on
   (about 166 KB, once), a push's body and its reply (at most 2 KB) while

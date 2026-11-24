@@ -267,7 +267,7 @@ void ap_base_send_chain(const char *chain, ap_tr_t *tr)
 void ap_base_send_init(const char *chain, ap_tr_t *tr)
 {
     send_elements(chain, tr, true);
-    s_mem.moved |= ap_chain_sets(chain);
+    s_mem.moved = ap_chain_moved(s_mem.moved, chain);
 }
 
 /**
@@ -331,7 +331,7 @@ void ap_runner_note_moved(const char *chain)
 {
     if (chain != NULL)
     {
-        s_mem.moved |= ap_chain_sets(chain);
+        s_mem.moved = ap_chain_moved(s_mem.moved, chain);
     }
 }
 

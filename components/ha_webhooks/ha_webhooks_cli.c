@@ -75,6 +75,14 @@ static int cmd_webhook(int argc, char **argv)
                        s.last_error_time);
     }
 
+    /* why each address failed in the last push (2026-11-22) */
+    for (int i = 0; i < s.fail_n && i < HW_URLS; i++)
+    {
+        cmdline_printf("failed %u:  %s [%s] (%s)\n",
+                       (unsigned)s.fails[i].slot, s.fails[i].reason,
+                       s.fails[i].code, s.fails[i].time);
+    }
+
     /* settings in the push reply (2026-11-14) */
     const char *rev = hw_rev_reported(&c);
 

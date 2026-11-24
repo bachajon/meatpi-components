@@ -86,12 +86,20 @@ static int hex_val(char c)
     return (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
 }
 
-bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
+/* why hex text is refused (2026-11-21: one sentence said all three) */
+#define HEX_HALF_BYTE "has half a byte: two hex digits a byte (\"80 01 FF\")"
+#define HEX_NOT_HEX   "is hex digits (\"80 01 FF\") and has another character"
+#define HEX_TOO_LONG  "is 8 bytes at most"
+
+/** ap_send_hex() with the reason of a refusal in @p why (NULL = taken). */
+static bool hex_scan(const char *text, uint8_t *out, size_t cap, size_t *n,
+                     const char **why)
 {
     size_t count = 0;
     int high = -1;
 
     *n = 0;
+    *why = NULL;
 
     for (const char *p = (text != NULL) ? text : ""; *p != '\0'; p++)
     {
@@ -99,7 +107,8 @@ bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
         {
             if (high >= 0)
             {
-                return false; /* half a byte before the separator */
+                *why = HEX_HALF_BYTE; /* before the separator */
+                return false;
             }
 
             continue;
@@ -115,6 +124,7 @@ bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
 
         if (v < 0)
         {
+            *why = HEX_NOT_HEX;
             return false;
         }
 
@@ -126,6 +136,7 @@ bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
 
         if (count >= cap)
         {
+            *why = HEX_TOO_LONG;
             return false;
         }
 
@@ -135,11 +146,19 @@ bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
 
     if (high >= 0)
     {
-        return false; /* an odd number of digits */
+        *why = HEX_HALF_BYTE; /* an odd number of digits */
+        return false;
     }
 
     *n = count;
     return true;
+}
+
+bool ap_send_hex(const char *text, uint8_t *out, size_t cap, size_t *n)
+{
+    const char *why = NULL;
+
+    return hex_scan(text, out, cap, n, &why);
 }
 
 /** An id as hex text ("7DF", "0x1024E097") or as a JSON number. */
@@ -199,6 +218,56 @@ static bool parse_id(const cJSON *v, uint32_t *id)
     return true;
 }
 
+/* the keys of a frame, and of a request beside its frame or its frames
+   (2026-11-21): a key outside them is refused. Until then it was ignored,
+   and a request that meant something by it was answered ok: a "gap_ms"
+   beside "frames", an "at_ms" or a "repeat" in a frame, each sent as if
+   it were not there. */
+static const char *const FRAME_KEYS[] =
+{
+    "id", "ext", "data", "wake", "gap_ms",
+};
+
+static const char *const REQ_KEYS[] =
+{
+    "bus", "bus_kbps", "frames",
+};
+
+static bool key_in(const char *key, const char *const *keys, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        if (strcmp(key, keys[i]) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+#define KEYS_N(k) (sizeof(k) / sizeof((k)[0]))
+
+/** The first key of @p o that is neither a frame's (with @p frame) nor a
+ *  request's (with @p req); NULL when there is none. */
+static const char *unknown_key(const cJSON *o, bool frame, bool req)
+{
+    const cJSON *item = NULL;
+
+    cJSON_ArrayForEach(item, o)
+    {
+        const char *k = (item->string != NULL) ? item->string : "";
+
+        if (!(frame && key_in(k, FRAME_KEYS, KEYS_N(FRAME_KEYS))) &&
+            !(req && key_in(k, REQ_KEYS, KEYS_N(REQ_KEYS))))
+        {
+            return k;
+        }
+    }
+
+    return NULL;
+}
+
 /** One frame out of the object that carries it. @p n: its number in the
  *  request, for the sentence. */
 static bool parse_frame(const cJSON *o, ap_send_where_t where, int n,
@@ -238,11 +307,12 @@ static bool parse_frame(const cJSON *o, ap_send_where_t where, int n,
                     n);
     }
 
-    if (!ap_send_hex(cJSON_IsString(data) ? data->valuestring : "", f->data,
-                     sizeof(f->data), &len))
+    const char *why = NULL;
+
+    if (!hex_scan(cJSON_IsString(data) ? data->valuestring : "", f->data,
+                  sizeof(f->data), &len, &why))
     {
-        return fail(err, err_len, "frame %d: data is 0 to 8 bytes of hex "
-                    "(\"80 01 FF\")", n);
+        return fail(err, err_len, "frame %d: data %s", n, why);
     }
 
     f->len = (uint8_t)len;
@@ -333,6 +403,23 @@ bool ap_send_parse(const cJSON *body, ap_send_req_t *out, char *err,
         return fail(err, err_len, "give id and data, or frames, not both");
     }
 
+    /* a key that would mean nothing is refused, with the keys that do */
+    const char *bad = unknown_key(body, frames == NULL, true);
+
+    if (bad != NULL && frames != NULL &&
+        key_in(bad, FRAME_KEYS, KEYS_N(FRAME_KEYS)))
+    {
+        return fail(err, err_len, "%s is a key of each frame in frames", bad);
+    }
+
+    if (bad != NULL)
+    {
+        return fail(err, err_len, "unknown key \"%s\" (%s)", bad,
+                    (frames != NULL)
+                        ? "bus, bus_kbps, frames"
+                        : "bus, bus_kbps, id, ext, data, wake, gap_ms");
+    }
+
     if (frames == NULL)
     {
         out->n = 1;
@@ -352,6 +439,14 @@ bool ap_send_parse(const cJSON *body, ap_send_req_t *out, char *err,
 
     cJSON_ArrayForEach(item, frames)
     {
+        bad = cJSON_IsObject(item) ? unknown_key(item, true, false) : NULL;
+
+        if (bad != NULL)
+        {
+            return fail(err, err_len, "frame %d: unknown key \"%s\" (id, ext, "
+                        "data, wake, gap_ms)", out->n + 1, bad);
+        }
+
         if (!cJSON_IsObject(item) ||
             !parse_frame(item, out->where, out->n + 1, &out->f[out->n], err,
                          err_len))

@@ -69,5 +69,24 @@ bool hc_redirect_follow(int status, bool is_get, int hops, int max_hops);
 bool hc_ip4_private(const uint8_t a[4]);
 bool hc_ip6_private(const uint8_t a[16]);
 
+/* Why a connection did not open (2026-11-22, http_client_manager_fail.c):
+ * esp-tls's own codes and the codes a handshake ends with, as plain
+ * numbers, so the reason is worked out without either library and host
+ * tested. http_client_manager_conn.c pins every one of them to the
+ * library's own macro with a _Static_assert. The TLS library's codes are
+ * the positive halves, the way esp-tls keeps them (0x7280 for -0x7280). */
+#define HC_TLS_ERR_RESOLVE     0x8001 /* ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME */
+#define HC_TLS_ERR_CONNECT     0x8004 /* ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST  */
+#define HC_TLS_ERR_TIMEOUT     0x8006 /* ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT      */
+#define HC_TLS_ERR_HANDSHAKE   0x801A /* ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED    */
+#define HC_MBED_NET_RESET      0x0050 /* the far end reset the connection        */
+#define HC_MBED_X509_VERIFY    0x2700 /* the certificate check said no           */
+#define HC_MBED_X509_FATAL     0x3000 /* the bundle found no trusted root        */
+#define HC_MBED_SSL_TIMEOUT    0x6800
+#define HC_MBED_INVALID_RECORD 0x7200 /* the answer is not a TLS record          */
+#define HC_MBED_CONN_EOF       0x7280 /* closed during the handshake, no alert   */
+#define HC_MBED_FATAL_ALERT    0x7780 /* the far end sent an alert               */
+#define HC_CERT_NO_RESULT      0xFFFFFFFFu /* the check's flags: none given */
+
 /* event_manager glue (http_client_manager_events.c) */
 void hcm_events_register(void);

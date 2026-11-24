@@ -303,15 +303,17 @@ esp_err_t dl_gpx_get_handler(struct httpd_req *req)
 
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
     {
-        if (httpd_query_key_value(query, "since", val, sizeof(val)) == ESP_OK)
-        {
-            exact = strchr(val, ':') != NULL;
-            sscanf(val, "%lld:%ld", (long long *)&since_epoch, &since_off);
+        /* the export's rule and its 400 (2026-11-21: dl_export_parse_since,
+           "%3A" for the colon) */
+        esp_err_t got = httpd_query_key_value(query, "since", val,
+                                              sizeof(val));
 
-            if (!exact && since_epoch > 100000000000LL)
-            {
-                since_epoch /= 1000;
-            }
+        if (got == ESP_ERR_HTTPD_RESULT_TRUNC ||
+            (got == ESP_OK &&
+             !dl_export_parse_since(val, &since_epoch, &since_off, &exact)))
+        {
+            s_busy = false;
+            return dl_export_refuse_since(req);
         }
 
         if (httpd_query_key_value(query, "until", val, sizeof(val)) == ESP_OK)

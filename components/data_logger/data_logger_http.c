@@ -60,7 +60,7 @@ static esp_err_t logger_handler(httpd_req_t *req)
              "\"file_rows\":%lu,\"files\":%lu,\"queued\":%lu,"
              "\"frames_written\":%lu,\"frames_dropped\":%lu,"
              "\"rotations\":%lu},"
-             "\"salvaged\":%lu,\"corrupt\":%lu,"
+             "\"salvaged\":%lu,\"salvage_dropped\":%lu,\"corrupt\":%lu,"
              "\"clock\":{\"valid\":%s,\"source\":\"%s\","
              "\"steps_this_boot\":%lu,\"rotations_by_clock\":%lu,"
              "\"journal_bytes\":%lu,\"journal\":\"/sd/logs/"
@@ -86,7 +86,8 @@ static esp_err_t logger_handler(httpd_req_t *req)
              (unsigned long)st.frames_written,
              (unsigned long)st.frames_dropped,
              (unsigned long)st.can_rotations,
-             (unsigned long)st.salvaged, (unsigned long)st.corrupt,
+             (unsigned long)st.salvaged,
+             (unsigned long)st.salvage_dropped, (unsigned long)st.corrupt,
              st.clock_valid ? "true" : "false", st.clock_source,
              (unsigned long)st.clock_steps,
              (unsigned long)st.clock_rotations,

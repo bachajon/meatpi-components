@@ -436,6 +436,19 @@ esp_err_t ap_config_parse(const char *json, ap_config_t *cfg, char *err,
             goto out;
         }
 
+        /* the filter's bus (2026-11-21, GitHub issue #1078): its window is
+           the car's own bus, so another one is refused while it is on
+           (ap_filter_bus_ok; the loader switches a stored one off) */
+        const cJSON *fbus = cJSON_GetObjectItemCaseSensitive(item, "bus");
+
+        if (f->enabled &&
+            !ap_filter_bus_ok(cJSON_IsString(fbus) ? fbus->valuestring : NULL))
+        {
+            cfg_err(err, err_len, "%s: a filter listens on bus obd only (ms, "
+                    "sw, ch: not yet); switch it off%.0d", owner, 0);
+            goto out;
+        }
+
         if (f->monitor_ms < 50 || f->monitor_ms > 60000)
         {
             /* the window HOLDS the chip (MONITOR claim): keep it sane */
