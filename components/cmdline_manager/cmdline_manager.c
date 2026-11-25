@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -43,6 +44,10 @@
 #include "log_manager.h"
 
 #include "cmdline_manager_private.h"
+
+/* the argument vector's size is derived from the assembler's line */
+_Static_assert(CM_LINE_BUF == CMDLINE_MANAGER_LINE_MAX,
+               "the line assembler and the console disagree on a line");
 
 static const char *TAG = "cmdline_manager";
 
@@ -104,28 +109,26 @@ static StackType_t s_stack[5120];
 
 /* ---- output routing --------------------------------------------------------- */
 
+/* a text longer than cmdline_printf's stack buffer is built in PSRAM */
+static void *print_alloc(size_t size)
+{
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
 void cmdline_printf(const char *fmt, ...)
 {
-    char buf[256];
+    static const cm_print_port_t PORT =
+    {
+        .write   = cmdline_write,
+        .alloc   = print_alloc,
+        .release = heap_caps_free,
+    };
+    char buf[256]; /* the common short text; a longer one: cm_vprint */
     va_list args;
 
     va_start(args, fmt);
-
-    int n = vsnprintf(buf, sizeof(buf), fmt, args);
-
+    (void)cm_vprint(&PORT, buf, sizeof(buf), fmt, args);
     va_end(args);
-
-    if (n <= 0)
-    {
-        return;
-    }
-
-    if (n > (int)sizeof(buf) - 1)
-    {
-        n = (int)sizeof(buf) - 1;
-    }
-
-    cmdline_write(buf, (size_t)n);
 }
 
 void cmdline_write(const char *data, size_t len)
@@ -519,7 +522,7 @@ esp_err_t cmdline_manager_init(void)
     esp_console_config_t console_cfg =
     {
         .max_cmdline_length = CMDLINE_MANAGER_LINE_MAX,
-        .max_cmdline_args = 12,
+        .max_cmdline_args = CM_ARGS_MAX, /* every word of the longest line */
     };
     esp_err_t err = esp_console_init(&console_cfg);
 

@@ -75,6 +75,15 @@ typedef struct
      *  leaves a gap before its next request while this is above zero.
      *  NULL = no such notion. */
     uint8_t   (*waiters)(void);
+    /** The poller's turn on the chip (obd_chip, 2026-11-25, GitHub issue
+     *  #1078): asked at the top of every pass with the yield time. False =
+     *  an app drives the chip, the pass stays off it (what client_idle_ms
+     *  said before). True = the chip is the poller's until turn_end(), and
+     *  an app's bytes that arrive meanwhile wait for that: until then the
+     *  first command of an app landed in the row on the wire and was lost
+     *  with it. NULL = no turns, client_idle_ms alone decides. */
+    bool      (*turn_begin)(uint32_t yield_ms);
+    void      (*turn_end)(void);
 } ap_transport_t;
 
 /** The OBD transport (never NULL). */

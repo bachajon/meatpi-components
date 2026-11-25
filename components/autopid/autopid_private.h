@@ -231,6 +231,18 @@ typedef struct
  *  (@p idle_ms = ms since the client's last write, UINT32_MAX = never). */
 bool ap_sched_client_hold(uint32_t idle_ms);
 
+/** How a refusal starts while an app holds the chip (2026-11-21, GitHub
+ *  issue #1078): can.send and the test route say the same. */
+#define AP_CLIENT_BUSY_TEXT                                                \
+    "an app is using the OBD chip (a terminal, an ELM327 app): free 10 s " \
+    "after its last command, or when a monitor it opened ends (2 min at "  \
+    "most)"
+
+/** May the test route take the chip now (2026-11-24, GitHub issue #1078)?
+ *  NULL = yes, else the 409's sentence. @p uses_chip is false for a J1939
+ *  group's test, which reads the listener's store. */
+const char *ap_sched_test_refusal(uint32_t idle_ms, bool uses_chip);
+
 /** Reset slots (stagger initial due times) + runtime state from config. */
 void ap_sched_reset(ap_sched_t *st, const ap_config_t *cfg, int64_t now_us);
 

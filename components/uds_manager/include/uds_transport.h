@@ -70,6 +70,25 @@ typedef struct uds_transport_s
 const uds_transport_t *uds_transport_obd(void);
 const uds_transport_t *uds_transport_isotp(void);
 
+/** N_Cr of ISO 15765-2: the longest gap between two frames of a message. */
+#define UDS_ISOTP_N_CR_MS 1000u
+
+/** PURE: is an answer still arriving on the native ISO-TP path? P2 and P2*
+ *  are the ECU's time to START its answer, and the provider hands over whole
+ *  messages only, so a wait that ran out asks this before it gives up.
+ *  @param rx_idle_ms       since the last frame on the answer's id
+ *                          (UINT32_MAX: none ever)
+ *  @param since_request_ms since the request went out, or since the last
+ *                          responsePending
+ *  @return true when a frame came in behind the request and less than N_Cr
+ *          ago: the message is still being sent. */
+static inline bool uds_isotp_answer_arriving(uint32_t rx_idle_ms,
+                                             uint32_t since_request_ms)
+{
+    return rx_idle_ms != UINT32_MAX && rx_idle_ms < since_request_ms &&
+           rx_idle_ms < UDS_ISOTP_N_CR_MS;
+}
+
 /* The AT-hex transaction (the request fn is injected so the transaction
  * stays testable). */
 typedef esp_err_t (*uds_at_request_fn)(const char *cmd, char *resp,
@@ -129,6 +148,14 @@ uint8_t uds_at_lines_for(size_t total);
 /** The response-count digit of the FIRST attempt for service @p sid: '1',
  *  or '\0' (none) for the services that must not be sent twice. PURE. */
 char uds_at_first_digit(uint8_t sid);
+
+/** How long to let the bus be before a cut answer is asked for again: the
+ *  chip stopped printing at its line count but sent its flow control, so
+ *  the ECU still sends the rest, and those frames would count as lines of
+ *  the next request. From the frames still owed (@p announced bytes in all,
+ *  @p got of them printed); @p cuts = how often this request was cut
+ *  before (the wait grows). PURE. */
+uint32_t uds_at_tail_wait_ms(size_t announced, size_t got, int cuts);
 
 bool uds_at_parse_response(const char *resp, uint8_t *out, size_t cap,
                            size_t *out_len);

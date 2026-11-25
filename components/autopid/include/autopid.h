@@ -58,6 +58,14 @@ esp_err_t autopid_stop(void);
  * config decide boot state; event rules re-assert context after reboot
  * (driving/charging, TASK_event_manager §5b). @p period_override_ms < 0
  * keeps the group's configured period; 0 = high-fidelity max rate.
+ *
+ * The configured state (2026-11-24, GitHub issue #1058): a `groups[]`
+ * entry of the config file starts off when its `"enabled"` or its
+ * `"enabled_default"` is `false`, and on otherwise. Until then only
+ * `"enabled"` was read, and the web UI writes `"enabled_default"`: a group
+ * stored off with that word polled at every boot and after every PUT.
+ * That state is what a boot, a PUT of the tables and
+ * autopid_group_restore() put back.
  */
 esp_err_t autopid_group_set(const char *group, bool enabled,
                             int32_t period_override_ms);

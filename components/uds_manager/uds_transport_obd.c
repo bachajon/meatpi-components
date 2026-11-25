@@ -36,7 +36,8 @@ static const char *TAG = "uds_manager";
 /* a look at the bus this young is reused */
 #define UDS_BUS_FRESH_MS 30000u
 
-/* Re-send the 8-command target setup only when needed: the address or
+/* Re-send the target setup (14 AT commands, 15 for a 29-bit target) only
+ * when needed: the address or
  * p2 changed, the previous transaction failed, or anyone else wrote to
  * the chip in between (autopid's polls, an app), detected with the
  * driver's tx_bytes counter, which only we moved otherwise (read while
@@ -140,7 +141,7 @@ static esp_err_t obd_transceive(const uds_addr_t *addr,
                                 size_t *resp_len, uint32_t p2_ms,
                                 uint32_t p2star_ms, uint8_t *pending_out)
 {
-    /* hold the chip for the whole AT transaction (7 setup commands + the
+    /* hold the chip for the whole AT transaction (the setup commands + the
        request): autopid's polls wait at their claim instead of landing
        between our commands (bench 2026-09-16: with polling, 1 of 3
        requests survived; paused, 5 of 5) */

@@ -21,7 +21,13 @@ This component is the public provider: the vendored `esp_isotp` stack in its
   opens/open_fails, frames_fed/orphan, pdus_tx/rx, tx_timeouts, rx_dropped,
   rx_oversize (surfaced by `GET /api/uds` as `provider_stats`).
 - The provider itself is reached through `can_isotp()` (can_manager's slot):
-  open / close / send / recv / set_flow per `can_isotp.h`.
+  open / close / send / recv / set_flow / rx_idle_ms per `can_isotp.h`.
+  `rx_idle_ms(session)` (2026-11-26) = the milliseconds since the task fed
+  the last frame on the session's rx id to the stack, `UINT32_MAX` before the
+  first. `recv()` hands over whole messages only, so a caller whose wait ran
+  out reads it to tell a long message that is still arriving from a silent
+  ECU: uds_manager's native transport gave an answer P2 (250 ms) to be
+  complete and timed out on one of 1024 bytes, which takes 291 ms.
 
 ## Dependencies
 

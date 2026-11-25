@@ -23,9 +23,11 @@
 /**
  * @file cmdline_manager_line.c
  * @brief The dispatcher's PURE pieces, no RTOS, host-tested: the
- *        byte-stream -> line assembler, and the verdict line a client
- *        is owed after a command.
+ *        byte-stream -> line assembler, the verdict line a client
+ *        is owed after a command, and the formatter behind
+ *        cmdline_printf.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -121,4 +123,55 @@ size_t cm_exec_verdict(esp_err_t err, int ret, const char *line,
     }
 
     return (size_t)n < out_len ? (size_t)n : out_len - 1;
+}
+
+/* ---- the formatter behind cmdline_printf --------------------------------------- */
+
+size_t cm_vprint(const cm_print_port_t *port, char *small, size_t small_len,
+                 const char *fmt, va_list args)
+{
+    if (port == NULL || port->write == NULL || small == NULL ||
+        small_len == 0 || fmt == NULL)
+    {
+        return 0;
+    }
+
+    va_list again;
+
+    va_copy(again, args); /* the first pass uses the list up */
+
+    int n = vsnprintf(small, small_len, fmt, args);
+    size_t wrote = 0;
+
+    if (n > 0 && (size_t)n < small_len)
+    {
+        port->write(small, (size_t)n);
+        wrote = (size_t)n;
+    }
+    else if (n > 0)
+    {
+        /* longer than the small buffer: the whole text, never its head */
+        char *block = (port->alloc != NULL) ? port->alloc((size_t)n + 1)
+                                            : NULL;
+
+        if (block != NULL)
+        {
+            (void)vsnprintf(block, (size_t)n + 1, fmt, again);
+            port->write(block, (size_t)n);
+            wrote = (size_t)n;
+
+            if (port->release != NULL)
+            {
+                port->release(block);
+            }
+        }
+        else
+        {
+            port->write(small, small_len - 1); /* no memory: what fits */
+            wrote = small_len - 1;
+        }
+    }
+
+    va_end(again);
+    return wrote;
 }

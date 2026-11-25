@@ -12,6 +12,7 @@ void tearDown(void)
 extern void run_config_tests(void);
 extern void run_contract_tests(void);
 extern void run_batch_tests(void);
+extern void run_peers_tests(void);
 
 void app_main(void)
 {
@@ -19,5 +20,6 @@ void app_main(void)
     run_config_tests();
     run_contract_tests();
     run_batch_tests();
+    run_peers_tests();
     UNITY_END();
 }

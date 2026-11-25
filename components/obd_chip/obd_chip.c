@@ -53,12 +53,6 @@ const char obd_chip_gate_owner[1];
 /* the claim model (COMMAND / MONITOR / EXCLUSIVE, the transaction hold)
  * lives in obd_chip_claim.c since 2026-10-28 (700-line rule) */
 
-/* external-client activity clock (obd_chip_client_touch): the last time a
- * bridge (TCP/BLE/USB/WS app) wrote to the chip; 0 = never. Read by
- * autopid to yield the chip while an app drives it (legacy
- * DEV_AUTOPID_ELM327_APP_BIT parity, bench 2026-09-08). */
-static volatile int64_t s_client_touch_us;
-
 static bool s_inited;
 static bool s_started;
 static volatile uint32_t s_settings_gen; /* obd_chip_settings_generation() */
@@ -188,24 +182,85 @@ esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
 
 /* ---- external-client activity clock ------------------------------------------- */
 
+/* the last time a bridge (TCP/BLE/USB/WS app) wrote to the chip, read by
+   autopid to yield the chip while an app drives it (legacy
+   DEV_AUTOPID_ELM327_APP_BIT parity, bench 2026-09-08); since 2026-11-21
+   an app's monitor counts until it ends (obd_chip_client.c) */
 void obd_chip_client_touch(void)
 {
-    s_client_touch_us = esp_timer_get_time();
+    obd_client_touch(esp_timer_get_time());
+}
+
+void obd_chip_client_write(const void *who, const uint8_t *data, size_t len)
+{
+    int64_t t0 = esp_timer_get_time();
+
+    obd_client_write_from(who, data, len, t0);
+
+    if (!obd_client_turn())
+    {
+        obd_client_sent(data, len); /* the chip is free, or the app's already */
+        return;
+    }
+
+    /* the poller's pass is on the chip (2026-11-25, GitHub issue #1078): a
+       byte now would stop its request and be lost with it (STOPPED). The
+       stamp above keeps the poller from its next pass; wait for this one */
+    bool forced = false;
+
+    while (obd_client_turn())
+    {
+        if (esp_timer_get_time() - t0 >
+                (int64_t)OBD_CLIENT_TURN_WAIT_MS * 1000)
+        {
+            forced = true;
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    obd_client_turn_waited((uint32_t)((esp_timer_get_time() - t0) / 1000),
+                           forced);
+    obd_client_sent(data, len); /* the caller writes them now */
+
+    if (forced)
+    {
+        ESP_LOGW(TAG, "an app's bytes went out under the poller's turn (it "
+                      "did not end in %d ms)", OBD_CLIENT_TURN_WAIT_MS);
+    }
+}
+
+void obd_chip_client_gone(const void *who)
+{
+    if (obd_client_gone(who))
+    {
+        ESP_LOGI(TAG, "the app that opened a monitor has gone: its hold on "
+                      "the chip is over");
+    }
+}
+
+bool obd_chip_turn_begin(uint32_t yield_ms)
+{
+    return obd_client_turn_begin(esp_timer_get_time(), yield_ms);
+}
+
+void obd_chip_turn_end(void)
+{
+    obd_client_turn_end();
+}
+
+void obd_chip_client_get_stats(obd_chip_client_stats_t *out)
+{
+    if (out != NULL)
+    {
+        obd_client_get_stats(out);
+    }
 }
 
 uint32_t obd_chip_client_idle_ms(void)
 {
-    int64_t t = s_client_touch_us;
-
-    if (t == 0)
-    {
-        return UINT32_MAX; /* never */
-    }
-
-    int64_t idle = (esp_timer_get_time() - t) / 1000;
-
-    return (idle < 0) ? 0 : (idle > UINT32_MAX) ? UINT32_MAX
-                                                : (uint32_t)idle;
+    return obd_client_idle_ms(esp_timer_get_time());
 }
 
 /* ---- chip management ------------------------------------------------------------- */

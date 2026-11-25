@@ -65,6 +65,7 @@ extern "C" {
 
 /** RX fan-out chunk: small, copied by value into each subscriber's queue. */
 #include "obd_chip_guard.h" /* the EEPROM guard (pure) every TX path runs */
+#include "obd_chip_client.h" /* an app on a bridge and the poller (2026-11-25) */
 
 #define OBD_CHIP_CHUNK_SIZE 128
 
@@ -135,21 +136,14 @@ uint32_t obd_chip_dropped(QueueHandle_t q);
  */
 esp_err_t obd_chip_send(const uint8_t *data, size_t len);
 
-/* ---- external-client activity clock --------------------------------------------- */
+/* ---- an app on a bridge beside the firmware's requesters ------------------------ */
 
-/**
- * Mark "an external app just wrote to the chip". Called by the bridge
- * glue's obd endpoint on every send (TCP/BLE/USB/WS apps) - NOT by
- * obd_chip_send itself, because autopid's own monitor sends go through
- * that too and would pause autopid against itself. ESP-side pollers
- * (autopid) read obd_chip_client_idle_ms() and yield the chip while an
- * app is driving it (legacy DEV_AUTOPID_ELM327_APP_BIT parity).
- */
-void obd_chip_client_touch(void);
-
-/** Milliseconds since the last obd_chip_client_touch(); UINT32_MAX when
- *  no external client ever wrote. */
-uint32_t obd_chip_client_idle_ms(void);
+/* obd_chip_client.h (included above; its own file since 2026-11-25, the
+ * 700-line rule): the activity clock AutoPID yields to
+ * (obd_chip_client_touch / _write / _idle_ms), the connection that has
+ * gone (obd_chip_client_gone), the poller's turn (obd_chip_turn_begin /
+ * _end) and the subscriber that stands for an app
+ * (obd_chip_subscribe_app). */
 
 /** The K-line session of obd_chip_request() (ISO 9141-2 and ISO 14230-4,
  *  2026-11-12): milliseconds since the bus last answered while a session is
@@ -649,6 +643,10 @@ typedef struct
     uint32_t    dropped;        /* chunks lost because the queue was full */
     uint32_t    queued;         /* chunks waiting now                     */
     uint32_t    depth;
+    bool        app;            /* (2026-11-25) it stands for an app
+                                   (obd_chip_subscribe_app)                */
+    uint32_t    withheld;       /* chunks kept from it: the chip's answers
+                                   to the firmware's own requests          */
 } obd_chip_sub_stats_t;
 
 esp_err_t obd_chip_get_stats(obd_chip_stats_t *out);

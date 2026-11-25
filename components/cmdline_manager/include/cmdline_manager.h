@@ -152,12 +152,16 @@ esp_err_t cmdline_manager_exec_line_async(const char *line,
                                           void *arg);
 
 /** Response print for COMMAND HANDLERS (routed to the active
- *  transport). Outside a command context it falls through to stdout. */
+ *  transport). Outside a command context it falls through to stdout.
+ *  The whole text is written whatever its length: up to 255 characters
+ *  from the stack, a longer one from a PSRAM block sized for it (until
+ *  2026-11-26 a longer text lost its tail without a message). */
 void cmdline_printf(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
 
-/** Raw response bytes for COMMAND HANDLERS: for payloads larger than
- *  cmdline_printf's formatting buffer (scan JSON, task lists). */
+/** Raw response bytes for COMMAND HANDLERS: a payload the handler already
+ *  holds (scan JSON, task lists, a UDS answer in pieces), no formatting
+ *  and no block of its own. */
 void cmdline_write(const char *data, size_t len);
 
 #ifdef __cplusplus

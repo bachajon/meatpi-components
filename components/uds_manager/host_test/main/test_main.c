@@ -1,9 +1,11 @@
 /**
  * @file test_main.c
  * @brief Host tests for uds_proto (response predicates, NRC decode,
- *        hex⇄bytes round-trips), the AT response parser, the AT
- *        transaction against a scripted chip, and the DTC codec.
- *        Expected output: 27 Tests 0 Failures 0 Ignored.
+ *        hex⇄bytes round-trips, an answer's hex in pieces), the AT
+ *        response parser, the AT transaction and its target setup against
+ *        a scripted chip, the native path's "is the answer still
+ *        arriving", and the DTC codec.
+ *        Expected output: 36 Tests 0 Failures 0 Ignored.
  */
 #include <stdio.h>
 #include <string.h>
@@ -125,6 +127,66 @@ static void test_bytes_to_hex(void)
     TEST_ASSERT_EQUAL_size_t(0, uds_bytes_to_hex(b, sizeof(b), tiny,
                                                  sizeof(tiny)));
     TEST_ASSERT_EQUAL_STRING("", tiny);
+}
+
+static void test_hex_pieces_are_the_whole_answer(void)
+{
+    /* the console command prints an answer of any length through a small
+       buffer (2026-11-26: a 201-byte answer ended after its 84th byte):
+       the pieces, one after another, are the one-shot text, to the byte */
+    static uint8_t msg[4096];
+    static char whole[3 * 4096 + 1];
+    static char joined[3 * 4096 + 1];
+    static const size_t SIZES[] = { 1, 2, 41, 42, 43, 84, 85, 128, 129, 201,
+                                    4095, 4096 };
+    static const size_t CAPS[] = { 4, 5, 6, 7, 97, 128 };
+
+    for (size_t i = 0; i < sizeof(msg); i++)
+    {
+        msg[i] = (uint8_t)(i * 7 + 3);
+    }
+
+    for (size_t s = 0; s < sizeof(SIZES) / sizeof(SIZES[0]); s++)
+    {
+        size_t want = uds_bytes_to_hex(msg, SIZES[s], whole, sizeof(whole));
+
+        for (size_t c = 0; c < sizeof(CAPS) / sizeof(CAPS[0]); c++)
+        {
+            char piece[128];
+            size_t off = 0;
+            size_t o = 0;
+            size_t n;
+
+            while ((n = uds_hex_piece(msg, SIZES[s], &off, piece,
+                                      CAPS[c])) > 0)
+            {
+                TEST_ASSERT_TRUE(n < CAPS[c]);            /* room for the NUL */
+                TEST_ASSERT_EQUAL_size_t(n, strlen(piece));
+                memcpy(joined + o, piece, n);
+                o += n;
+            }
+
+            joined[o] = '\0';
+            TEST_ASSERT_EQUAL_size_t(SIZES[s], off);
+            TEST_ASSERT_EQUAL_size_t(want, o);
+            TEST_ASSERT_EQUAL_STRING(whole, joined);
+        }
+    }
+
+    /* a buffer too small for one byte, and the end of the message */
+    char tiny[3] = "xx";
+    size_t off = 0;
+
+    TEST_ASSERT_EQUAL_size_t(0, uds_hex_piece(msg, 4, &off, tiny, sizeof(tiny)));
+    TEST_ASSERT_EQUAL_STRING("", tiny);
+    TEST_ASSERT_EQUAL_size_t(0, off);
+
+    char piece[16];
+
+    off = 4;
+    TEST_ASSERT_EQUAL_size_t(0, uds_hex_piece(msg, 4, &off, piece,
+                                              sizeof(piece)));
+    TEST_ASSERT_EQUAL_STRING("", piece);
 }
 
 static void test_at_parse_single_frame(void)
@@ -518,6 +580,115 @@ static void test_at_setup_follows_the_bus_bitrate(void)
     TEST_ASSERT_EQUAL_STRING("ATTP6", s_sent[0]);
 }
 
+/* a chip that takes every setup line and answers the request: every line
+   that went to it is kept */
+#define SETUP_MAX 24
+
+static char s_setup[SETUP_MAX][24];
+static int s_setup_n;
+
+static esp_err_t fake_setup_req(const char *cmd, char *resp, size_t resp_len,
+                                uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+
+    if (s_setup_n < SETUP_MAX)
+    {
+        snprintf(s_setup[s_setup_n], sizeof(s_setup[0]), "%s", cmd);
+    }
+
+    s_setup_n++;
+    snprintf(resp, resp_len, "%s",
+             (cmd[0] == 'A' && cmd[1] == 'T') ? "OK\r\r>" : "7E 00\r\r>");
+    return ESP_OK;
+}
+
+static int setup_line(const char *cmd)
+{
+    for (int i = 0; i < s_setup_n && i < SETUP_MAX; i++)
+    {
+        if (strcmp(s_setup[i], cmd) == 0)
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void test_at_setup_puts_back_what_another_requester_left(void)
+{
+    /* bench 2026-11-26: an AutoPID row's `ATFCSH710;ATFCSD300000;ATFCSM1`
+       stayed in effect under the UDS setup, the chip sent its flow control
+       to 0x710 and the ECU on 7E0 sent its first frame and nothing more.
+       The setup undoes what a row or an app may have left, before the
+       request goes out. */
+    static const char *const WANT[] =
+    {
+        "ATTP6", "ATSH7E0", "ATCRA7E8", "ATH0", "ATCAF1", "ATS1",
+        "ATCEA", "ATFCSM0", "ATCFC1", "ATAT1", "ATV0", "ATE0", "ATR1",
+    };
+    const uint8_t req[] = { 0x3E, 0x00 };
+    uint8_t out[8];
+    size_t n = 0;
+
+    uds_at_set_can_kbps(500);
+    s_setup_n = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      uds_at_transceive_ex(fake_setup_req, &FAKE_ADDR, req,
+                                           sizeof(req), out, sizeof(out), &n,
+                                           250, 5000, NULL, false));
+    TEST_ASSERT_TRUE(s_setup_n <= SETUP_MAX);
+
+    int request_at = setup_line("3E001");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(s_setup_n - 1, request_at,
+                                  "the request is the last line");
+    TEST_ASSERT_EQUAL_size_t(2, n);
+
+    for (size_t i = 0; i < sizeof(WANT) / sizeof(WANT[0]); i++)
+    {
+        int at = setup_line(WANT[i]);
+
+        TEST_ASSERT_TRUE_MESSAGE(at >= 0 && at < request_at, WANT[i]);
+    }
+
+    /* the chip's own reply wait from p2 (250 ms / 4 ms) closes the setup */
+    TEST_ASSERT_EQUAL_STRING("ATST3E", s_setup[request_at - 1]);
+
+    /* a steady conversation still costs one line */
+    s_setup_n = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+                      uds_at_transceive_ex(fake_setup_req, &FAKE_ADDR, req,
+                                           sizeof(req), out, sizeof(out), &n,
+                                           250, 5000, NULL, true));
+    TEST_ASSERT_EQUAL_INT(1, s_setup_n);
+    TEST_ASSERT_EQUAL_STRING("3E001", s_setup[0]);
+}
+
+static void test_isotp_answer_still_arriving(void)
+{
+    /* bench 2026-11-26, native ISO-TP: an answer of 1024 bytes takes longer
+       than P2 (250 ms) to arrive and the request ended in a timeout with
+       the ECU in the middle of it. When the wait for the START of the
+       answer runs out, the transport asks whether frames are coming in. */
+
+    /* the ECU is sending: its last frame 1 ms ago, the request 250 ms ago */
+    TEST_ASSERT_TRUE(uds_isotp_answer_arriving(1, 250));
+    TEST_ASSERT_TRUE(uds_isotp_answer_arriving(999, 4000));
+
+    /* a silent ECU: the last frame on its id is older than the request
+       (the answer to the one before), or there never was one */
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(900, 250));
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(250, 250));
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(UINT32_MAX, 250));
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(UINT32_MAX, UINT32_MAX));
+
+    /* an answer that stopped in the middle: N_Cr without a frame */
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(UDS_ISOTP_N_CR_MS, 4000));
+    TEST_ASSERT_FALSE(uds_isotp_answer_arriving(1500, 4000));
+}
+
 static void test_at_transceive_gives_up_on_a_chip_that_keeps_cutting(void)
 {
     const uint8_t req[] = { 0x19, 0x02, 0x08 };
@@ -532,6 +703,91 @@ static void test_at_transceive_gives_up_on_a_chip_that_keeps_cutting(void)
                                            150, 5000, NULL, true));
     TEST_ASSERT_EQUAL(3, s_calls);
     TEST_ASSERT_EQUAL_size_t(0, n); /* never a 6-byte "answer" */
+
+    /* the second time it is asked without a digit: frames left over from
+       the answer before cannot use up a line count that is not there */
+    TEST_ASSERT_EQUAL_STRING("1902081", s_sent[0]);
+    TEST_ASSERT_EQUAL_STRING("1902082", s_sent[1]);
+    TEST_ASSERT_EQUAL_STRING("190208", s_sent[2]);
+}
+
+static void test_at_parse_the_largest_message_fits_its_size(void)
+{
+    /* bench 2026-11-26: 4095 bytes, the largest ISO-TP message, are 586
+       frames whose last carries one byte and six of padding: 4101 bytes on
+       the lines. The padding counted against the buffer before it was cut
+       off, and the one message that fills the 4096 bytes every caller has
+       was refused (ESP_ERR_INVALID_RESPONSE on the route). */
+    static char text[586 * 26 + 32];
+    static uint8_t out[4096];
+    size_t o = 0;
+    size_t n = 0;
+    size_t announced = 0;
+    size_t sent = 0;
+
+    o += (size_t)snprintf(text + o, sizeof(text) - o, "FFF \r0:");
+
+    for (; sent < 6; sent++)
+    {
+        o += (size_t)snprintf(text + o, sizeof(text) - o, " %02X",
+                              (unsigned)(sent & 0xFF));
+    }
+
+    for (int line = 1; line <= 585; line++)
+    {
+        o += (size_t)snprintf(text + o, sizeof(text) - o, " \r%X:",
+                              line & 0xF);
+
+        for (int b = 0; b < 7; b++, sent++)
+        {
+            /* behind the 4095th byte: the padding */
+            o += (size_t)snprintf(text + o, sizeof(text) - o, " %02X",
+                                  (sent < 4095) ? (unsigned)(sent & 0xFF)
+                                                : 0xAAu);
+        }
+    }
+
+    snprintf(text + o, sizeof(text) - o, " \r\r>");
+    TEST_ASSERT_EQUAL_size_t(4101, sent);
+
+    TEST_ASSERT_TRUE(uds_at_parse_response_len(text, out, sizeof(out), &n,
+                                               NULL, &announced));
+    TEST_ASSERT_EQUAL_size_t(4095, announced);
+    TEST_ASSERT_EQUAL_size_t(4095, n);
+    TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(4094 & 0xFF), out[4094]);
+
+    /* a buffer smaller than the message is still an overflow */
+    TEST_ASSERT_FALSE(uds_at_parse_response_len(text, out, 4094, &n, NULL,
+                                                &announced));
+}
+
+static void test_at_wait_behind_a_cut_answer(void)
+{
+    /* bench 2026-11-26 (a capture of the bus): the chip stops printing at
+       its line count but has sent its flow control, the ECU sends the rest
+       of the answer, and a request 0.9 ms later is cut by those frames.
+       The wait is for the frames still owed: 2 ms each and 10 on top. */
+
+    /* the VIN, 20 bytes = 3 frames, the first one printed: 2 owed */
+    TEST_ASSERT_EQUAL_UINT32(14, uds_at_tail_wait_ms(20, 6, 0));
+    /* 8 bytes = 2 frames, 13 bytes = 2 frames, 14 bytes = 3 */
+    TEST_ASSERT_EQUAL_UINT32(12, uds_at_tail_wait_ms(8, 6, 0));
+    TEST_ASSERT_EQUAL_UINT32(12, uds_at_tail_wait_ms(13, 6, 0));
+    TEST_ASSERT_EQUAL_UINT32(14, uds_at_tail_wait_ms(14, 6, 0));
+    /* two frames printed of the VIN's three */
+    TEST_ASSERT_EQUAL_UINT32(12, uds_at_tail_wait_ms(20, 13, 0));
+    /* nothing owed (a message that was whole): the base alone */
+    TEST_ASSERT_EQUAL_UINT32(10, uds_at_tail_wait_ms(20, 20, 0));
+    TEST_ASSERT_EQUAL_UINT32(10, uds_at_tail_wait_ms(7, 6, 0));
+
+    /* the largest message, 4095 bytes = 586 frames: under the cap */
+    TEST_ASSERT_EQUAL_UINT32(1180, uds_at_tail_wait_ms(4095, 6, 0));
+
+    /* cut again: four times as patient, and capped */
+    TEST_ASSERT_EQUAL_UINT32(56, uds_at_tail_wait_ms(20, 6, 1));
+    TEST_ASSERT_EQUAL_UINT32(3000, uds_at_tail_wait_ms(4095, 6, 1));
+    TEST_ASSERT_EQUAL_UINT32(3000, uds_at_tail_wait_ms(4095, 6, 2));
 }
 
 /* ---- UDS DTC codec (uds_dtc_codec.c: TASK_dtc §12) ----------------------- */
@@ -862,6 +1118,7 @@ void app_main(void)
     RUN_TEST(test_hex_to_bytes_ok);
     RUN_TEST(test_hex_to_bytes_rejects);
     RUN_TEST(test_bytes_to_hex);
+    RUN_TEST(test_hex_pieces_are_the_whole_answer);
     RUN_TEST(test_at_parse_single_frame);
     RUN_TEST(test_at_parse_multiline_isotp);
     RUN_TEST(test_at_parse_pending_lines_then_final);
@@ -876,6 +1133,10 @@ void app_main(void)
     RUN_TEST(test_at_transceive_never_repeats_a_state_changing_service);
     RUN_TEST(test_at_transceive_gives_up_on_a_chip_that_keeps_cutting);
     RUN_TEST(test_at_setup_follows_the_bus_bitrate);
+    RUN_TEST(test_at_setup_puts_back_what_another_requester_left);
+    RUN_TEST(test_isotp_answer_still_arriving);
+    RUN_TEST(test_at_wait_behind_a_cut_answer);
+    RUN_TEST(test_at_parse_the_largest_message_fits_its_size);
     RUN_TEST(test_dtc_requests);
     RUN_TEST(test_dtc_parse_list_shapes);
     RUN_TEST(test_dtc_parse_count_and_clear);

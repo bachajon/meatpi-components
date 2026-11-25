@@ -363,10 +363,10 @@ static esp_err_t chip_free(const ap_send_req_t *req, char proto, char *err,
     if (ap_be()->client_idle_ms != NULL &&
         ap_sched_client_hold(ap_be()->client_idle_ms()))
     {
+        /* (2026-11-21, GitHub issue #1078) or when a monitor the app
+           opened ends: obd_chip_client_write() */
         return refuse(ESP_ERR_INVALID_STATE, err, err_len,
-                      "an app is using the OBD chip (a terminal, an ELM327 "
-                      "app): the chip is free ten seconds after its last "
-                      "command. Bus can does not need the chip");
+                      AP_CLIENT_BUSY_TEXT ". Bus can does not need the chip");
     }
 
     if (req->where == AP_SEND_OBD)

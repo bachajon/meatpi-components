@@ -542,6 +542,18 @@ static esp_err_t isotp_recv(can_isotp_session_t s, uint8_t *buf, size_t cap,
     return err;
 }
 
+/* recv() hands over whole messages: this is how its caller sees that one of
+   several frames is on its way (the task stamps every frame it feeds) */
+static uint32_t isotp_rx_idle_ms(can_isotp_session_t s)
+{
+    if (s == NULL || !s->rx_seen)
+    {
+        return UINT32_MAX;
+    }
+
+    return can_isotp_esp_now_ms() - s->rx_frame_ms;
+}
+
 /* ---- registration ---------------------------------------------------------- */
 
 static esp_err_t isotp_set_flow(can_isotp_session_t session, uint8_t block_size,
@@ -573,6 +585,7 @@ esp_err_t can_isotp_esp_init(void)
         .send     = isotp_send,
         .recv     = isotp_recv,
         .set_flow = isotp_set_flow,
+        .rx_idle_ms = isotp_rx_idle_ms,
     };
 
     log_manager_register(&LOG_DESC);

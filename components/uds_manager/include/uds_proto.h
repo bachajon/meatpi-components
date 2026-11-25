@@ -73,6 +73,15 @@ bool uds_hex_to_bytes(const char *str, uint8_t *out, size_t cap,
 size_t uds_bytes_to_hex(const uint8_t *bytes, size_t len,
                         char *out, size_t cap);
 
+/** The same text in pieces, for an answer of any length through a small
+ *  buffer: the next piece from byte @p *off on, as many whole bytes as
+ *  @p cap holds (at least 4), @p *off moved behind them. A byte that is not
+ *  the message's last carries its space, so the pieces written one after
+ *  another are exactly what uds_bytes_to_hex() gives for the whole message.
+ *  Returns the piece's length, 0 when the message is through. */
+size_t uds_hex_piece(const uint8_t *bytes, size_t len, size_t *off,
+                     char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

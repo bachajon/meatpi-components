@@ -34,6 +34,7 @@
 
 #include "esp_err.h"
 #include "obd_chip_guard.h" /* obd_guard_t for the guard accounting hook */
+#include "obd_chip_client_private.h" /* the app client's core (2026-11-25) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -405,6 +406,9 @@ typedef struct
 } obd_pin_stats_t;
 
 void obd_pin_get_stats(obd_pin_stats_t *out);
+
+/* obd_chip_client.c (a bridged app beside the firmware's requesters):
+   obd_chip_client_private.h, included above (its own file since 2026-11-25) */
 
 /* ---- core bridges ------------------------------------------------------------ */
 

@@ -45,6 +45,14 @@ bool ap_sched_client_hold(uint32_t idle_ms)
     return idle_ms < AP_CLIENT_YIELD_MS;
 }
 
+const char *ap_sched_test_refusal(uint32_t idle_ms, bool uses_chip)
+{
+    /* a test went through an app's hold and STOPPED its monitor (car
+       2026-11-24, build 6); the poller and can.send already waited */
+    return (uses_chip && ap_sched_client_hold(idle_ms)) ? AP_CLIENT_BUSY_TEXT
+                                                        : NULL;
+}
+
 static int entry_group(const ap_config_t *cfg, int i)
 {
     return (i < cfg->n_pids) ? cfg->pids[i].group

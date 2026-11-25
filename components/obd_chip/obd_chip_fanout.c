@@ -29,9 +29,11 @@
  *
  * Fan-out contract (README): every subscriber gets every chunk; a full queue
  * drops that subscriber's copy (counted, rate-limited WARN) and never stalls
- * the RX task or other subscribers. The one exception is deliberate: the
+ * the RX task or other subscribers. Two exceptions, both deliberate: the
  * answer to the ATM0 the driver writes behind an app's reset (below) reaches
- * nobody.
+ * nobody, and a subscriber that stands for an app (obd_chip_subscribe_app,
+ * 2026-11-25, GitHub issue #1078) is not handed the chip's answers to the
+ * firmware's own requests (counted per subscriber, `withheld`).
  */
 #include "obd_chip.h"
 
@@ -56,6 +58,8 @@ typedef struct
     const char   *name;
     uint32_t      dropped;
     uint32_t      dropped_logged;
+    bool          app;      /* it stands for an app on a bridge        */
+    uint32_t      withheld; /* chunks kept from it (RX-task-only)      */
 } obd_sub_t;
 
 /* registry + state: PSRAM .bss (§2) */
@@ -106,8 +110,9 @@ static uint32_t s_hidden_bytes; /* kept from the fan-out (stats)           */
 
 /* ---- fan-out ------------------------------------------------------------------ */
 
-/** One chunk to every subscriber (the broadcast contract). */
-static void fanout_chunk(const obd_chunk_t *chunk)
+/** One chunk to every subscriber (the broadcast contract). @p mute = it
+ *  answers a request of the firmware's: not for the apps. */
+static void fanout_chunk(const obd_chunk_t *chunk, bool mute)
 {
     s_rx_bytes += chunk->len;
     s_rx_chunks++;
@@ -121,6 +126,12 @@ static void fanout_chunk(const obd_chunk_t *chunk)
     {
         if (s_subs[i].q == NULL)
         {
+            continue;
+        }
+
+        if (mute && s_subs[i].app)
+        {
+            s_subs[i].withheld++;
             continue;
         }
 
@@ -145,6 +156,13 @@ void obd_core_fanout(const uint8_t *data, size_t len)
     obd_chunk_t chunk;
     bool gate = obd_gate_enabled();
     int64_t now = esp_timer_get_time();
+
+    /* what a request of the firmware's is answered is not for the apps
+       (2026-11-25): asked ahead of obd_client_rx(), so the prompt that ends
+       an app's own command still reaches the app */
+    bool mute = obd_client_mute(obd_core_claim_state() != 0);
+
+    obd_client_rx(data, len); /* a prompt ends an app's monitor */
 
     /* the reset interception's failsafes: a reset the chip never answered
        (arm again at the next one), an ATM0 whose prompt never came (the
@@ -214,7 +232,7 @@ void obd_core_fanout(const uint8_t *data, size_t len)
 
         if (chunk.len == OBD_CHIP_CHUNK_SIZE)
         {
-            fanout_chunk(&chunk);
+            fanout_chunk(&chunk, mute);
             chunk.len = 0;
         }
 
@@ -249,13 +267,13 @@ void obd_core_fanout(const uint8_t *data, size_t len)
 
     if (chunk.len > 0)
     {
-        fanout_chunk(&chunk);
+        fanout_chunk(&chunk, mute);
     }
 }
 
 /* ---- the registry --------------------------------------------------------------- */
 
-esp_err_t obd_chip_subscribe(QueueHandle_t q, const char *name)
+static esp_err_t subscribe(QueueHandle_t q, const char *name, bool app)
 {
     if (q == NULL)
     {
@@ -274,6 +292,8 @@ esp_err_t obd_chip_subscribe(QueueHandle_t q, const char *name)
             s_subs[i].name = (name != NULL) ? name : "?";
             s_subs[i].dropped = 0;
             s_subs[i].dropped_logged = 0;
+            s_subs[i].app = app;
+            s_subs[i].withheld = 0;
 
             if (i >= s_sub_count)
             {
@@ -287,6 +307,16 @@ esp_err_t obd_chip_subscribe(QueueHandle_t q, const char *name)
 
     portEXIT_CRITICAL(&s_lock);
     return err;
+}
+
+esp_err_t obd_chip_subscribe(QueueHandle_t q, const char *name)
+{
+    return subscribe(q, name, false);
+}
+
+esp_err_t obd_chip_subscribe_app(QueueHandle_t q, const char *name)
+{
+    return subscribe(q, name, true);
 }
 
 esp_err_t obd_chip_unsubscribe(QueueHandle_t q)
@@ -339,6 +369,8 @@ size_t obd_chip_get_subscribers(obd_chip_sub_stats_t *out, size_t max)
         out[n].dropped = s_subs[i].dropped;
         out[n].queued = (uint32_t)uxQueueMessagesWaiting(q);
         out[n].depth = out[n].queued + (uint32_t)uxQueueSpacesAvailable(q);
+        out[n].app = s_subs[i].app;
+        out[n].withheld = s_subs[i].withheld;
         n++;
     }
 
@@ -446,7 +478,9 @@ esp_err_t obd_chip_send(const uint8_t *data, size_t len)
            interception's window (RX-task state) is its business */
         static const obd_chunk_t refused = { 4, "?\r\r>" };
 
-        fanout_chunk(&refused);
+        /* no prompt of the chip's will end this command of the app's */
+        obd_client_rx(refused.data, refused.len);
+        fanout_chunk(&refused, false);
         return ESP_OK;
     }
 

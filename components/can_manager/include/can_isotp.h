@@ -98,6 +98,12 @@ typedef struct
      *  provider cannot (a session then keeps what open() gave it). */
     esp_err_t (*set_flow)(can_isotp_session_t s, uint8_t block_size,
                           uint32_t stmin_us);
+    /** Milliseconds since the last frame on the session's rx id reached
+     *  the stack, UINT32_MAX before the first. recv() hands over whole
+     *  messages only: a caller whose wait for an answer ran out reads this
+     *  to tell an ECU still sending a long message from a silent one. NULL
+     *  when the provider cannot say. */
+    uint32_t  (*rx_idle_ms)(can_isotp_session_t s);
 } can_isotp_ops_t;
 
 /** Register the provider (an add-on pack calls this once at ext init,

@@ -23,11 +23,13 @@
 /**
  * @file cmdline_manager_private.h
  * @brief Internal contracts: the PURE pieces (host-tested: the line
- *        assembler and the dispatcher's verdict line), the console hook
- *        and the settings accessors.
+ *        assembler, the dispatcher's verdict line and the formatter
+ *        behind cmdline_printf), the console hook and the settings
+ *        accessors.
  */
 #pragma once
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -39,12 +41,22 @@
  * terminate; empty lines are skipped; CRLF never yields a bogus empty
  * line; an overlong line is discarded (flagged) up to its terminator. */
 
+#define CM_LINE_BUF 256 /* = CMDLINE_MANAGER_LINE_MAX (asserted in the .c) */
+
 typedef struct
 {
-    char   buf[256];
+    char   buf[CM_LINE_BUF];
     size_t len;
     bool   overflow;
 } cm_line_asm_t;
+
+/** The size of esp_console's argument vector. It keeps one word less than
+ *  this and drops every further word of the line WITHOUT a message. A line
+ *  of the assembler holds at most CM_LINE_BUF / 2 words (one character and
+ *  one space each), so this size cannot drop one. Until 2026-11-26 it was
+ *  12: `uds -t 7E0 -r 7E8 23 14 00 00 00 00 C8` reached its handler without
+ *  the last request byte and another request went to the ECU. */
+#define CM_ARGS_MAX (CM_LINE_BUF / 2 + 1)
 
 void cm_line_reset(cm_line_asm_t *a);
 
@@ -77,6 +89,30 @@ size_t cm_line_feed(cm_line_asm_t *a, const uint8_t *data, size_t len,
  */
 size_t cm_exec_verdict(esp_err_t err, int ret, const char *line,
                        char *out, size_t out_len);
+
+/* ---- pure formatter behind cmdline_printf (cmdline_manager_line.c) ----------
+ * A text that fits the caller's small buffer is written from there; a longer
+ * one is formatted again into a block sized for all of it. Until 2026-11-26
+ * the text was cut at the small buffer's 255 characters without a message:
+ * the `uds` command's reply line ended after the 84th byte of the answer. */
+
+typedef struct
+{
+    void  (*write)(const char *data, size_t len); /* the console's output   */
+    void *(*alloc)(size_t size);                  /* a block for a long text */
+    void  (*release)(void *block);
+} cm_print_port_t;
+
+/**
+ * Format and write one text.
+ * @param port      where the text goes and where a long one is built
+ * @param small     the caller's buffer for the common short text
+ * @param small_len its size
+ * @return characters written: all of the text, or the small buffer's worth
+ *         when no block could be had for a longer one
+ */
+size_t cm_vprint(const cm_print_port_t *port, char *small, size_t small_len,
+                 const char *fmt, va_list args);
 
 /* ---- shared internals -------------------------------------------------------- */
 

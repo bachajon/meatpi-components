@@ -137,7 +137,11 @@ static void feed_frame(const can_core_frame_t *fr)
     (void)esp_isotp_poll(s->tp); /* a flow control just unblocked CFs */
     xSemaphoreGive(s->lock);
 
-    s->busy_until_ms = can_isotp_esp_now_ms() + ISOTP_BUSY_MS;
+    uint32_t now = can_isotp_esp_now_ms();
+
+    s->busy_until_ms = now + ISOTP_BUSY_MS;
+    s->rx_frame_ms = now;
+    s->rx_seen = true;
     STAT_INC(frames_fed);
 }
 

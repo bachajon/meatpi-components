@@ -24,6 +24,17 @@ its 64-slot queue with every app line while idle, so an ELM app streaming
 through a bridge for minutes drew a drop WARN every 100 chunks for
 nothing). Do not add per-subscriber filters here.
 
+**The one kind of subscriber that is not handed everything (2026-11-25,
+GitHub issue #1078): an app on a bridge.** A queue subscribed with
+`obd_chip_subscribe_app()` (the bridge glue's `obd` jack) gets every chunk
+but the chip's answers to the firmware's own requests: a chunk that arrives
+while a claim is held is kept from it and counted (`withheld` per
+subscriber on `GET /api/obd_chip`). Until then an app that stayed connected
+and silent received the poller's lines (bench: 7,151 bytes in 18 s on TCP
+35000, the first of them 9.7 s after the app's last command). It is no
+filter on content: the rule is who asked. See "An app and the poller"
+below.
+
 **RX latency (2026-09-08):** the RX task blocks on the UART driver's
 event queue and drains by buffered length, so a response is fanned out
 as soon as the chip finished printing it (the FIFO rx-timeout, 10
@@ -167,7 +178,11 @@ zero-copy only with numbers.
 | `obd_chip_dropped(q)` | Per-subscriber drop counter. |
 | `obd_chip_send(data,len)` | Serialized raw TX (a 4 KB VT payload is one call); rejected during EXCLUSIVE. |
 | `obd_chip_get_stats()` / `obd_chip_get_subscribers()` / `obd_chip_register_http()` | Observability (2026-09-08): wire + fan-out counters (`rx_bytes/chunks/max_chunk`, `rx_overflows`, `rx_fifo_peak` / `rx_handovers` / `rx_late` since 2026-11-11, `rx_buffered`, `tx_bytes`, claim, client idle) and per-subscriber `dropped/queued/depth`, served as `GET /api/obd_chip` (`obd_chip_http.c`, hand-formatted JSON). The first hop of any "missed frames" investigation: compare with `/api/bridges` and `/api/sockets`. |
-| `obd_chip_client_touch()` / `obd_chip_client_idle_ms()` | The external-client activity clock (2026-09-08): the bridge glue's `obd` endpoint touches it on every app write (TCP/BLE/USB/WS), autopid reads the idle time and yields the chip while an app drives it (legacy `DEV_AUTOPID_ELM327_APP_BIT` parity, 10 s). NOT touched by `obd_chip_send` itself - autopid's own monitor sends go through that and would pause autopid against itself. `UINT32_MAX` = no client ever wrote. |
+| `obd_chip_client_touch()` / `obd_chip_client_idle_ms()` | The external-client activity clock (2026-09-08): the bridge glue's `obd` endpoint touches it on every app write (TCP/BLE/USB/WS), autopid reads the idle time and yields the chip while an app drives it (legacy `DEV_AUTOPID_ELM327_APP_BIT` parity, 10 s). NOT touched by `obd_chip_send` itself - autopid's own monitor sends go through that and would pause autopid against itself. `UINT32_MAX` = no client ever wrote. Since 2026-11-21 (GitHub issue #1078) the glue calls `obd_chip_client_write()` with the bytes: a monitor the app opened (a line that is a monitor command, `obd_chip_is_monitor_cmd`) writes nothing while it runs and counts as activity until it ends, idle 0: the app's next byte (not LF) or the chip's prompt ends it, `OBD_CLIENT_MONITOR_HOLD_MS` (120 s) caps it, since nothing here knows when an app went away in the middle of one, and a bare CR behind a monitor command opens one again (the chip repeats the last command). Until then a raw-port `ATMA` was cut ten seconds in. Pure in `obd_chip_client.c`, host-tested (`test_client.c`). |
+| `obd_chip_client_write(who,data,len)` / `obd_chip_client_gone(who)` | (2026-11-25, the same issue; `obd_chip_client.h`) The glue's call ahead of every `obd_chip_send()` of an app's bytes, with `who` = the connection they come from (the address of the bridge's far endpoint). It stamps the clock, follows the app's monitor, and BLOCKS while a background turn is in progress (`OBD_CLIENT_TURN_WAIT_MS`, 3 s, then the bytes go out anyway: counted, one W line). `_gone(who)`: that connection has nobody left; when it wrote last, the hold of a monitor it opened is over. |
+| `obd_chip_turn_begin(yield_ms)` / `obd_chip_turn_end()` | (2026-11-25) A background requester's turn on the chip, for the one that yields to apps (AutoPID's poller, once a pass). False = an app drives the chip, stay off; true = the chip is the caller's until `_end()`, and an app's bytes wait for that. The turn and the app's clock share one lock, so an app's write is either seen by `_begin()` or sees the turn. |
+| `obd_chip_subscribe_app(q,name)` | (2026-11-25) `obd_chip_subscribe()` for a queue that stands for an app: without the chip's answers to the firmware's own requests (`withheld`). |
+| `obd_chip_client_get_stats()` | (2026-11-25) `turn_waits`, `turn_wait_max_ms`, `turn_forced`, `gone`: `GET /api/obd_chip` `client`. |
 | `obd_chip_settings_generation()` / `obd_chip_settings_changed()` | The chip's run-time settings generation (2026-10-28): a number that moves at every bring-up (boot, a reflash's fresh start, a recovery) and when a holder that changed the chip's volatile settings (echo, headers, protocol, timeouts, filters) says so at the end of its transaction (the CAN self-test's `ATD` + `ATE0`), and since 2026-11-10 when the request engine refused a protocol switch or held a bus request back behind one. AutoPID's baseline memory compares it before every poll and re-sends its prelude when it moved (bench 2026-10-28: the chip echoed after a self-test and AutoPID's memory did not know). Any holder that keeps chip state should do the same. |
 | `obd_chip_request(cmd,resp,len,timeout)` | One transaction: claims COMMAND, collects to the `>` prompt, strips echo+prompt. Refuses monitor-class cmds (`ESP_ERR_NOT_SUPPORTED`). A protocol switch goes out only behind an `ATM0` the chip acknowledged (2026-11-10, "Fail closed" below): otherwise it is not sent (`ESP_ERR_INVALID_RESPONSE`, or the `ATM0`'s own error), and bus requests are held back (`ESP_ERR_NOT_FINISHED`) until a switch has gone through. |
 | `obd_chip_kline_idle_ms()` | (2026-11-12) how long ago the K-line bus last answered in a live session, `UINT32_MAX` when no session is up (never started, closed, or the car's protocol is not a K-line one). AutoPID's poller reads it to send one short request before the ECU ends the session. See "K-line: a started bus, a session that ends" below. |
@@ -385,6 +400,66 @@ bridge_manager; production replaces it with a configured bridge.
   `GET /api/obd_chip/report` (the page's "Read the chip configuration")
   failed once in ten with "could not read the chip". Host case
   `test_claim_waiters_counted`.
+## An app and the poller: how the chip changes hands (2026-11-25, GitHub issue #1078)
+
+An app on a bridge writes raw bytes; the firmware's requesters ask through
+`obd_chip_request()`. The chip serves one of them at a time: a byte that
+arrives while it works on a request stops that request (`STOPPED`), and the
+chip runs neither. `obd_chip_client.c` (pure but for a spinlock, host-tested)
+holds what keeps the two apart; the declarations and the rules are in
+`include/obd_chip_client.h`.
+
+What was measured on the bench before (unit 14c19f457fd9, a profile whose
+rows set `ATSH`, `ATCRA` and the protocol, 29 rows polled back to back, an
+app on TCP 35000):
+
+- **An app's first command was lost: 25 of 25.** It landed in the row the
+  poller had on the wire. The answer was `STOPPED` and nothing ran, the
+  app's own `ATZ` included.
+- **So the app went on in the poller's state.** `ATZ, ATE0, ATH1, ATSP6,
+  0100`: the `0100` was answered by `77A` in 1 of 3, because it went out on
+  the header of the poller's last row (`ATSH710`, a gateway). An `ATMA`
+  showed one id only in 5 of 9, through that row's `ATCRA`.
+- **A reset that reaches the chip cleans it: 6 of 6** (`ATZ` or `ATD`
+  behind a first command that took the loss): every id in the monitor, the
+  car's protocol.
+- **A monitor was cut ten seconds in** (pull request #14, Jeff Munk), and
+  **a silent app received the poller's lines** (above).
+
+The rules now:
+
+| Rule | Since | How |
+|---|---|---|
+| The poller yields for ten seconds behind an app's last byte | 2026-09-08 | `obd_chip_client_idle_ms()`, AutoPID's `AP_CLIENT_YIELD_MS` |
+| A monitor the app opened holds the chip until its next byte, the chip's prompt, or two minutes | 2026-11-21 (pull request #14) | `obd_chip_client_write()` reads the app's lines |
+| The hold ends when the app has gone | 2026-11-25 | the bridge names the connection (`who`) and reports the one that has nobody left: `obd_chip_client_gone()`. TCP servers, WebSocket channels and Bluetooth can tell; the USB serial jack cannot, so the two minutes stay for it and for an app that hangs while connected |
+| An app's bytes wait for the end of the poller's pass | 2026-11-25 | the poller takes a turn for every pass (`obd_chip_turn_begin()`), refused while an app drives the chip; `obd_chip_client_write()` waits while a turn is in progress, 3 s at most |
+| An app is not shown the firmware's own traffic | 2026-11-25 | `obd_chip_subscribe_app()`: chunks that arrive while a claim is held are kept from it, unless a command of an app is under way (a CR went out and no prompt came since): that app is to see what became of its command, `STOPPED` included |
+
+What stays the app's to do: **the chip is in the state the poller's last
+row left it in** (headers on, that row's header and receive filter, on some
+profiles the 29-bit protocol of the same bus). An app that wants a clean
+chip sends `ATZ` or `ATD` first, as ELM327 apps do. Nothing puts the
+baseline back behind the app's back: a clean-up behind every row would cost
+every user polling time, and a reset by the driver would take the settings
+of an app that only paused. A terminal user who types `ATMA` with no reset
+sees what that state lets through.
+
+What the rules do not cover:
+
+- **A chip job of the firmware's that is no pass of the poller** (a test
+  from the page, a send, a fault code scan, the UDS tool): it takes no
+  turn. An app's first bytes that land in one stop it as before; such a job
+  refuses to start while an app holds the chip (409).
+- **A pass longer than three seconds.** The app's bytes go out anyway
+  (`client.turn_forced`, a W line). A poller's row is a second at most,
+  and its own filter window ends when an app comes (`autopid_filter.c`).
+- **Two apps on one TCP server.** The server counts clients; the hold ends
+  when the last one has gone.
+
+Bench: the app repo's `.\test.ps1 appchip`. Host: `test_client.c`,
+`test_client_turn.c`.
+
 ## The user's update, guarded (2026-11-21, GitHub issue #1075, Ali)
 
 A report of a chip that never came up after an update from 6.0.0-beta.5 to
@@ -759,6 +834,7 @@ subscribe and transaction API for the CAN self-test.
 | PSRAM `.bss` (2026-10-28) | the wire tools' result (job + console copies, ~3 KB each), the HTTP copy, the report (11 x 512 B, console + HTTP copies), the bring-up's two wire notes | ~22 KB (estimated) |
 | Internal heap, transient (2026-10-28) | the update job's and the wire tools' task stacks (4 KB each, UART driver path), one at a time | 4 KB while one runs |
 | PSRAM heap, transient (2026-10-28) | the bodies of `GET /api/obd_chip/probe` (6 KB) and `/report` (6 KB) | per request |
+| PSRAM `.bss` (2026-11-25) | the app's hold on the chip (`obd_chip_client.c`: the clock, the monitor, the line, the writer, the turn, four counters) and two fields per subscriber | ~90 B (estimated); internal RAM: one spinlock |
 
 ## Tests
 
@@ -776,7 +852,17 @@ subscribe and transaction API for the CAN self-test.
 - **Bench (2026-11-12):** `.\test.ps1 kline` (a K-line car through the
   firmware's own paths, ECU sim v2 as the car: `KLINE ACCEPT PASS`), the
   row and the page in the app repo's TESTING.md.
-- **Host (`host_test/`, 48 tests):** since 2026-11-10 also the production
+- **Bench (2026-11-25):** `.\test.ps1 appchip` (an app on TCP 35000 and
+  on /ws/obd beside a poller that keeps the chip busy: the first command,
+  the reset, the monitor's hold, the app that goes away, the silent app,
+  the cap: `APP CHIP PASS`), the row and the page in the app repo's
+  TESTING.md.
+- **Host (`host_test/`, 80 tests):** since 2026-11-25 how the chip changes
+  hands (`test_client_turn.c`, 7 cases: the connection that wrote last and
+  has gone, another connection's leaving, the poller's turn refused while
+  an app drives the chip, a write during a turn, the mute and its
+  exception), beside the app's monitor (`test_client.c`, 6 cases,
+  2026-11-21, pull request #14); since 2026-11-10 also the production
   request engine, claim model and fan-out against a fake chip that stands
   in for the UART (`test_request.c`: the words on the wire, "Fail closed"
   and "Read back first" below); since 2026-11-12 a K-line ECU behind that

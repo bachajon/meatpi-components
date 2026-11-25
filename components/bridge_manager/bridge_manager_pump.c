@@ -46,6 +46,7 @@
 
 #include "bridge_manager.h"
 #include "bridge_manager_private.h"
+#include "bridge_manager_peers.h"
 
 static const char *TAG = "bridge_manager";
 
@@ -87,6 +88,8 @@ typedef struct
     TaskHandle_t task;
     volatile bool running;
     uint8_t owed[2];                    /* see BM_DIR                     */
+    bm_peers_t peers;                   /* who is at each end (2026-11-25) */
+    TickType_t peers_tick;              /* the last look at them          */
 
     bridge_stats_t stats;
 
@@ -217,7 +220,7 @@ static void pump_raw_batch(bm_bridge_t *br, const bridge_chunk_t *first,
         chunks++;
     }
 
-    if (dst->send(br->batch, len) != ESP_OK)
+    if (bm_peers_send(dst, a2b ? br->a : br->b, br->batch, len) != ESP_OK)
     {
         br->stats.send_errors++;
     }
@@ -399,6 +402,14 @@ static void pump_task(void *arg)
         {
             pump_flush_due(br, esp_timer_get_time() / 1000);
         }
+
+        /* an end that had peers and has none left: the other end is told */
+        if ((TickType_t)(xTaskGetTickCount() - br->peers_tick) >=
+                pdMS_TO_TICKS(100))
+        {
+            br->peers_tick = xTaskGetTickCount();
+            bm_peers_poll(&br->peers, br->a, br->b);
+        }
     }
 
     br->task = NULL;
@@ -468,6 +479,7 @@ static esp_err_t build_bridge(int idx, const bm_bridge_cfg_t *cfg)
     memset(&br->stats, 0, sizeof(br->stats));
     br->owed[0] = 0;
     br->owed[1] = 0;
+    memset(&br->peers, 0, sizeof(br->peers));
     br->last_flush_a2b = esp_timer_get_time() / 1000;
     br->last_flush_b2a = br->last_flush_a2b;
     br->cfg = cfg;
