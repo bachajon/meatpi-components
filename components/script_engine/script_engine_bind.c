@@ -84,6 +84,21 @@ uint32_t se_bind_id_arg(bvm *vm, int idx)
     return 0;
 }
 
+/* An ECU's answer on its way into the script: the largest ISO-TP message,
+ * and its hex. PSRAM; runs are serialized, so one of each serves uds(),
+ * obd_request() and obd_isotp_rx(). Until 2026-11-26 each read 512 bytes at
+ * most (a longer answer came back as nil) and handed over the first 128 as
+ * hex, without a word about the rest. */
+static EXT_RAM_BSS_ATTR uint8_t s_resp[SE_RESP_MAX_BYTES + 1];
+static EXT_RAM_BSS_ATTR char s_resp_hex[3 * SE_RESP_MAX_BYTES + 1];
+
+static void push_resp_hex(bvm *vm, size_t n)
+{
+    uds_bytes_to_hex(s_resp, n < SE_RESP_MAX_BYTES ? n : SE_RESP_MAX_BYTES,
+                     s_resp_hex, sizeof(s_resp_hex));
+    be_pushstring(vm, s_resp_hex); /* Berry copies the string */
+}
+
 /* ---- bindings -------------------------------------------------------------- */
 
 static int b_log(bvm *vm)
@@ -182,13 +197,12 @@ static int uds_common(bvm *vm, bool ext)
         be_raise(vm, "uds_error", "bad hex request");
     }
 
-    static EXT_RAM_BSS_ATTR uint8_t respb[512]; /* serialized; PSRAM */
     size_t respn = 0;
     uds_result_t res;
 
     se_bus_hold(); /* exclusive setting: autopid off the bus, now */
 
-    esp_err_t err = uds_request(&addr, reqb, reqn, respb, sizeof(respb),
+    esp_err_t err = uds_request(&addr, reqb, reqn, s_resp, sizeof(s_resp),
                                 &respn, NULL, &res);
 
     /* expose outcome as globals the script can read */
@@ -205,9 +219,7 @@ static int uds_common(bvm *vm, bool ext)
         be_return(vm);
     }
 
-    char hex[3 * 128 + 1];
-    uds_bytes_to_hex(respb, respn < 128 ? respn : 128, hex, sizeof(hex));
-    be_pushstring(vm, hex);
+    push_resp_hex(vm, respn);
     be_return(vm);
 }
 
@@ -547,11 +559,10 @@ static int b_obd_request(bvm *vm)
     uint32_t timeout = (be_top(vm) >= 2 && be_isint(vm, 2))
                            ? (uint32_t)be_toint(vm, 2) : 0;
 
-    static EXT_RAM_BSS_ATTR uint8_t respb[512]; /* serialized; PSRAM */
     size_t respn = 0;
     se_obd_outcome_t out;
 
-    int r = se_obd_request(reqb, reqn, timeout, respb, sizeof(respb),
+    int r = se_obd_request(reqb, reqn, timeout, s_resp, sizeof(s_resp),
                            &respn, &out);
 
     if (r == SE_OBD_ERR_NOCLAIM)
@@ -568,9 +579,7 @@ static int b_obd_request(bvm *vm)
         be_return(vm);
     }
 
-    char hex[3 * 128 + 1];
-    uds_bytes_to_hex(respb, respn < 128 ? respn : 128, hex, sizeof(hex));
-    be_pushstring(vm, hex);
+    push_resp_hex(vm, respn);
     be_return(vm);
 }
 
@@ -615,10 +624,9 @@ static int b_obd_isotp_rx(bvm *vm)
     uint32_t timeout = (be_top(vm) >= 1 && be_isint(vm, 1))
                            ? (uint32_t)be_toint(vm, 1) : 500;
 
-    static EXT_RAM_BSS_ATTR uint8_t buf[512]; /* serialized; PSRAM */
     size_t got = 0;
 
-    int r = se_obd_isotp_rx(buf, sizeof(buf), &got, timeout);
+    int r = se_obd_isotp_rx(s_resp, sizeof(s_resp), &got, timeout);
 
     if (r == SE_OBD_ERR_NOCLAIM)
     {
@@ -631,9 +639,7 @@ static int b_obd_isotp_rx(bvm *vm)
         be_return(vm);
     }
 
-    char hex[3 * 128 + 1];
-    uds_bytes_to_hex(buf, got < 128 ? got : 128, hex, sizeof(hex));
-    be_pushstring(vm, hex);
+    push_resp_hex(vm, got);
     be_return(vm);
 }
 

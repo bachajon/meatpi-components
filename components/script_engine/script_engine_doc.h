@@ -47,7 +47,10 @@
 #define SE_SCRIPT_FILE_MAX  (64 * 1024)   /* a stored /data/scripts file     */
 #define SE_SLEEP_MAX_MS     60000         /* one sleep_ms() call             */
 #define SE_NAME_MAX         40            /* script file name (with .be)     */
-#define SE_RESP_MAX_BYTES   128           /* response hex is cut after this  */
+#define SE_RESP_MAX_BYTES   4095          /* an ECU's answer as hex: all of
+                                             the largest ISO-TP message (128
+                                             until 2026-11-26, the rest was
+                                             dropped without a message)      */
 
 /** One device binding as the reference describes it. */
 typedef struct

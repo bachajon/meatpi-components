@@ -93,6 +93,11 @@ void test_doc_reference_json_shape(void)
     TEST_ASSERT_EQUAL(SE_SRC_MAX, cJSON_GetObjectItem(lim, "src_max")->valueint);
     TEST_ASSERT_EQUAL(SE_OUT_MAX, cJSON_GetObjectItem(lim, "out_max")->valueint);
     TEST_ASSERT_EQUAL(12345, cJSON_GetObjectItem(lim, "max_runtime_ms")->valueint);
+    /* an ECU's answer reaches the script whole: the largest ISO-TP message
+       (128 bytes until 2026-11-26, the rest dropped without a message) */
+    TEST_ASSERT_EQUAL(4095, SE_RESP_MAX_BYTES);
+    TEST_ASSERT_EQUAL(SE_RESP_MAX_BYTES,
+                      cJSON_GetObjectItem(lim, "resp_max_bytes")->valueint);
 
     TEST_ASSERT_EQUAL((int)se_bind_doc_count(),
                       cJSON_GetArraySize(cJSON_GetObjectItem(o, "bindings")));

@@ -29,7 +29,7 @@
  * Events carry OUTCOMES, not blobs (SCRIPTING.md §2): the response hex
  * is truncated to the event kv string limit (~23 bytes of payload).
  * Rules that need full payloads run a script (`script.run`: the uds()
- * binding returns up to 128 bytes into script memory). The action
+ * binding returns the whole answer into script memory). The action
  * blocks the dispatcher for the transaction (bounded by the p2, p2star
  * and max-pending caps, same contract as `http.post`).
  */
