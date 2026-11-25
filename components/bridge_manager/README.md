@@ -96,6 +96,20 @@ one translator component. No combinatorial code.
   the asking bridge subscribed with, so an endpoint that fans out reports
   that bridge's share. The hook is called from the web server's task: it
   reads counters and nothing else.
+- **Who is at the far end (`peers`, `send_from`, `far_gone`, 2026-11-25,
+  GitHub issue #1078)**: three more optional members. `int (*peers)(void)`:
+  how many peers the endpoint has now (a TCP server's clients, a WebSocket
+  channel's, a Bluetooth central), for an endpoint that can count them.
+  `send_from(from, data, len)`: `send()` for an endpoint that wants to know
+  where its bytes come from; a raw bridge calls it when it is set, with the
+  far endpoint's descriptor address as `from` (an identity, nothing to read
+  through). `far_gone(from)`: the far endpoint had peers and has none left.
+  Each pump looks about ten times a second (`bridge_manager_peers.c`, pure,
+  host-tested) and tells an end once per time the other empties; an end
+  that cannot count is never reported. The `obd` jack uses all of it: an
+  app that went away in the middle of its monitor kept the poller off the
+  OBD chip until a cap of two minutes. A translated bridge calls `send()`:
+  no codec sits on the chip's jack.
 
 ## Settings (`"bridge_manager"`, version 2)
 
@@ -165,7 +179,11 @@ the providers' `_start()` (their subscribe/send must be live).
 
 ## Tests
 
-- **Host (`host_test/`, 15 tests)**: config parse defaults + validation
+- **Host (`host_test/`, 27 tests)**: the peers at the far end
+  (`test_peers.c`, 4 cases, 2026-11-25: the source named for an endpoint
+  that asks and `send()` for one that does not, an end that empties
+  reported once, a bridge written either way round, an end that cannot
+  count never reported); config parse defaults + validation
   (an unregistered endpoint accepted at runtime but still single-stream
   for the rule, unknown translator refused, `raw` always known, a==b,
   single-consumer rule incl. the disabled-bridge exemption, duplicate

@@ -338,6 +338,16 @@ static esp_err_t flt_window(uint32_t frame_id, bool extended,
             {
                 obd_chunk_t c;
 
+                /* an app has come for the chip (2026-11-25, GitHub issue
+                   #1078): its bytes wait for the end of the poller's pass,
+                   so the poller's own window ends here and not at its
+                   listen time. A test's window is the user's own call */
+                if (tr == NULL && ap_be()->client_idle_ms != NULL &&
+                    ap_sched_client_hold(ap_be()->client_idle_ms()))
+                {
+                    break;
+                }
+
                 if (xQueueReceive(s_q, &c, pdMS_TO_TICKS(50)) != pdTRUE)
                 {
                     continue;

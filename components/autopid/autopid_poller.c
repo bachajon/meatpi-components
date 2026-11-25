@@ -93,6 +93,21 @@ static int64_t s_last_ok_us; /* last successful ECU poll (0 = never) */
    sent the baseline into the test's request). */
 static bool s_bus_out;
 
+/* This pass has the chip's turn (ap_transport_t.turn_begin, 2026-11-25): an
+   app's bytes wait until it is given back. Poller-task only. */
+static bool s_turn;
+
+/** The turn back, before the poller waits for anything and when a pass is
+ *  over: an app must never wait for a poller that is not on the chip. */
+static void turn_off(void)
+{
+    if (s_turn)
+    {
+        ap_be()->turn_end();
+        s_turn = false;
+    }
+}
+
 /* ---- the poller task --------------------------------------------------------------- */
 
 static void poller_task(void *arg)
@@ -130,8 +145,25 @@ static void poller_task(void *arg)
          * our commands would STOP its requests (bench 2026-09-08). Legacy
          * parity: off the chip until the app has been silent
          * AP_CLIENT_YIELD_MS. */
-        bool client = (ap_be()->client_idle_ms != NULL) &&
-                      ap_sched_client_hold(ap_be()->client_idle_ms());
+        bool client;
+
+        turn_off(); /* the pass before this one is over */
+
+        if (ap_be()->turn_begin != NULL)
+        {
+            /* the turn and the app's clock under one lock (2026-11-25,
+               GitHub issue #1078): an app that writes from here on waits
+               for the end of this pass, and one that wrote before is seen.
+               Until then its first command landed in the row on the wire:
+               STOPPED, and the command was lost */
+            s_turn = ap_be()->turn_begin(AP_CLIENT_YIELD_MS);
+            client = !s_turn;
+        }
+        else
+        {
+            client = (ap_be()->client_idle_ms != NULL) &&
+                     ap_sched_client_hold(ap_be()->client_idle_ms());
+        }
 
         if (client != s_paused_client)
         {
@@ -288,6 +320,7 @@ static void poller_task(void *arg)
         {
             stats->running = false;
             dev_status_manager_set(DEV_STATUS_BIT_AUTOPID_IDLE);
+            turn_off();
             ulTaskNotifyTake(pdTRUE, AP_IDLE_WAIT);
             continue;
         }
@@ -376,6 +409,7 @@ static void poller_task(void *arg)
         {
             stats->running = false;
             dev_status_manager_set(DEV_STATUS_BIT_AUTOPID_IDLE);
+            turn_off();
             ulTaskNotifyTake(pdTRUE, AP_IDLE_WAIT);
             continue;
         }
@@ -399,6 +433,7 @@ static void poller_task(void *arg)
             }
 
             dev_status_manager_set(DEV_STATUS_BIT_AUTOPID_IDLE);
+            turn_off();
             ulTaskNotifyTake(pdTRUE,
                              (ticks > AP_IDLE_WAIT) ? AP_IDLE_WAIT : ticks);
             continue; /* re-evaluate: config/groups may have changed */

@@ -27,6 +27,21 @@ the counters that stood in a log line or nowhere until then:
 | `can` | `tx_drops`, `tx_refused`, `tx_malformed` | frames that found the jack's TX queue full; frames the controller did not take (a bus that took nothing for 100 ms, a bus-off); chunks that were not whole frames |
 | `usb_obd` | `rx_overruns` | times the UART lost bytes from the PC: its FIFO or the driver's ring ran over |
 
+**Who is connected (2026-11-25, GitHub issue #1078).** The jacks that can
+count their peers give bridge_manager's `peers` hook, and the `obd` jack
+takes `send_from` and `far_gone`: it passes the far endpoint on to
+`obd_chip_client_write()` with every app's bytes and reports the one that
+has nobody left to `obd_chip_client_gone()`. Its subscription is an app's
+(`obd_chip_subscribe_app()`): the chip's answers to the firmware's own
+requests are not handed to a bridge.
+
+| Jack | `peers` |
+|---|---|
+| socket servers | the server's connected clients (a UDP server reads 1 from its first datagram on and never 0 again) |
+| WS channels | the channel's connected clients |
+| `ble` | 1 while a central is connected |
+| `usb_obd`, `cli`, `can`, `obd` | none: a UART and the device's own ends cannot tell |
+
 The `usb_obd` reader (2026-11-18) waits for the UART driver's events and
 reads what the driver holds. It used to ask for 128 bytes with a 20 ms
 limit, which the driver waits out in full behind every arrival: a command

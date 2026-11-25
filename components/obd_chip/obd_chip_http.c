@@ -162,18 +162,32 @@ static esp_err_t obd_chip_get_handler(httpd_req_t *req)
                           st.wake_ready ? "true" : "false",
                           st.wake_pulsed ? "true" : "false");
 
-    for (size_t i = 0; i < n_subs && n < sizeof(body) - 96; i++)
+    for (size_t i = 0; i < n_subs && n < sizeof(body) - 256; i++)
     {
         n += (size_t)snprintf(body + n, sizeof(body) - n,
                               "%s{\"idx\":%u,\"name\":\"%s\",\"dropped\":%lu,"
-                              "\"queued\":%lu,\"depth\":%lu}",
+                              "\"queued\":%lu,\"depth\":%lu,\"app\":%s,"
+                              "\"withheld\":%lu}",
                               (i > 0) ? "," : "", (unsigned)i, subs[i].name,
                               (unsigned long)subs[i].dropped,
                               (unsigned long)subs[i].queued,
-                              (unsigned long)subs[i].depth);
+                              (unsigned long)subs[i].depth,
+                              subs[i].app ? "true" : "false",
+                              (unsigned long)subs[i].withheld);
     }
 
-    n += (size_t)snprintf(body + n, sizeof(body) - n, "]}");
+    /* an app beside the poller (2026-11-25, GitHub issue #1078) */
+    obd_chip_client_stats_t cl = { 0 };
+
+    obd_chip_client_get_stats(&cl);
+    n += (size_t)snprintf(body + n, sizeof(body) - n,
+                          "],\"client\":{\"turn_waits\":%lu,"
+                          "\"turn_wait_max_ms\":%lu,\"turn_forced\":%lu,"
+                          "\"gone\":%lu}}",
+                          (unsigned long)cl.turn_waits,
+                          (unsigned long)cl.turn_wait_max_ms,
+                          (unsigned long)cl.turn_forced,
+                          (unsigned long)cl.gone);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body, (ssize_t)n);

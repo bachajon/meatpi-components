@@ -84,20 +84,40 @@ int bep_losses_rx_tx(bridge_loss_t *out, int cap, uint32_t rx_drops,
 
 /* ---- obd_chip ---------------------------------------------------------------- */
 
-static esp_err_t obd_ep_send(const uint8_t *d, size_t l)
+/** @p from = the endpoint the bytes come from (the bridge's other end),
+ *  NULL when the bridge did not say (a translated one). */
+static esp_err_t obd_ep_send_from(const void *from, const uint8_t *d,
+                                  size_t l)
 {
     /* every byte from a bridged app (TCP/BLE/USB/WS) counts as client
        activity: autopid yields the chip while the app drives it (legacy
-       DEV_AUTOPID_ELM327_APP_BIT parity, see obd_chip.h), and since
+       DEV_AUTOPID_ELM327_APP_BIT parity, see obd_chip_client.h), and since
        2026-11-21 a monitor the app opened counts until it ends (GitHub
-       issue #1078: an ATMA was cut ten seconds in) */
-    obd_chip_client_write(d, l);
+       issue #1078: an ATMA was cut ten seconds in). Since 2026-11-25 the
+       call also waits until the poller's pass on the chip has ended: the
+       app's first command landed in it and was lost */
+    obd_chip_client_write(from, d, l);
     return obd_chip_send(d, l);
 }
 
+static esp_err_t obd_ep_send(const uint8_t *d, size_t l)
+{
+    return obd_ep_send_from(NULL, d, l);
+}
+
+/* the endpoint at the other end of a bridge has no peer left (2026-11-25):
+   when it is the one that wrote to the chip last, its monitor's hold is
+   over */
+static void obd_ep_far_gone(const void *from)
+{
+    obd_chip_client_gone(from);
+}
+
+/* an app's seat on the chip (2026-11-25): what the chip answers to the
+   firmware's own requests is not handed to it */
 static esp_err_t obd_ep_subscribe(QueueHandle_t q)
 {
-    return obd_chip_subscribe(q, "bridge");
+    return obd_chip_subscribe_app(q, "bridge");
 }
 
 static esp_err_t obd_ep_unsubscribe(QueueHandle_t q)
@@ -133,6 +153,11 @@ static esp_err_t ble_ep_subscribe(QueueHandle_t q)
 static esp_err_t ble_ep_unsubscribe(QueueHandle_t q)
 {
     return ble_manager_unsubscribe(q);
+}
+
+static int ble_ep_peers(void)
+{
+    return ble_manager_is_connected() ? 1 : 0;
 }
 
 static int ble_ep_losses(QueueHandle_t q, bridge_loss_t *out, int cap)
@@ -205,6 +230,13 @@ static char s_ws_names[WEBSOCKET_MANAGER_MAX_CHANNELS][16];
         (void)q;                                                      \
         (void)socket_manager_stats(s_sock_names[i], &st);             \
         return bep_losses_rx_tx(out, cap, st.rx_drops, st.tx_drops);  \
+    }                                                                 \
+    static int sock##i##_peers(void)                                  \
+    {                                                                  \
+        socket_stats_t st = { 0 };                                    \
+                                                                      \
+        (void)socket_manager_stats(s_sock_names[i], &st);             \
+        return st.clients;                                            \
     }
 
 SOCK_EP(0)
@@ -234,6 +266,13 @@ SOCK_EP(3)
         (void)q;                                                      \
         (void)websocket_manager_stats(s_ws_names[i], &st);            \
         return bep_losses_rx_tx(out, cap, st.rx_drops, st.tx_drops);  \
+    }                                                                 \
+    static int ws##i##_peers(void)                                    \
+    {                                                                  \
+        websocket_stats_t st = { 0 };                                 \
+                                                                      \
+        (void)websocket_manager_stats(s_ws_names[i], &st);            \
+        return st.clients;                                            \
     }
 
 WS_EP(0)
@@ -247,23 +286,29 @@ WS_EP(5)
 static const bridge_endpoint_t SOCK_EPS[SOCKET_MANAGER_MAX_SERVERS] =
 {
     { s_sock_names[0], sock0_send, sock0_sub, sock0_unsub,
-      .losses = sock0_losses },
+      .losses = sock0_losses, .peers = sock0_peers },
     { s_sock_names[1], sock1_send, sock1_sub, sock1_unsub,
-      .losses = sock1_losses },
+      .losses = sock1_losses, .peers = sock1_peers },
     { s_sock_names[2], sock2_send, sock2_sub, sock2_unsub,
-      .losses = sock2_losses },
+      .losses = sock2_losses, .peers = sock2_peers },
     { s_sock_names[3], sock3_send, sock3_sub, sock3_unsub,
-      .losses = sock3_losses },
+      .losses = sock3_losses, .peers = sock3_peers },
 };
 
 static const bridge_endpoint_t WS_EPS[WEBSOCKET_MANAGER_MAX_CHANNELS] =
 {
-    { s_ws_names[0], ws0_send, ws0_sub, ws0_unsub, .losses = ws0_losses },
-    { s_ws_names[1], ws1_send, ws1_sub, ws1_unsub, .losses = ws1_losses },
-    { s_ws_names[2], ws2_send, ws2_sub, ws2_unsub, .losses = ws2_losses },
-    { s_ws_names[3], ws3_send, ws3_sub, ws3_unsub, .losses = ws3_losses },
-    { s_ws_names[4], ws4_send, ws4_sub, ws4_unsub, .losses = ws4_losses },
-    { s_ws_names[5], ws5_send, ws5_sub, ws5_unsub, .losses = ws5_losses },
+    { s_ws_names[0], ws0_send, ws0_sub, ws0_unsub, .losses = ws0_losses,
+      .peers = ws0_peers },
+    { s_ws_names[1], ws1_send, ws1_sub, ws1_unsub, .losses = ws1_losses,
+      .peers = ws1_peers },
+    { s_ws_names[2], ws2_send, ws2_sub, ws2_unsub, .losses = ws2_losses,
+      .peers = ws2_peers },
+    { s_ws_names[3], ws3_send, ws3_sub, ws3_unsub, .losses = ws3_losses,
+      .peers = ws3_peers },
+    { s_ws_names[4], ws4_send, ws4_sub, ws4_unsub, .losses = ws4_losses,
+      .peers = ws4_peers },
+    { s_ws_names[5], ws5_send, ws5_sub, ws5_unsub, .losses = ws5_losses,
+      .peers = ws5_peers },
 };
 
 /* ---- lifecycle ------------------------------------------------------------------ */
@@ -281,9 +326,10 @@ esp_err_t bridge_endpoints_init(void)
            (each gets a full copy) and serializes TX, the single-consumer
            rule doesn't apply, so TCP + USB passthrough can both be live */
         { "obd", obd_ep_send, obd_ep_subscribe, obd_ep_unsubscribe,
-          .multi_consumer = true, .losses = obd_ep_losses },
+          .multi_consumer = true, .losses = obd_ep_losses,
+          .send_from = obd_ep_send_from, .far_gone = obd_ep_far_gone },
         { "ble", ble_ep_send, ble_ep_subscribe, ble_ep_unsubscribe,
-          .losses = ble_ep_losses },
+          .losses = ble_ep_losses, .peers = ble_ep_peers },
         /* multi_consumer since 2026-07-26: the can pump fans RX chunks
            out to every subscribed bridge (slcan + mqtt_can together);
            TX serializes through can_manager_send. ONE jack-wide ingress

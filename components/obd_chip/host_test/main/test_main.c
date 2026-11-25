@@ -73,6 +73,15 @@ void test_client_monitor_ends_at_the_apps_next_byte(void);
 void test_client_monitor_ends_at_the_prompt(void);
 void test_client_monitor_words(void);
 void test_client_bare_cr_repeats_the_last_line(void);
+/* test_client_turn.c: how the chip changes hands (2026-11-25, the same
+   issue): the connection that has gone, the poller's turn, the mute */
+void test_client_gone_ends_the_monitor_of_the_one_that_wrote_last(void);
+void test_client_gone_of_another_connection_changes_nothing(void);
+void test_client_gone_without_a_monitor(void);
+void test_client_turn_is_refused_while_an_app_drives_the_chip(void);
+void test_client_a_write_during_a_turn_sees_it_and_keeps_the_next_one_off(void);
+void test_client_mute_keeps_the_firmwares_answers_from_an_app(void);
+void test_client_mute_not_while_an_apps_own_command_is_under_way(void);
 void test_fault_a_silent_chip_is_latched_however_it_ended(void);
 void test_fault_codes_and_details_fit_the_fault_store(void);
 void test_vtvers_a_damaged_store_is_not_a_chip_to_recover(void);
@@ -150,6 +159,13 @@ void app_main(void)
     RUN_TEST(test_client_monitor_ends_at_the_prompt);
     RUN_TEST(test_client_monitor_words);
     RUN_TEST(test_client_bare_cr_repeats_the_last_line);
+    RUN_TEST(test_client_gone_ends_the_monitor_of_the_one_that_wrote_last);
+    RUN_TEST(test_client_gone_of_another_connection_changes_nothing);
+    RUN_TEST(test_client_gone_without_a_monitor);
+    RUN_TEST(test_client_turn_is_refused_while_an_app_drives_the_chip);
+    RUN_TEST(test_client_a_write_during_a_turn_sees_it_and_keeps_the_next_one_off);
+    RUN_TEST(test_client_mute_keeps_the_firmwares_answers_from_an_app);
+    RUN_TEST(test_client_mute_not_while_an_apps_own_command_is_under_way);
     RUN_TEST(test_fault_a_silent_chip_is_latched_however_it_ended);
     RUN_TEST(test_fault_codes_and_details_fit_the_fault_store);
     RUN_TEST(test_vtvers_a_damaged_store_is_not_a_chip_to_recover);

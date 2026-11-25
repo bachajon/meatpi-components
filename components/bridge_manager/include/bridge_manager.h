@@ -125,6 +125,24 @@ typedef struct
      *  from any task (the web server's): plain reads of counters, no lock
      *  held for long, no I/O. */
     int (*losses)(QueueHandle_t q, bridge_loss_t *out, int cap);
+    /** OPTIONAL (2026-11-25, GitHub issue #1078). How many peers the
+     *  endpoint has right now: a TCP server's clients, a WebSocket
+     *  channel's, a Bluetooth central. 0 = nobody is connected. NULL = the
+     *  endpoint cannot tell (a UART, a UDP port, the chip itself). Asked
+     *  by a pump task about ten times a second: a plain read. */
+    int (*peers)(void);
+    /** OPTIONAL (2026-11-25). send() for an endpoint that wants to know
+     *  where its bytes come from: @p from is the endpoint at the other end
+     *  of the bridge, named by the address of its descriptor (an identity,
+     *  nothing to read through). A raw bridge calls it in place of send()
+     *  when it is set; a translated bridge calls send(). */
+    esp_err_t (*send_from)(const void *from, const uint8_t *data, size_t len);
+    /** OPTIONAL (2026-11-25). The endpoint @p from, at the other end of a
+     *  bridge, had peers and has none left: whoever wrote through that
+     *  bridge is gone. Told once per time it empties, from a pump task.
+     *  (The `obd` jack: an app that went away in the middle of its monitor
+     *  held the OBD chip until a cap of two minutes.) */
+    void (*far_gone)(const void *from);
 } bridge_endpoint_t;
 
 /**

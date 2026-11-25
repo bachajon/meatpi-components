@@ -34,6 +34,7 @@
 
 #include "esp_err.h"
 #include "obd_chip_guard.h" /* obd_guard_t for the guard accounting hook */
+#include "obd_chip_client_private.h" /* the app client's core (2026-11-25) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -406,18 +407,8 @@ typedef struct
 
 void obd_pin_get_stats(obd_pin_stats_t *out);
 
-/* ---- obd_chip_client.c: a bridged app's hold on the chip ------------------- */
-
-/* (2026-11-21, GitHub issue #1078) the activity clock behind
-   obd_chip_client_touch() / _write() / _idle_ms(), with the clock passed
-   in: an app's monitor counts as activity until it ends. */
-void     obd_client_touch(int64_t now_us);
-void     obd_client_write(const uint8_t *data, size_t len, int64_t now_us);
-void     obd_client_rx(const uint8_t *data, size_t len); /* every RX chunk */
-uint32_t obd_client_idle_ms(int64_t now_us);
-#ifdef OBD_CHIP_HOST_TEST
-void     obd_client_test_reset(void);
-#endif
+/* obd_chip_client.c (a bridged app beside the firmware's requesters):
+   obd_chip_client_private.h, included above (its own file since 2026-11-25) */
 
 /* ---- core bridges ------------------------------------------------------------ */
 

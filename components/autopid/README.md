@@ -36,7 +36,17 @@ Decisions log there is authoritative; the big ones:
   with the same sentence (`AP_CLIENT_BUSY_TEXT`); the test route since
   2026-11-24 (`ap_sched_test_refusal()`: a filter test on the car went
   through an app's hold and stopped its `ATMA`), a J1939 group's test,
-  which reads the listener's store, goes on. Visible
+  which reads the listener's store, goes on. Since 2026-11-25 the poller
+  takes a turn on the chip for every pass (the transport's `turn_begin` /
+  `turn_end`, `obd_chip_turn_begin()`): the answer is the pause decision
+  (false = an app drives the chip), and while a pass has the turn an app's
+  bytes wait for its end, so the first command of an app no longer lands
+  in the row on the wire (25 of 25 lost on the bench: `STOPPED`, the app's
+  own reset included). The turn is given back before every wait of the
+  loop; the poller's own filter window ends when an app comes
+  (`autopid_filter.c`). The chip jobs that are no pass of the poller (a
+  test, a send, a scan) take no turn. obd_chip/README.md, "An app and the
+  poller". Visible
   as `stats.paused_client` in `/api/autopid`, `(yielding to an OBD app)`;
   likewise `stats.paused_diag` / `(paused for a diagnostic tool)` while the
   UDS Tool or J2534 holds the bus through their Exclusive bus option

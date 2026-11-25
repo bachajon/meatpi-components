@@ -12,6 +12,7 @@ idf_component_register(
          "test_kline.c"
          "test_settle.c"
          "test_client.c"
+         "test_client_turn.c"
          "${comp_dir}/obd_chip_cmd.c"
          "${comp_dir}/obd_chip_claim.c"
          "${comp_dir}/obd_chip_fanout.c"

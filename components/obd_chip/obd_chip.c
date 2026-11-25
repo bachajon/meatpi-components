@@ -191,9 +191,71 @@ void obd_chip_client_touch(void)
     obd_client_touch(esp_timer_get_time());
 }
 
-void obd_chip_client_write(const uint8_t *data, size_t len)
+void obd_chip_client_write(const void *who, const uint8_t *data, size_t len)
 {
-    obd_client_write(data, len, esp_timer_get_time());
+    int64_t t0 = esp_timer_get_time();
+
+    obd_client_write_from(who, data, len, t0);
+
+    if (!obd_client_turn())
+    {
+        obd_client_sent(data, len); /* the chip is free, or the app's already */
+        return;
+    }
+
+    /* the poller's pass is on the chip (2026-11-25, GitHub issue #1078): a
+       byte now would stop its request and be lost with it (STOPPED). The
+       stamp above keeps the poller from its next pass; wait for this one */
+    bool forced = false;
+
+    while (obd_client_turn())
+    {
+        if (esp_timer_get_time() - t0 >
+                (int64_t)OBD_CLIENT_TURN_WAIT_MS * 1000)
+        {
+            forced = true;
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    obd_client_turn_waited((uint32_t)((esp_timer_get_time() - t0) / 1000),
+                           forced);
+    obd_client_sent(data, len); /* the caller writes them now */
+
+    if (forced)
+    {
+        ESP_LOGW(TAG, "an app's bytes went out under the poller's turn (it "
+                      "did not end in %d ms)", OBD_CLIENT_TURN_WAIT_MS);
+    }
+}
+
+void obd_chip_client_gone(const void *who)
+{
+    if (obd_client_gone(who))
+    {
+        ESP_LOGI(TAG, "the app that opened a monitor has gone: its hold on "
+                      "the chip is over");
+    }
+}
+
+bool obd_chip_turn_begin(uint32_t yield_ms)
+{
+    return obd_client_turn_begin(esp_timer_get_time(), yield_ms);
+}
+
+void obd_chip_turn_end(void)
+{
+    obd_client_turn_end();
+}
+
+void obd_chip_client_get_stats(obd_chip_client_stats_t *out)
+{
+    if (out != NULL)
+    {
+        obd_client_get_stats(out);
+    }
 }
 
 uint32_t obd_chip_client_idle_ms(void)
