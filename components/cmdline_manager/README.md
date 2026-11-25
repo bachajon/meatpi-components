@@ -79,9 +79,22 @@ only. One command at a time device-wide (a mutex serializes every
 transport). Transport responses end with the legacy `wican> ` prompt;
 on UART linenoise draws it.
 
-Command handlers print with `cmdline_printf()` (formatted, ≤256 bytes
-per call) or `cmdline_write()` (raw, any length: scan JSON, task
-lists).
+**Every word of a line reaches its handler.** esp_console keeps one word
+less than the size of its argument vector and drops the rest of the line
+without a message. The vector is sized from the line (`CM_ARGS_MAX` = 129: a
+line of 255 characters holds 128 words at most), so no line that fits can
+lose one. Until 2026-11-26 the size was 12: a command saw its first 11 words
+only, and `uds -t 7E0 -r 7E8 23 14 00 00 00 00 C8` sent the ECU a request
+without its last byte.
+
+Command handlers print with `cmdline_printf()` (formatted) or
+`cmdline_write()` (raw bytes the handler already holds: scan JSON, task
+lists, a long answer in pieces). Both write the whole text whatever its
+length: `cmdline_printf()` formats up to 255 characters on the stack and a
+longer text into a PSRAM block sized for it (`cm_vprint()`, pure and
+host-tested; with no memory to be had it writes the first 255 characters).
+Until 2026-11-26 a longer text was cut at 255 characters without a message
+(the `uds` command's answer line ended after the 84th byte).
 
 **What the dispatcher itself prints**, before the prompt and the same on
 every transport (the command's own output comes first): nothing when
@@ -128,8 +141,8 @@ the `cli` jack.
 
 - `cmdline_manager.c`: lifecycle, registry + `help`, dispatcher, sink routing, endpoint trio
 - `cmdline_manager_console.c`: the UART0 linenoise console
-- `cmdline_manager_line.c`: PURE pieces, host-tested: the byte-stream→line assembler and the dispatcher's verdict line
-- `host_test/`: assembler + verdict tests (13; runs on the IDF `linux` target)
+- `cmdline_manager_line.c`: PURE pieces, host-tested: the byte-stream→line assembler, the dispatcher's verdict line and the formatter behind `cmdline_printf` (`cm_vprint`)
+- `host_test/`: assembler, verdict, formatter and argument vector tests (18; runs on the IDF `linux` target)
 
 ## Memory (§2/§12)
 

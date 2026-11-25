@@ -5,8 +5,14 @@
  *        lines, CRLF, batches, oversize floods, must come out as clean
  *        lines) and the dispatcher's verdict line (what a client is owed
  *        after a command; issue #980: a console failure must not be
- *        silent). Expected: 13 Tests 0 Failures 0 Ignored.
+ *        silent), the formatter behind cmdline_printf (a text of any
+ *        length is written whole) and the argument vector's size (no
+ *        line that fits the assembler loses a word).
+ *        Expected: 18 Tests 0 Failures 0 Ignored.
  */
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "unity.h"
@@ -200,6 +206,157 @@ static void test_verdict_truncates_to_the_buffer(void)
     TEST_ASSERT_EQUAL_STRING("Unknown", small);
 }
 
+/* ---- the formatter behind cmdline_printf ----------------------------------------- */
+
+static char s_printed[16384]; /* what the console's output received */
+static size_t s_printed_len;
+static int s_writes;
+static int s_allocs;
+static int s_releases;
+static bool s_no_memory;
+
+static void port_write(const char *data, size_t len)
+{
+    s_writes++;
+
+    if (s_printed_len + len < sizeof(s_printed))
+    {
+        memcpy(s_printed + s_printed_len, data, len);
+        s_printed_len += len;
+        s_printed[s_printed_len] = '\0';
+    }
+}
+
+static void *port_alloc(size_t size)
+{
+    s_allocs++;
+    return s_no_memory ? NULL : malloc(size);
+}
+
+static void port_release(void *block)
+{
+    s_releases++;
+    free(block);
+}
+
+static const cm_print_port_t PORT =
+{
+    .write   = port_write,
+    .alloc   = port_alloc,
+    .release = port_release,
+};
+
+static size_t print(const char *fmt, ...)
+{
+    char small[256]; /* cmdline_printf's stack buffer */
+    va_list args;
+
+    s_printed_len = 0;
+    s_printed[0] = '\0';
+    s_writes = 0;
+    s_allocs = 0;
+    s_releases = 0;
+
+    va_start(args, fmt);
+    size_t n = cm_vprint(&PORT, small, sizeof(small), fmt, args);
+    va_end(args);
+    return n;
+}
+
+/** "00 01 02 .." for @p count bytes, as the uds command prints an answer. */
+static const char *hex_run(size_t count)
+{
+    static char hex[3 * 4096 + 1];
+    size_t o = 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        o += (size_t)snprintf(hex + o, sizeof(hex) - o, "%s%02X",
+                              i ? " " : "", (unsigned)(i & 0xFF));
+    }
+
+    return hex;
+}
+
+static void test_print_short_text_needs_no_block(void)
+{
+    s_no_memory = false;
+
+    TEST_ASSERT_EQUAL_INT(12, (int)print("uptime %d s\n", 42));
+    TEST_ASSERT_EQUAL_STRING("uptime 42 s\n", s_printed);
+    TEST_ASSERT_EQUAL_INT(1, s_writes);
+    TEST_ASSERT_EQUAL_INT(0, s_allocs);
+}
+
+static void test_print_the_longest_text_of_the_small_buffer(void)
+{
+    /* 255 characters fit a 256-byte buffer; the 256th needs the block */
+    static char text[257];
+
+    s_no_memory = false;
+    memset(text, 'a', 255);
+    text[255] = '\0';
+    TEST_ASSERT_EQUAL_INT(255, (int)print("%s", text));
+    TEST_ASSERT_EQUAL_INT(0, s_allocs);
+    TEST_ASSERT_EQUAL_INT(255, (int)s_printed_len);
+
+    text[255] = 'b';
+    text[256] = '\0';
+    TEST_ASSERT_EQUAL_INT(256, (int)print("%s", text));
+    TEST_ASSERT_EQUAL_INT(1, s_allocs);
+    TEST_ASSERT_EQUAL_INT(1, s_releases);
+    TEST_ASSERT_EQUAL_STRING(text, s_printed);
+}
+
+static void test_print_a_uds_answer_line_is_whole(void)
+{
+    /* the report of 2026-11-26: `uds` printed a 201-byte answer with one
+     * cmdline_printf, and the line ended after its 84th byte, without the
+     * transport and the time behind it */
+    const char *hex = hex_run(201);
+    size_t want = 3 + strlen(hex) + strlen("  [isotp, 57 ms");
+
+    s_no_memory = false;
+    TEST_ASSERT_EQUAL_INT((int)want,
+                          (int)print("<- %s  [%s, %lu ms", hex, "isotp", 57ul));
+    TEST_ASSERT_EQUAL_INT((int)want, (int)s_printed_len);
+    TEST_ASSERT_EQUAL_INT(1, s_writes);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(s_printed, " C7 C8  [isotp, 57 ms"),
+                                 "the end of the answer line is missing");
+    TEST_ASSERT_EQUAL_INT(1, s_releases);
+}
+
+static void test_print_without_memory_writes_what_fits(void)
+{
+    /* no block to be had: the head of the text, as before, never a crash */
+    const char *hex = hex_run(201);
+
+    s_no_memory = true;
+    TEST_ASSERT_EQUAL_INT(255, (int)print("<- %s", hex));
+    TEST_ASSERT_EQUAL_INT(255, (int)s_printed_len);
+    TEST_ASSERT_EQUAL_INT(0, s_releases);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(s_printed, "<- 00 01 02", 11));
+    s_no_memory = false;
+}
+
+/* ---- the argument vector ----------------------------------------------------------- */
+
+static void test_argument_vector_holds_every_word_of_a_line(void)
+{
+    /* the console keeps one word less than its vector's size and drops the
+     * rest without a message. The line with the most words that fits the
+     * assembler is "a a a .. a": 128 one-letter words in 255 characters. */
+    size_t longest = sizeof(s_asm.buf) - 1;
+    size_t most_words = (longest + 1) / 2;
+
+    TEST_ASSERT_EQUAL_INT(128, (int)most_words);
+    TEST_ASSERT_TRUE_MESSAGE((size_t)CM_ARGS_MAX - 1 >= most_words,
+                             "a line that fits would lose its last words");
+
+    /* a UDS request of the command's 64 bytes, each typed on its own */
+    TEST_ASSERT_TRUE((size_t)CM_ARGS_MAX - 1 >= 5 + 1 + 64);
+}
+
 void app_main(void)
 {
     UNITY_BEGIN();
@@ -216,5 +373,10 @@ void app_main(void)
     RUN_TEST(test_verdict_handler_failure_names_the_code);
     RUN_TEST(test_verdict_console_failure_is_printed);
     RUN_TEST(test_verdict_truncates_to_the_buffer);
+    RUN_TEST(test_print_short_text_needs_no_block);
+    RUN_TEST(test_print_the_longest_text_of_the_small_buffer);
+    RUN_TEST(test_print_a_uds_answer_line_is_whole);
+    RUN_TEST(test_print_without_memory_writes_what_fits);
+    RUN_TEST(test_argument_vector_holds_every_word_of_a_line);
     UNITY_END();
 }
