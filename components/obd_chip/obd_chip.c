@@ -53,12 +53,6 @@ const char obd_chip_gate_owner[1];
 /* the claim model (COMMAND / MONITOR / EXCLUSIVE, the transaction hold)
  * lives in obd_chip_claim.c since 2026-10-28 (700-line rule) */
 
-/* external-client activity clock (obd_chip_client_touch): the last time a
- * bridge (TCP/BLE/USB/WS app) wrote to the chip; 0 = never. Read by
- * autopid to yield the chip while an app drives it (legacy
- * DEV_AUTOPID_ELM327_APP_BIT parity, bench 2026-09-08). */
-static volatile int64_t s_client_touch_us;
-
 static bool s_inited;
 static bool s_started;
 static volatile uint32_t s_settings_gen; /* obd_chip_settings_generation() */
@@ -188,24 +182,23 @@ esp_err_t obd_chip_get_stats(obd_chip_stats_t *out)
 
 /* ---- external-client activity clock ------------------------------------------- */
 
+/* the last time a bridge (TCP/BLE/USB/WS app) wrote to the chip, read by
+   autopid to yield the chip while an app drives it (legacy
+   DEV_AUTOPID_ELM327_APP_BIT parity, bench 2026-09-08); since 2026-11-21
+   an app's monitor counts until it ends (obd_chip_client.c) */
 void obd_chip_client_touch(void)
 {
-    s_client_touch_us = esp_timer_get_time();
+    obd_client_touch(esp_timer_get_time());
+}
+
+void obd_chip_client_write(const uint8_t *data, size_t len)
+{
+    obd_client_write(data, len, esp_timer_get_time());
 }
 
 uint32_t obd_chip_client_idle_ms(void)
 {
-    int64_t t = s_client_touch_us;
-
-    if (t == 0)
-    {
-        return UINT32_MAX; /* never */
-    }
-
-    int64_t idle = (esp_timer_get_time() - t) / 1000;
-
-    return (idle < 0) ? 0 : (idle > UINT32_MAX) ? UINT32_MAX
-                                                : (uint32_t)idle;
+    return obd_client_idle_ms(esp_timer_get_time());
 }
 
 /* ---- chip management ------------------------------------------------------------- */

@@ -57,6 +57,9 @@ void run_send_tests(void);
 /* test_group_default.c: a group's state at boot and after a PUT, from
    "enabled" or "enabled_default" (issue #1058) */
 void run_group_default_tests(void);
+/* test_test_hold.c: the test route waits for an app's hold on the chip
+   (issue #1078), as the poller and can.send do */
+void run_test_hold_tests(void);
 
 /* ---- helpers ----------------------------------------------------------------- */
 
@@ -2162,6 +2165,7 @@ void app_main(void)
     run_filter_type_tests();
     run_send_tests();
     run_group_default_tests();
+    run_test_hold_tests();
 
     UNITY_END();
 }

@@ -11,6 +11,7 @@ idf_component_register(
          "test_claim.c"
          "test_kline.c"
          "test_settle.c"
+         "test_client.c"
          "${comp_dir}/obd_chip_cmd.c"
          "${comp_dir}/obd_chip_claim.c"
          "${comp_dir}/obd_chip_fanout.c"
@@ -20,6 +21,7 @@ idf_component_register(
          "${comp_dir}/obd_chip_fw_version.c"
          "${comp_dir}/obd_chip_stslcs.c"
          "${comp_dir}/obd_chip_settle.c"
+         "${comp_dir}/obd_chip_client.c"
          "${comp_dir}/obd_chip_fault.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}" "${comp_dir}/../obd_gate/include"
     REQUIRES unity esp_timer

@@ -46,6 +46,14 @@
 #include "autopid_bus.h"
 #include "autopid_private.h"
 #include "autopid_http_private.h"
+#include "autopid_transport.h"
+
+/** Milliseconds since an app last used the chip (UINT32_MAX = never). */
+static uint32_t client_idle_ms(void)
+{
+    return (ap_be()->client_idle_ms != NULL) ? ap_be()->client_idle_ms()
+                                             : UINT32_MAX;
+}
 
 /** The bytes of @p data as hex with spaces ("02 1E 0B"), cut at @p cap. */
 static void hex_line(const uint8_t *data, size_t n, char *out, size_t cap)
@@ -131,6 +139,15 @@ static esp_err_t test_filter(httpd_req_t *req, const cJSON *flt, char *tr,
         /* no parameter yet: the frame itself is the answer */
         s_want[0] = (ap_flt_want_t){ NULL, 0, true };
         slots = 1;
+    }
+
+    /* an app holds the chip (2026-11-24, GitHub issue #1078): a window
+       would STOP its monitor */
+    const char *held = ap_sched_test_refusal(client_idle_ms(), true);
+
+    if (held != NULL)
+    {
+        return ap_http_send_error(req, "409 Conflict", held);
     }
 
     char guard_reason[176];
@@ -409,6 +426,16 @@ esp_err_t test_post_handler(httpd_req_t *req)
                                   "a row on another bus cannot be a PGN row, "
                                   "and its init and cmd must not pick a "
                                   "protocol or reset the chip");
+    }
+
+    /* an app holds the chip (2026-11-24, GitHub issue #1078); a J1939
+       group's test reads the listener's store and goes on */
+    const char *held = ap_sched_test_refusal(client_idle_ms(), !is_pgn);
+
+    if (held != NULL)
+    {
+        cJSON_Delete(root);
+        return ap_http_send_error(req, "409 Conflict", held);
     }
 
     if (is_pgn)
