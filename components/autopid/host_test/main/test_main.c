@@ -54,6 +54,9 @@ void run_filter_type_tests(void);
 /* test_send.c: can.send (issue #1072): a request into frames, the refusals,
    the slot definitions with 29-bit ids and the wake mode, the chip's words */
 void run_send_tests(void);
+/* test_group_default.c: a group's state at boot and after a PUT, from
+   "enabled" or "enabled_default" (issue #1058) */
+void run_group_default_tests(void);
 
 /* ---- helpers ----------------------------------------------------------------- */
 
@@ -2158,6 +2161,7 @@ void app_main(void)
     run_precan_tests();
     run_filter_type_tests();
     run_send_tests();
+    run_group_default_tests();
 
     UNITY_END();
 }
