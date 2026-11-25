@@ -184,6 +184,40 @@ static esp_err_t bind_addr(const uds_addr_t *addr)
     return ESP_OK;
 }
 
+/**
+ * One message of the answer. @p wait_ms (P2, or P2* behind a responsePending)
+ * is the ECU's time to START it, and the provider hands over whole messages
+ * only: an answer of many frames is still on its way when that time ends
+ * (bench 2026-11-26: 1024 bytes took longer than the 250 ms of P2 and the
+ * request ended in a timeout with the ECU in the middle of its answer). So
+ * the wait goes on while frames come in behind the request, N_Cr apart at
+ * most, and @p max_ms in all.
+ */
+static esp_err_t recv_answer(uint8_t *resp, size_t resp_cap, size_t *got,
+                             uint32_t wait_ms, uint32_t max_ms,
+                             int64_t asked_us)
+{
+    const can_isotp_ops_t *ops = can_isotp();
+    esp_err_t r = ops->recv(s_sess, resp, resp_cap, got, wait_ms);
+    int64_t t0 = esp_timer_get_time();
+
+    while (r == ESP_ERR_TIMEOUT && ops->rx_idle_ms != NULL)
+    {
+        int64_t now = esp_timer_get_time();
+
+        if (now - t0 >= (int64_t)max_ms * 1000 ||
+            !uds_isotp_answer_arriving(ops->rx_idle_ms(s_sess),
+                                       (uint32_t)((now - asked_us) / 1000)))
+        {
+            break; /* silent, stalled for N_Cr, or longer than the caller allows */
+        }
+
+        r = ops->recv(s_sess, resp, resp_cap, got, 100);
+    }
+
+    return r;
+}
+
 static esp_err_t isotp_transceive(const uds_addr_t *addr,
                                   const uint8_t *req, size_t req_len,
                                   uint8_t *resp, size_t resp_cap,
@@ -256,10 +290,12 @@ static esp_err_t isotp_transceive(const uds_addr_t *addr,
     size_t got = 0;
     uint32_t to = p2_ms;
     uint8_t pending = 0;
+    uint32_t arrive_ms = (p2star_ms > p2_ms) ? p2star_ms : p2_ms;
+    int64_t asked_us = esp_timer_get_time();
 
     for (;;)
     {
-        r = can_isotp()->recv(s_sess, resp, resp_cap, &got, to);
+        r = recv_answer(resp, resp_cap, &got, to, arrive_ms, asked_us);
 
         if (r != ESP_OK)
         {
@@ -273,6 +309,7 @@ static esp_err_t isotp_transceive(const uds_addr_t *addr,
 
         pending++;
         to = p2star_ms; /* extended window while pending */
+        asked_us = esp_timer_get_time(); /* the answer comes behind this */
     }
 
     obd_gate_release(&s_gate_token);

@@ -4,6 +4,7 @@ idf_component_register(
          "uds_proto.c"
          "uds_dtc_codec.c"
          "uds_transport_at.c"
+         "uds_at_parse.c"
          "uds_transport_obd.c"
          "uds_transport_isotp.c"
          "uds_manager_http.c"

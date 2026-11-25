@@ -30,6 +30,12 @@
 
 #include "uds_manager.h" /* uds_backend_t */
 
+/* What one request and one answer may be, on every face of the terminal
+ * (the route, the console command): the request is one AT line on the
+ * chip, the answer an ISO-TP message of any size. */
+#define UDS_REQ_MAX  64
+#define UDS_RESP_CAP 4096
+
 esp_err_t uds_manager_register_cli(void);
 
 /* the exclusive option: a raw ISO-TP tx/rx (uds_transport_isotp.c) counts

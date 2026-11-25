@@ -84,6 +84,8 @@ struct can_isotp_session
     volatile bool       tx_inflight;    /* multi-frame send not complete  */
     volatile uint32_t   tx_deadline_ms; /* give up tracking it after this */
     volatile uint32_t   busy_until_ms;  /* tick-cadence polling until     */
+    volatile uint32_t   rx_frame_ms;    /* the last frame fed (rx_idle_ms) */
+    volatile bool       rx_seen;        /* ... and whether there was one   */
 };
 
 /* ---- can_isotp_esp.c, used by the task ------------------------------------- */

@@ -5,6 +5,7 @@ idf_component_register(
     SRCS "test_main.c"
          "${comp_dir}/uds_proto.c"
          "${comp_dir}/uds_transport_at.c"
+         "${comp_dir}/uds_at_parse.c"
          "${comp_dir}/uds_dtc_codec.c"
     INCLUDE_DIRS "${comp_dir}/include" "${comp_dir}"
     REQUIRES unity

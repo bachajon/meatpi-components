@@ -24,11 +24,19 @@
  * @file uds_manager_cli.c
  * @brief The `uds` console command: the terminal's serial/BLE/WS face.
  *        `uds -t 7E0 -r 7E8 22 F1 90`  (hex request after the flags)
+ *
+ * The answer is printed whole on one line, whatever its length, up to the
+ * route's 4096 bytes: `<- 62 F1 90 ..  [isotp, 5 ms]`. Until 2026-11-26
+ * the line went out through one cmdline_printf and ended after the 84th
+ * byte of the answer (that function's 256-byte buffer), the command itself
+ * showed 128 bytes at most, and an answer over 512 bytes was an error.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "argtable3/argtable3.h"
+#include "esp_attr.h"
 
 #include "cmdline_manager.h"
 
@@ -70,27 +78,35 @@ static int cmd_uds(int argc, char **argv)
         .ext_id = s_args.ext->count > 0,
     };
 
-    /* join the data args back into one hex string */
-    char hexin[192];
+    /* join the data args back into one hex string: as long as the longest
+       line the console takes, so the join cannot lose a byte (192 did: 70
+       bytes typed as one `22:F1:..` word went out as their first 64) */
+    char hexin[CMDLINE_MANAGER_LINE_MAX];
     size_t o = 0;
+    bool joined = true;
 
-    for (int i = 0; i < s_args.data->count && o < sizeof(hexin) - 1; i++)
+    for (int i = 0; i < s_args.data->count && joined; i++)
     {
         int n = snprintf(hexin + o, sizeof(hexin) - o, "%s",
                          s_args.data->sval[i]);
-        o += (n > 0) ? (size_t)n : 0;
+
+        joined = (n >= 0 && (size_t)n < sizeof(hexin) - o);
+        o += joined ? (size_t)n : 0;
     }
 
-    uint8_t reqb[64];
+    uint8_t reqb[UDS_REQ_MAX];
     size_t reqn = 0;
 
-    if (!uds_hex_to_bytes(hexin, reqb, sizeof(reqb), &reqn) || reqn == 0)
+    if (!joined || !uds_hex_to_bytes(hexin, reqb, sizeof(reqb), &reqn) ||
+        reqn == 0)
     {
-        cmdline_printf("bad hex request\n");
+        cmdline_printf("bad hex request (hex bytes, %d at most)\n",
+                       UDS_REQ_MAX);
         return 1;
     }
 
-    static uint8_t respb[512];
+    /* the answer: PSRAM, one command at a time (the dispatcher's lock) */
+    EXT_RAM_BSS_ATTR static uint8_t respb[UDS_RESP_CAP];
     size_t respn = 0;
     uds_result_t res;
 
@@ -104,10 +120,20 @@ static int cmd_uds(int argc, char **argv)
         return 1;
     }
 
-    char hex[3 * 128 + 1];
-    uds_bytes_to_hex(respb, respn < 128 ? respn : 128, hex, sizeof(hex));
+    /* the whole answer on one line, a console chunk at a time through
+       cmdline_write: no buffer has to hold the line */
+    char piece[CMDLINE_MANAGER_CHUNK_SIZE];
+    size_t off = 0;
+    size_t n;
 
-    cmdline_printf("<- %s  [%s, %lu ms", hex, res.backend,
+    cmdline_printf("<- ");
+
+    while ((n = uds_hex_piece(respb, respn, &off, piece, sizeof(piece))) > 0)
+    {
+        cmdline_write(piece, n);
+    }
+
+    cmdline_printf("  [%s, %lu ms", res.backend,
                    (unsigned long)res.elapsed_ms);
     if (res.pending_count)
     {
@@ -132,7 +158,9 @@ esp_err_t uds_manager_register_cli(void)
     s_args.tx = arg_str0("t", "tx", "<hhh>", "request CAN ID (hex)");
     s_args.rx = arg_str0("r", "rx", "<hhh>", "response CAN ID (hex)");
     s_args.ext = arg_lit0("e", "ext", "29-bit extended IDs");
-    s_args.data = arg_strn(NULL, NULL, "<hex>", 0, 32, "request bytes");
+    /* every byte of the longest request may be a word of its own */
+    s_args.data = arg_strn(NULL, NULL, "<hex>", 0, UDS_REQ_MAX,
+                           "request bytes");
     s_args.end = arg_end(4);
 
     static const esp_console_cmd_t CMD =

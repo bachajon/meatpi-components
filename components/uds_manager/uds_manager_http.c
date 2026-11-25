@@ -41,12 +41,11 @@
 #include "http_server_manager.h"
 
 #include "uds_manager.h"
+#include "uds_manager_private.h" /* UDS_REQ_MAX, UDS_RESP_CAP */
 #include "uds_proto.h"
 
 /* Big buffers live on the HEAP (PSRAM), not the 4 KB httpd worker stack. */
-#define UDS_RESP_CAP 4096
 #define UDS_HEX_CAP  (3 * UDS_RESP_CAP + 1) /* the whole PDU, PSRAM */
-#define UDS_REQ_MAX  64                      /* one AT line on the chip */
 
 static const char *TAG = "uds_manager";
 

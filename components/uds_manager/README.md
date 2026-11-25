@@ -25,14 +25,15 @@ from 2026-09.
 | `include/uds_proto.h`, `uds_proto.c` | PURE. Negative response codes and their ISO names, the responsePending shape |
 | `include/uds_dtc.h`, `uds_dtc_codec.c` | PURE. Service 19 / 14 builders and parsers: classic (`19 01 / 02 / 0A`, `14 <group>`), WWH-OBD (`19 42`, `19 55`, `14 FF FF 33`: 5- and 4-byte records, DTC formats 04 = J2012 "P0420-08" and 02 = J1939-73 "SPN3226-4") |
 | `include/uds_transport.h` | The transport vtable (one op: a request to its FINAL response) and the pure AT-hex helpers |
-| `uds_transport_obd.c`, `uds_transport_at.c` | The chip transport: protocol (`ATTP6/7` at 500 kbit/s, `ATTP8/9` at 250, RAM-only), header, receive filter, headers off + auto-formatting so the chip does ISO-TP; the setup is skipped in a steady conversation (the chip's tx byte counter says whether autopid re-addressed it since) |
-| `uds_transport_isotp.c` | The native transport: a raw UDS PDU over the registered ISO-TP provider on `can_manager`'s bus. Its session sends BS 8 / STmin 1 ms as a receiver, stated in the file since 2026-11-17 (they were the stack's fixed values before) |
+| `uds_transport_obd.c`, `uds_transport_at.c` | The chip transport: protocol (`ATTP6/7` at 500 kbit/s, `ATTP8/9` at 250, RAM-only), header, receive filter, headers off + auto-formatting so the chip does ISO-TP, and what another requester may have left on the chip put back (flow control, extended address, timing, echo: see "The chip transport's setup"); the setup is skipped in a steady conversation (the chip's tx byte counter says whether autopid re-addressed it since) |
+| `uds_at_parse.c` | PURE. The chip transport's parser of the printed answer, an answer's line count, the first response-count digit, the wait behind an answer that was cut (out of `uds_transport_at.c` since 2026-11-26, 700-line rule) |
+| `uds_transport_isotp.c` | The native transport: a raw UDS PDU over the registered ISO-TP provider on `can_manager`'s bus. Its session sends BS 8 / STmin 1 ms as a receiver, stated in the file since 2026-11-17 (they were the stack's fixed values before). P2 and P2* are the time for an answer to START: while frames of it keep arriving the wait goes on (since 2026-11-26) |
 | `uds_manager.c` | The protocol, the claim, the session, the exclusive option (obd_gate's diagnostics hold), status |
 | `uds_manager_settings.c` | Settings descriptor |
 | `uds_manager_http.c` | `GET /api/uds`, `POST /api/uds` (the runtime exclusive switch), `POST /api/uds/request`, `POST /api/uds/session` |
 | `uds_manager_cli.c` | Console command `uds` |
 | `uds_manager_events.c` | The `uds.request` action and the `uds.response` source of the event manager |
-| `host_test/` | Host suite of the pure files (31 tests): NRC names, the AT-hex parser, the DTC codec incl. WWH-OBD |
+| `host_test/` | Host suite of the pure files (36 tests): NRC names, hex in pieces, the AT-hex parser, the chip transaction and its setup against a scripted chip, the DTC codec incl. WWH-OBD |
 
 ## API
 
@@ -49,10 +50,47 @@ from 2026-09.
 
 `uds_addr_t` = `tx_id` (tester to ECU), `rx_id` (ECU to tester), `ext_id`
 (29-bit). The chip's ISO-TP covers 11-bit `7E0..7E7` answered on `7E8..7EF`
-and 29-bit `18DAxxF1` / `18DAF1xx`; its reply buffer is 512 bytes (a longer
-answer needs the native transport). Timing settings: `p2_ms` (first
-response, 250), `p2star_ms` (after each 0x78, 5000), `tester_present_ms`
-(2000).
+and 29-bit `18DAxxF1` / `18DAF1xx`. A request is 64 bytes at most (one AT
+line on the chip; `UDS_REQ_MAX`), an answer the largest ISO-TP message,
+4095 bytes, on both transports and on every face (`UDS_RESP_CAP` 4096: the
+route and the console command; a script's `uds()`, `obd_request()` and
+`obd_isotp_rx()` hand over the same, `SE_RESP_MAX_BYTES`).
+Timing settings: `p2_ms` (the answer's START, 250), `p2star_ms` (after each
+0x78, 5000; also the longest a started answer may take to arrive on the
+native transport), `tester_present_ms` (2000).
+
+**The chip transport's setup** (`uds_transport_at.c`, 14 AT commands, 15 for
+a 29-bit target, sent when the address, P2 or the bus's bit rate changed, the
+last transaction failed, or anybody else wrote to the chip since): `ATTP<p>`,
+`ATSH`, `ATCRA` (`ATCP` first for 29-bit), the print format `ATH0`, `ATCAF1`,
+`ATS1`, then what ANOTHER requester may have left on the chip (an AutoPID
+row's init, an app): `ATCEA` (no extended address), `ATFCSM0` and `ATCFC1`
+(flow control from the chip, to the request's header), `ATAT1`, `ATV0`,
+`ATE0`, `ATR1`, and `ATST` from P2. Until 2026-11-26 the second group was not
+sent: behind a profile row with `ATFCSH..;ATFCSD..;ATFCSM1` (the VW MEB and
+the BMW profiles have such rows) the chip sent its flow control to the row's
+ECU, the asked ECU sent its first frame and nothing more, and no answer of
+more than one frame came back (`ESP_ERR_INVALID_SIZE` /
+`ESP_ERR_INVALID_RESPONSE`).
+
+**A long answer on the chip.** The request goes out with the response-count
+digit `1`, which hands a single-frame answer over at once. A longer answer is
+cut behind its first frame and asked for again with the digit its line count
+needs (none above 15 lines). The chip has sent its flow control by then and
+the ECU goes on sending the rest of the first answer, so the transport waits
+for those frames before it asks again (`uds_at_tail_wait_ms`: 10 ms and 2 ms
+per frame still owed, four times that when the answer is cut once more, and
+the third request goes without a digit). Asked again at once (0.9 ms later,
+until 2026-11-26) the left-over frames counted as lines of the new request
+and it was cut as well. Services that must not go out twice (`27`, `29`,
+`31`, `38`, `84`) go without a digit from the start. The reply buffer holds
+16 KB of the chip's text, the largest answer's 14.7 KB (8 KB until
+2026-11-26, room for about 2290 bytes of answer by the arithmetic: on the
+bench 1024 bytes came back and 4095 ended in `ESP_ERR_INVALID_SIZE`; with
+16 KB, 2400 bytes came back). The parser drops the last frame's padding
+as it reads it: until the same day the padding counted against the caller's
+buffer first, so the one message that fills it, 4095 bytes (4101 on the
+chip's lines), was refused (`ESP_ERR_INVALID_RESPONSE`).
 
 **Backend `auto`**: the native ISO-TP when `can_manager` runs in normal mode
 with an ISO-TP provider registered, the chip otherwise. The public builds
@@ -117,7 +155,22 @@ transaction or a session owns the bus), `POST /api/uds/session
 ## Console
 
 `uds -t <txid> -r <rxid> [-e] <hex request>`, e.g. `uds -t 7E0 -r 7E8 22 F1
-90`: the response in hex, or the negative response decoded.
+90`: the response in hex, or the negative response decoded. The request is
+hex in any of the usual shapes (`22F190`, `22 F1 90`, `0x22 0xF1 0x90`,
+`22:F1:90`), 64 bytes at most, each byte may be a word of its own; a longer
+one is refused (`bad hex request` or the usage line) and nothing is sent.
+The answer is printed whole on ONE line whatever its length, up to 4095
+bytes: `<- 62 F1 90 ..  [isotp, 5 ms]`, then `positive (SID 0x62)` and `OK`,
+or `NEGATIVE: NRC 0x.. <name>`.
+
+Until 2026-11-26 (the report "the uds command cuts the response at about 80
+bytes", 6.0.0-beta.15): the line went out through one `cmdline_printf`,
+whose 256-byte buffer ended it after the 84th byte of the answer and without
+the `[transport, ms]` behind it; the command showed 128 bytes at most; an
+answer over 512 bytes was an error; a request typed as more than 6 separate
+bytes lost the rest (the console kept 11 words of a line, see
+`cmdline_manager`) and a different request went to the ECU; and a request
+over 64 bytes typed as one `22:F1:..` word went out as its first 64.
 
 ## Events
 
@@ -138,9 +191,19 @@ at it); stop before `can_manager_stop()`.
 - The chip is single-master: a transaction races autopid's polling for the
   MIC (5 of 5 answered with autopid paused, 1 of 3 while polling before the
   exclusive option existed); the exclusive hold is the answer, not a retry.
-- One chip transaction costs about 7 AT round trips plus `ATSP` when the
-  setup is not skipped; the chip's ISO-TP only covers `7E0..7E7`; its reply
-  buffer is 512 bytes.
+- One chip transaction costs 14 AT round trips more when the setup is not
+  skipped; the chip's ISO-TP only covers `7E0..7E7`. An answer of more than
+  one frame is asked for twice on the chip (see "A long answer on the
+  chip"); the native transport reads it once.
+- On the native transport P2 (250 ms) used to be the time for the WHOLE
+  answer: one of about 900 bytes or more (BS 8, STmin 1 ms) was still
+  arriving when it ran out and the request ended in `ESP_ERR_TIMEOUT`
+  (bench 2026-11-26: 1024 bytes take 291 ms, 4095 bytes 1163 ms). The
+  transport now asks the provider whether frames keep coming
+  (`can_isotp_ops_t.rx_idle_ms`, `uds_isotp_answer_arriving()`): a silent
+  ECU still costs P2, a started answer may take until P2*, and a gap of
+  N_Cr (1000 ms) between two frames ends it. A provider without that op
+  (the add-on pack's) behaves as before.
 - A request pinned to a 500 kbit/s protocol on a live 250 kbit/s bus
   destroys that bus's traffic (phase 2): the chip transport asks the native
   controller's probe before every target setup and pins protocols 8 / 9 on
@@ -149,9 +212,16 @@ at it); stop before `can_manager_stop()`.
 
 ## Tests
 
-- Host: `.\test.ps1 host uds_manager`, 31 tests (NRC names, the AT-hex
-  parser incl. the 29-bit header print shape, the classic and WWH-OBD DTC
-  codec in both DTC formats).
+- Host: `.\test.ps1 host -Component uds_manager`, 36 tests (NRC names, an
+  answer's hex in pieces, the AT-hex parser incl. the 29-bit header print
+  shape and the largest message, the chip transaction against a scripted
+  chip: the setup's lines,
+  the cut answer asked for again and the wait in front of it, the native
+  path's "is the answer still arriving", the classic and WWH-OBD DTC codec
+  in both DTC formats).
+- Bench: `.\test.ps1 udsconsole` (`UDS CONSOLE PASS`): answers of 7 to 4095
+  bytes through the route and the console command on both transports, the
+  request as typed, the chip behind a row that moved the flow control.
 - Bench: the UDS legs of `tools/testbench/obd/uds_route_bench.py` (`UDS ROUTE
   PASS`) and `uds_dtc_bench_test.py` (`UDS DTC BENCH PASS`); the WWH-OBD
   path through `.\test.ps1 wwh` (`WWH OBD PASS`: `19 42` in both DTC

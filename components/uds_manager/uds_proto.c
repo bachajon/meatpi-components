@@ -206,3 +206,38 @@ size_t uds_bytes_to_hex(const uint8_t *bytes, size_t len, char *out,
     out[o] = '\0';
     return o;
 }
+
+size_t uds_hex_piece(const uint8_t *bytes, size_t len, size_t *off,
+                     char *out, size_t cap)
+{
+    if (out == NULL || cap == 0)
+    {
+        return 0;
+    }
+
+    out[0] = '\0';
+
+    if (bytes == NULL || off == NULL || cap < 4)
+    {
+        return 0;
+    }
+
+    static const char HEX[] = "0123456789ABCDEF";
+    size_t o = 0;
+
+    /* "XX " and the NUL: a byte goes in only when all of it fits */
+    while (*off < len && o + 3 < cap)
+    {
+        out[o++] = HEX[bytes[*off] >> 4];
+        out[o++] = HEX[bytes[*off] & 0x0F];
+        (*off)++;
+
+        if (*off < len)
+        {
+            out[o++] = ' ';
+        }
+    }
+
+    out[o] = '\0';
+    return o;
+}
