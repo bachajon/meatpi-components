@@ -439,7 +439,8 @@ typedef struct
  *  frame per wanted slot is kept, ap_flt_slot() hands them out. Caller
  *  holds the job lock with the poller parked. ESP_ERR_TIMEOUT = no frame
  *  with the id in @p monitor_ms; ESP_ERR_INVALID_STATE = the chip is busy;
- *  @p elapsed_us = from ATMA to the first frame. */
+ *  @p elapsed_us = from ATMA to the first frame. @p bus != 0 (another bus):
+ *  the chip is home on the car's protocol behind the window (2026-11-26). */
 esp_err_t ap_runner_test_filter(uint32_t frame_id, uint16_t bus,
                                 uint32_t monitor_ms,
                                 const ap_flt_want_t *want, uint16_t n,

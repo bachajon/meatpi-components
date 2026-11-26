@@ -948,6 +948,25 @@ Probe: `tools/webui_preview/probe_can_filters.mjs` (86 checks); on the
 device `.\test.ps1 canfilters`, whose page leg is
 `tools/testbench/obd/can_filters_page.mjs`.
 
+**2026-11-26, a filter's Bus (components pull request 15, GitHub issue
+#1078).** Since that pull request a filter listens on the bus it names
+(`bus`: obd, ms, sw, ch, and `bus_kbps`; autopid README "A filter's `bus`"),
+and the page could not write either word. A filter's detail now has the two
+fields of a PID row beside Group and Cycle: **Bus** (the car's OBD protocol,
+MS CAN, single-wire CAN, CH CAN, with the pins) and, on another bus than
+the car's, **Bus speed** (the bus's usual speed first). The car's OBD
+protocol writes neither word; another bus drops the speed chosen for the
+bus before it. `BUSES`, `BUS_OWN`, `BUS_SPEEDS` and `BUS_NAME` moved out of
+`pidTable()` so that both lists read them. Test carries the filter's bus
+(`busArgs(f)` in `testFilter()`). A profile's filter brings its own `bus`
+and `bus_kbps` (`profileToPids()`); the car's `bus`, which says where its
+PIDs are asked, is not taken for a filter. A stored word that is no bus
+reads as the car's OBD protocol and goes back as stored while nobody
+touches the field. The two bubbles say it in a sentence (`FLT_INFO`), and
+the note on Pause mode names these filters among what transmits nothing.
+Probe: `tools/webui_preview/probe_filter_bus.mjs` (28 checks; on the page
+before the change it stops at the first one: no such field).
+
 **2026-11-23, a CAN filter without an ID stops Apply on the page.** A
 user's report: on Standard PIDs, with seven scanned PIDs ticked, Apply
 Configuration answered "Rejected: filter 0: frame_id required"; the same

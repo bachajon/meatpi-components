@@ -88,6 +88,16 @@ esp_err_t autopid_snapshot(cJSON **out);
  * a PSRAM cache: NO flash I/O, so a PSRAM-stack consumer (the ha_webhooks
  * poster) can include the config section safely (§2 corollary). Caller
  * frees @p out. ESP_ERR_INVALID_STATE before any config has loaded.
+ *
+ * The file's shape, a filter's bus (2026-11-22, pull request 15, GitHub
+ * issue #1078): a `filters[]` entry names `"bus"` (`obd`, `ms`, `sw`,
+ * `ch`) and `"bus_kbps"` as a `pids[]` entry does, and its monitor window
+ * opens on that bus (MS, single-wire or CH CAN through the OBD chip).
+ * Before, a filter's `bus` was not read (a filter of a single-wire frame
+ * listened on the car's own bus and never filled), and from 2026-11-21 a
+ * filter that was switched on with one was refused. A word that is no
+ * bus, or a `bus_kbps` without such a bus, is refused while the filter is
+ * on; a stored file with one loads with that filter switched off.
  */
 esp_err_t autopid_config_json_dup(char **out);
 
@@ -135,7 +145,8 @@ typedef struct
     uint32_t groups_loaded;
     int64_t  last_poll_us;   /* 0 = never */
     bool     running;        /* poller up and polling (not paused)     */
-    bool     paused_voltage; /* pause_below_v engaged                  */
+    bool     paused_voltage; /* pause_below_v engaged (a filter on     */
+                             /* another bus still listens, 2026-11-22) */
     bool     paused_client;  /* yielding to an external ELM app        */
     bool     paused_diag;    /* a diagnostic tool holds the bus (the   */
                              /* UDS Tool / J2534 "exclusive" option)   */
@@ -152,7 +163,10 @@ typedef struct
 esp_err_t autopid_stats(autopid_stats_t *out);
 
 /** True while the poller runs AND an ECU answered within the last 30 s:
- *  the device-contract `ecu_status` source (ha_webhooks). */
+ *  the device-contract `ecu_status` source (ha_webhooks). A frame a CAN
+ *  filter caught counts as an answer; since 2026-11-22 a filter on another
+ *  bus listens through the voltage pause (unless `pause_mode` is `all`),
+ *  so a parked car whose body bus talks reads online there too. */
 bool autopid_ecu_online(void);
 
 /** The vehicle protocol in effect, in words: "ISO 15765-4 CAN, 11-bit,

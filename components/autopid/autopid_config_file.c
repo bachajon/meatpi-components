@@ -227,17 +227,21 @@ esp_err_t autopid_config_load(ap_config_t *cfg)
         (void)filesystem_write(AP_CONFIG_PATH, buf, got);
     }
 
-    /* a filter switched on with a bus of ms, sw or ch, stored before
-       2026-11-21: nobody read that bus and the filter listened on the car's
-       own one (GitHub issue #1078). Switched off the same way, so the rest
-       of the tables keep polling */
+    /* a filter that is switched on with a `bus` that is no bus of this
+       firmware, or with a `bus_kbps` it cannot make there (GitHub issue
+       #1078: a filter listens on its bus since 2026-11-22, and a stored
+       filter with a speed and no bus was taken until then). The parser
+       refuses it, which would empty the tables: switched off the same way,
+       so the rest of the tables keep polling. From 2026-11-21 to that date
+       this switched off every filter with a bus of ms, sw or ch; such a
+       filter stays off until it is switched on again */
     fixed = ap_config_repair_filter_bus(buf, &switched_off);
 
     if (fixed != NULL)
     {
-        ESP_LOGW(TAG, "config file: %d filter%s with a bus other than obd "
-                      "switched off and the file rewritten: a filter listens "
-                      "on the car's own bus only",
+        ESP_LOGW(TAG, "config file: %d filter%s with a bus or a bus speed "
+                      "this firmware cannot use (bus: obd, ms, sw or ch) "
+                      "switched off and the file rewritten",
                  switched_off, switched_off == 1 ? "" : "s");
         free(buf);
         buf = fixed;

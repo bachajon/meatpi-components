@@ -522,6 +522,20 @@ esp_err_t ap_runner_test_filter(uint32_t frame_id, uint16_t bus,
     esp_err_t err = flt_window(frame_id, frame_id > 0x7FF, bus, monitor_ms,
                                want, n, &tr, elapsed_us);
 
+    if (bus != 0)
+    {
+        /* a filter on another bus, as the test of a row of it (2026-11-26):
+           the chip home behind the window and the slot's definition taken
+           back, so a test leaves the chip on the car's protocol. The poller
+           takes home only a chip it left there itself (autopid_poller.c),
+           so until this date the chip stayed on that bus until something of
+           the car's protocol ran, which under the voltage pause is nothing
+           (bench: on single-wire and on CH CAN in 20 of 20 looks over 6 s),
+           and an app that came found that bus. The poller's own windows
+           are not this path */
+        ap_bus_leave(&tr);
+    }
+
     if (err == ESP_ERR_TIMEOUT)
     {
         char line[72];

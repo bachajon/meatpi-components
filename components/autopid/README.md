@@ -863,8 +863,8 @@ Files: `autopid_bus.h`, `autopid_bus_core.c` (pure: the words, the rate, the
 chain, the allowed chains, the CAN ERROR count, the words the chip stores),
 `autopid_bus.c` (the chip: there, home, the state in `ap_base_mem_t`),
 `ap_sched_next_grouped` in `autopid_sched.c`. Not covered yet: 29-bit ids on
-these buses, J1939 formatting, listening rows, a `bus` for a filter (a
-monitor window is the car's own bus).
+these buses for a row, J1939 formatting, listening rows (a CAN filter
+listens there since 2026-11-22, below).
 
 **A filter's `bus` (GitHub issue #1078).** Until 2026-11-21 the parser did
 not read it: a filter with `"bus": "sw"` (a GMLAN single-wire frame such
@@ -896,7 +896,31 @@ stored before is not refused at boot, which would empty the
 tables: the loader switches such a filter off once, rewrites the file and
 says so in a W line (`ap_filter_bus_ok()`, `ap_filter_bus_key()`,
 `ap_config_repair_filter_bus()` in `autopid_bus_core.c`, host-tested in
-`test_filter_type.c`). The web UI writes no `bus` on a filter yet.
+`test_filter_type.c`).
+
+**On top of it (2026-11-26; the bench: `.\test.ps1 multibus`, the legs
+`filter` and `listen`).** A test of a filter on another bus brings the chip
+home behind its window, as the test of a row does (`ap_bus_leave()` in
+`ap_runner_test_filter()`). Until then the chip stayed on that bus until
+something of the car's protocol ran, which under the voltage pause is
+nothing (on single-wire and on CH CAN in 12 of 12 looks behind the test),
+and an app that came found that bus. The loader's line for a stored filter
+it switches off says what it is about (`config file: N filters with a bus
+or a bus speed this firmware cannot use (bus: obd, ms, sw or ch) switched
+off and the file rewritten`); a filter that a build of 2026-11-21 switched
+off for its bus stays off until it is switched on again. The web UI has the
+Bus and Bus speed fields in a filter's detail, its Test carries them, and a
+profile's filter brings its own `bus` (the car's `bus` says where its PIDs
+are asked and is not taken for a filter). Measured on the bench on MS,
+single-wire and CH CAN with the simulator's frames, 11-bit and 29-bit ids,
+polled and through the voltage pause: the chip does not acknowledge while
+it monitors (its default, `ATCSM1`; nothing here sends `ATCSM0`), and 132
+windows put no frame and no error on any bus. As built, and known: a window
+that catches nothing counts as a failed poll, so a filter of a frame that
+is sent once per change is asked a quarter as often after three empty
+windows (a window of 500 ms every second was open about 10 % of the time),
+and `autopid_ecu_online()` counts a caught frame as an answer, under the
+voltage pause too.
 
 ### No chain of the tables sends a word the chip stores (2026-11-11)
 
