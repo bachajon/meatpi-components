@@ -49,7 +49,8 @@ void run_store_words_tests(void);
    protocol table, a reply with three header bytes and a checksum */
 void run_precan_tests(void);
 /* test_filter_type.c: a CAN filter follows the switch of its table, the
-   line a test of a filter shows for a captured frame */
+   line a test of a filter shows for a captured frame, a filter on its bus
+   and the class that lets it listen through the voltage pause */
 void run_filter_type_tests(void);
 /* test_send.c: can.send (issue #1072): a request into frames, the refusals,
    the slot definitions with 29-bit ids and the wake mode, the chip's words */

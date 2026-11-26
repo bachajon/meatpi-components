@@ -201,7 +201,19 @@ void ap_sched_group_restore(ap_sched_t *st, const ap_config_t *cfg, int g)
 
 ap_row_class_t ap_sched_entry_class(const ap_config_t *cfg, int i)
 {
-    return (i < cfg->n_pids) ? ap_row_class(&cfg->pids[i]) : AP_CLASS_CHIP;
+    if (i < cfg->n_pids)
+    {
+        return ap_row_class(&cfg->pids[i]);
+    }
+
+    /* a filter on a bus of the chip's own (2026-11-22, GitHub issue #1078)
+       is that bus's, as a row of it: the HS bus guard has no say about it
+       (a single-wire filter of a car that charges, its HS bus silent).
+       A class of its own: it sends nothing, so it listens through the
+       voltage pause as v4.50's filters did (on a 2012 Volt a remote start's
+       first seconds, and a refused one, all happen while the 12 V is low) */
+    return (ap_filter_bus_key(&cfg->filters[i - cfg->n_pids]) != 0)
+               ? AP_CLASS_LISTEN_BUS : AP_CLASS_CHIP;
 }
 
 int ap_sched_next_of(const ap_sched_t *st, const ap_config_t *cfg,
@@ -242,7 +254,13 @@ int ap_sched_next(const ap_sched_t *st, const ap_config_t *cfg,
 
 uint16_t ap_sched_entry_bus(const ap_config_t *cfg, int i)
 {
-    return (i < cfg->n_pids && !cfg->pids[i].j1939)
+    if (i >= cfg->n_pids)
+    {
+        /* a filter: where its window opens (since 2026-11-22) */
+        return ap_filter_bus_key(&cfg->filters[i - cfg->n_pids]);
+    }
+
+    return !cfg->pids[i].j1939
                ? AP_BUS_KEY(cfg->pids[i].bus, cfg->pids[i].bus_rate) : 0;
 }
 

@@ -7,9 +7,9 @@
  *        frame (ap_flt_frame_line), read back by the monitor-line parser.
  *        And the protocol a window opens on (ap_flt_window_proto): the
  *        one of the id's width, as the legacy firmware chose it. And the
- *        bus of a filter (2026-11-21, GitHub issue #1078): the car's own,
- *        another one refused while the filter is on and switched off in a
- *        stored file.
+ *        bus of a filter (GitHub issue #1078): since 2026-11-22 its own, a
+ *        word this firmware does not know refused while the filter is on
+ *        and switched off in a stored file.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -193,12 +193,16 @@ void test_flt_window_proto(void)
     }
 }
 
-/* A filter listens on the car's own bus (2026-11-21, GitHub issue #1078):
-   its window is the car's OBD protocol, so a `bus` of sw on a filter of
-   0x1026C0CB (a GMLAN single-wire frame) was read by nobody, and the filter
-   listened on the HS bus and never filled. Refused while the filter is on;
-   a stored file is switched off once, and the rest of it loads. */
-void test_filter_bus_is_the_cars_own(void)
+/* A filter listens on its bus (GitHub issue #1078): until 2026-11-21 a
+   `bus` on a filter was read by nobody, so a filter of 0x1026C0CB (a GMLAN
+   single-wire frame) listened on the HS bus and never filled; on 2026-11-21
+   the tables refused it. Since 2026-11-22 the filter names its bus and
+   speed as a row does, its window opens there (29-bit: the slot defined for
+   the id's width), and the scheduler groups it with that bus's rows, out of
+   the HS bus guard's hands. A word this firmware does not know is refused
+   while the filter is on; a stored file is switched off once, and the rest
+   of it loads. */
+void test_filter_on_its_bus(void)
 {
     char err[96] = "";
     int off = -1;
@@ -206,39 +210,78 @@ void test_filter_bus_is_the_cars_own(void)
     TEST_ASSERT_TRUE(ap_filter_bus_ok(NULL));
     TEST_ASSERT_TRUE(ap_filter_bus_ok(""));
     TEST_ASSERT_TRUE(ap_filter_bus_ok("obd"));
-    TEST_ASSERT_FALSE(ap_filter_bus_ok("sw"));
-    TEST_ASSERT_FALSE(ap_filter_bus_ok("ms"));
-    TEST_ASSERT_FALSE(ap_filter_bus_ok("ch"));
+    TEST_ASSERT_TRUE(ap_filter_bus_ok("sw"));
+    TEST_ASSERT_TRUE(ap_filter_bus_ok("ms"));
+    TEST_ASSERT_TRUE(ap_filter_bus_ok("ch"));
     TEST_ASSERT_FALSE(ap_filter_bus_ok("hs"));
     TEST_ASSERT_FALSE(ap_filter_bus_ok("SW"));
 
-    /* on, with another bus: refused, whole in the parser's 96 bytes */
-    TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(
-        "{\"filters\":[{\"frame_id\":270975179,\"bus\":\"sw\","
-        PRM("hvac") "}]}", &s_cfg, err, sizeof(err)));
-    TEST_ASSERT_EQUAL_STRING("filter 1026C0CB: a filter listens on bus obd "
-                             "only (ms, sw, ch: not yet); switch it off", err);
-
-    /* the car's own, said or not, and another one on a filter that is off;
-       a bus that is not text is none, as before */
+    /* the Volt's climate power (29-bit, single-wire), an 11-bit frame on
+       MS CAN, one on CH CAN at 250 kbit/s, the car's own: each where it
+       says, 29-bit with the slot of its width */
     load("{\"filters\":["
+         "{\"frame_id\":270975179,\"bus\":\"sw\",\"ext\":true," PRM("hvac") "},"
+         "{\"frame_id\":1234,\"bus\":\"ms\"," PRM("door") "},"
+         "{\"frame_id\":801,\"bus\":\"ch\",\"bus_kbps\":250," PRM("gw") "},"
          "{\"frame_id\":288,\"bus\":\"obd\"," PRM("odo") "},"
-         "{\"frame_id\":289," PRM("b") "},"
-         "{\"frame_id\":270975179,\"bus\":\"sw\",\"enabled\":false,"
+         "{\"frame_id\":289," PRM("b") "}]}");
+    TEST_ASSERT_EQUAL(5, s_cfg.n_filters);
+    TEST_ASSERT_EQUAL(AP_BUS_SW, s_cfg.filters[0].bus);
+    TEST_ASSERT_TRUE(s_cfg.filters[0].is_extended);
+    TEST_ASSERT_EQUAL_HEX16(AP_BUS_KEY(AP_BUS_SW, 0) | AP_BUS_KEY_EXT,
+                            ap_filter_bus_key(&s_cfg.filters[0]));
+    TEST_ASSERT_EQUAL_HEX16(AP_BUS_KEY(AP_BUS_MS, 0),
+                            ap_filter_bus_key(&s_cfg.filters[1]));
+    TEST_ASSERT_EQUAL(2, s_cfg.filters[2].bus_rate); /* 500 / 2 */
+    TEST_ASSERT_EQUAL_HEX16(AP_BUS_KEY(AP_BUS_CH, 2),
+                            ap_filter_bus_key(&s_cfg.filters[2]));
+    TEST_ASSERT_EQUAL_HEX16(0, ap_filter_bus_key(&s_cfg.filters[3]));
+    TEST_ASSERT_EQUAL_HEX16(0, ap_filter_bus_key(&s_cfg.filters[4]));
+
+    /* the scheduler: a filter on another bus is that bus's (grouped with
+       its rows, its own class); on the car's own bus as before */
+    TEST_ASSERT_EQUAL_HEX16(AP_BUS_KEY(AP_BUS_SW, 0) | AP_BUS_KEY_EXT,
+                            ap_sched_entry_bus(&s_cfg, 0));
+    TEST_ASSERT_EQUAL(AP_CLASS_LISTEN_BUS, ap_sched_entry_class(&s_cfg, 0));
+    TEST_ASSERT_TRUE(AP_CLASS_IS_CHIP(ap_sched_entry_class(&s_cfg, 0)));
+    TEST_ASSERT_EQUAL(AP_CLASS_LISTEN_BUS, ap_sched_entry_class(&s_cfg, 2));
+    TEST_ASSERT_EQUAL_HEX16(0, ap_sched_entry_bus(&s_cfg, 3));
+    TEST_ASSERT_EQUAL(AP_CLASS_CHIP, ap_sched_entry_class(&s_cfg, 3));
+
+    /* on, with a bus this firmware does not know, or a speed on the car's
+       own bus: refused, whole in the parser's 96 bytes */
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(
+        "{\"filters\":[{\"frame_id\":270975179,\"bus\":\"hs\","
+        PRM("hvac") "}]}", &s_cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("filter 1026C0CB: unknown bus (obd, ms, sw or ch)",
+                             err);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(
+        "{\"filters\":[{\"frame_id\":288,\"bus_kbps\":250,"
+        PRM("odo") "}]}", &s_cfg, err, sizeof(err)));
+    TEST_ASSERT_EQUAL_STRING("filter 120: bus_kbps needs a bus other than obd "
+                             "and a speed the chip can make", err);
+
+    /* switched off, either may stay: the file loads, the filter rests */
+    load("{\"filters\":["
+         "{\"frame_id\":270975179,\"bus\":\"hs\",\"enabled\":false,"
          PRM("hvac") "},"
+         "{\"frame_id\":288,\"bus_kbps\":250,\"enabled\":false," PRM("odo") "},"
          "{\"frame_id\":290,\"bus\":7," PRM("c") "}]}");
-    TEST_ASSERT_EQUAL(4, s_cfg.n_filters);
-    TEST_ASSERT_TRUE(s_cfg.filters[0].enabled);
-    TEST_ASSERT_FALSE(s_cfg.filters[2].enabled);
+    TEST_ASSERT_EQUAL(3, s_cfg.n_filters);
+    TEST_ASSERT_FALSE(s_cfg.filters[0].enabled);
+    TEST_ASSERT_EQUAL(AP_BUS_OBD, s_cfg.filters[0].bus);
+    TEST_ASSERT_EQUAL(0, s_cfg.filters[1].bus_rate);
+    TEST_ASSERT_EQUAL(AP_BUS_OBD, s_cfg.filters[2].bus); /* not text: none */
 
     /* the loader's repair: a stored file with such a filter on loads with
-       that filter off and every other one as it was */
+       that filter off and every other one as it was; a single-wire filter
+       is no longer one of them */
     static const char STORED[] =
         "{\"filters\":["
         "{\"frame_id\":270975179,\"bus\":\"sw\"," PRM("hvac") "},"
-        "{\"frame_id\":288,\"bus\":\"obd\"," PRM("odo") "},"
-        "{\"frame_id\":275857472,\"bus\":\"ms\",\"enabled\":false,"
-        PRM("refused") "}]}";
+        "{\"frame_id\":275857472,\"bus\":\"hs\"," PRM("refused") "},"
+        "{\"frame_id\":288,\"bus_kbps\":250," PRM("odo") "},"
+        "{\"frame_id\":289,\"bus\":\"ms\",\"enabled\":false," PRM("b") "}]}";
 
     TEST_ASSERT_NOT_EQUAL(ESP_OK, ap_config_parse(STORED, &s_cfg, err,
                                                   sizeof(err)));
@@ -246,12 +289,14 @@ void test_filter_bus_is_the_cars_own(void)
     char *fixed = ap_config_repair_filter_bus(STORED, &off);
 
     TEST_ASSERT_NOT_NULL(fixed);
-    TEST_ASSERT_EQUAL(1, off);
+    TEST_ASSERT_EQUAL(2, off);
     load(fixed);
-    TEST_ASSERT_EQUAL(3, s_cfg.n_filters);
-    TEST_ASSERT_FALSE(s_cfg.filters[0].enabled);
-    TEST_ASSERT_TRUE(s_cfg.filters[1].enabled);
+    TEST_ASSERT_EQUAL(4, s_cfg.n_filters);
+    TEST_ASSERT_TRUE(s_cfg.filters[0].enabled);
+    TEST_ASSERT_EQUAL(AP_BUS_SW, s_cfg.filters[0].bus);
+    TEST_ASSERT_FALSE(s_cfg.filters[1].enabled);
     TEST_ASSERT_FALSE(s_cfg.filters[2].enabled);
+    TEST_ASSERT_FALSE(s_cfg.filters[3].enabled);
 
     /* once: the repaired text needs no second repair */
     int again = -1;
@@ -262,11 +307,58 @@ void test_filter_bus_is_the_cars_own(void)
 
     /* nothing to repair, and a text that is no JSON: left to the parser */
     TEST_ASSERT_NULL(ap_config_repair_filter_bus(
-        "{\"filters\":[{\"frame_id\":288," PRM("odo") "}]}", &off));
+        "{\"filters\":[{\"frame_id\":288,\"bus\":\"sw\"," PRM("odo") "}]}",
+        &off));
     TEST_ASSERT_EQUAL(0, off);
     TEST_ASSERT_NULL(ap_config_repair_filter_bus("{}", &off));
     TEST_ASSERT_NULL(ap_config_repair_filter_bus("nonsense", &off));
     TEST_ASSERT_EQUAL(0, off);
+}
+
+/* A filter on another bus listens through the voltage pause (2026-11-22, a
+   2012 Volt): a remote start is decided on the single-wire bus while the
+   12 V is low, and a refused one never lifts it, so a filter that waited
+   for the pause saw neither. It sends nothing: the pause stops it as it
+   stops the passive rows, under pause_mode "all" only, as v4.50 went on
+   monitoring under disable_pid_requests. A row of that bus sends, and
+   waits; a filter on the car's own bus keeps waiting for the HS guard. */
+void test_filter_listens_through_the_pause(void)
+{
+    load("{\"pids\":["
+         "{\"name\":\"seat\",\"cmd\":\"224102\",\"bus\":\"sw\","
+         "\"parameters\":[{\"name\":\"seat\",\"expression\":\"B4\"}]}],"
+         "\"filters\":["
+         "{\"frame_id\":288," PRM("odo") "},"
+         "{\"frame_id\":271007947,\"bus\":\"sw\"," PRM("rs") "}]}");
+    TEST_ASSERT_EQUAL(AP_CLASS_CHIP_BUS, ap_sched_entry_class(&s_cfg, 0));
+    TEST_ASSERT_EQUAL(AP_CLASS_CHIP, ap_sched_entry_class(&s_cfg, 1));
+    TEST_ASSERT_EQUAL(AP_CLASS_LISTEN_BUS, ap_sched_entry_class(&s_cfg, 2));
+    TEST_ASSERT_TRUE((AP_CLASS_ALL & AP_CLASS_BIT(AP_CLASS_LISTEN_BUS)) != 0);
+
+    /* the voltage pause under requests_only: the poller offers the passive
+       classes and the listening one; the filter alone is picked */
+    unsigned pause = AP_CLASS_BIT(AP_CLASS_PASSIVE) |
+                     AP_CLASS_BIT(AP_CLASS_BUS_TX) |
+                     AP_CLASS_BIT(AP_CLASS_LISTEN_BUS);
+    int64_t now = 1000000;
+
+    TEST_ASSERT_EQUAL(2, ap_sched_next_of(&s_st, &s_cfg, pause, NULL));
+    TEST_ASSERT_EQUAL(2, ap_sched_next_grouped(&s_st, &s_cfg, pause, 0, 0,
+                                               now, NULL));
+
+    /* awake, every class, all due at home: the car's own first, as the
+       grouping asks before the chip goes away; on the filter's bus (the
+       29-bit slot) the filter is picked as a row of that bus would be */
+    TEST_ASSERT_EQUAL(1, ap_sched_next_grouped(&s_st, &s_cfg, AP_CLASS_ALL,
+                                               0, 0, now, NULL));
+    TEST_ASSERT_EQUAL(2, ap_sched_next_grouped(
+        &s_st, &s_cfg, AP_CLASS_ALL, AP_BUS_KEY(AP_BUS_SW, 0) | AP_BUS_KEY_EXT,
+        now, now, NULL));
+
+    /* under pause_mode "all", or an app on the chip: nothing */
+    TEST_ASSERT_EQUAL(-1, ap_sched_next_of(&s_st, &s_cfg,
+                                           AP_CLASS_BIT(AP_CLASS_PASSIVE),
+                                           NULL));
 }
 
 void run_filter_type_tests(void)
@@ -276,5 +368,6 @@ void run_filter_type_tests(void)
     RUN_TEST(test_filter_type_gated_filter_is_never_picked);
     RUN_TEST(test_flt_frame_line);
     RUN_TEST(test_flt_window_proto);
-    RUN_TEST(test_filter_bus_is_the_cars_own);
+    RUN_TEST(test_filter_on_its_bus);
+    RUN_TEST(test_filter_listens_through_the_pause);
 }
