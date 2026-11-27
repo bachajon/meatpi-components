@@ -1301,7 +1301,13 @@ of its first `ATSP`, its init and three requests (`probeCmds()`: since 2026-11-1
 profile's first three MANUFACTURER requests, each with its own init, because the job uses
 them only after the standard requests stayed silent; a profile of standard rows only sends
 those). The step's words say what the job does: standard requests on each CAN protocol
-first, the profile's own requests for a car that answers none. Probe:
+first, the profile's own requests for a car that answers none; since 2026-11-27 the
+protocol phase names SAE J1850 and the K-line too, which the job asks behind CAN. A
+detection the device refuses to start (409: the bus guard's sentence, or another job on
+the chip) asked the car nothing, and the banner says that since the same day: "WiCAN did
+not ask the car." with the refusal's sentence and "Nothing was sent to the vehicle."
+(`W.scanStatus.refused`), where every failure read "The car did not answer" with the
+ignition and the plug as the advice (GitHub issue #1022). Probe:
 `probe_profile_first.mjs` in the firmware repo. "Detect my vehicle" = `POST /api/autopid/vehicles/detect` (falls back to
 `POST /api/autopid/std_scan` on older firmware), the phases protocol / vin / pids from
 `GET /api/autopid/std_scan`, then the result card from `/std_scan/result` + the store

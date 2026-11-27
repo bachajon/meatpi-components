@@ -38,8 +38,15 @@
  *   bus live at the other rate   the vehicle store's protocol gives way to
  *                                the chip's search; a protocol pinned by the
  *                                `std_protocol` setting does not transmit
- *   bus live, unreadable         nothing is transmitted (not even a search:
+ *   bus live, unreadable         nothing is sent on CAN (not even a search:
  *                                the chip was only measured at 250 and 500)
+ *
+ * The verdict is about the CAN pins. SAE J1850 and the K-line are other pins:
+ * a protocol pinned there is never judged, and a park nobody asked for with a
+ * pinned CAN protocol leaves them open to the detection job
+ * (ap_guard_other_pins_open(), 2026-11-27: a body bus at 50 kbit/s on pins 6
+ * and 14 of a car whose engine ECU sits on the K-line had the job refused
+ * before its own walk over these protocols, GitHub issue #1022).
  *
  * The tables pin protocols too (`ATSP6` in a row's init, a type's init,
  * `dtc_init`, a row tested from the UI: most vehicle profiles carry one), and
@@ -170,6 +177,15 @@ ap_guard_verdict_t ap_guard_decide(const ap_bus_t *bus, char proto,
     }
 
     return pinned ? AP_GUARD_PARK : AP_GUARD_SEARCH;
+}
+
+bool ap_guard_other_pins_open(const ap_bus_t *bus, char proto, bool pinned)
+{
+    /* a park the setting asked for is the user's word for a CAN protocol (a
+       pinned 1..5 is never parked): nothing is looked for elsewhere. Any
+       other park is traffic on the CAN pins that cannot be read, which says
+       nothing about SAE J1850 and the K-line */
+    return !pinned && ap_guard_decide(bus, proto, pinned) == AP_GUARD_PARK;
 }
 
 bool ap_guard_pin_allowed(char proto, char ruled)
@@ -407,10 +423,13 @@ size_t ap_guard_reason(const ap_bus_t *bus, char proto, bool pinned,
     {
         /* a node of the unit's own, fixed at one bit rate, said so: it
            tried no other, and its setting is the way out. Until 2026-11-13
-           this read "not 250 or 500 kbit/s" on a 250 kbit/s bus */
+           this read "not 250 or 500 kbit/s" on a 250 kbit/s bus. "On CAN":
+           the car may still be asked on SAE J1850 and the K-line
+           (ap_guard_other_pins_open; "nothing is transmitted" until
+           2026-11-27) */
         n = snprintf(out, cap, "the vehicle bus carries traffic that "
                                "WiCAN's CAN controller, set to %u kbit/s, "
-                               "cannot read: nothing is transmitted (set "
+                               "cannot read: nothing is sent on CAN (set "
                                "the CAN bit rate to Automatic)",
                      (unsigned)bus->node_kbps);
     }
@@ -419,7 +438,7 @@ size_t ap_guard_reason(const ap_bus_t *bus, char proto, bool pinned,
     {
         n = snprintf(out, cap, "the vehicle bus carries traffic at a "
                                "bitrate that could not be read (not 250 "
-                               "or 500 kbit/s): nothing is transmitted");
+                               "or 500 kbit/s): nothing is sent on CAN");
     }
     else if (v == AP_GUARD_PARK)
     {
@@ -443,6 +462,17 @@ size_t ap_guard_reason(const ap_bus_t *bus, char proto, bool pinned,
     else if (bus != NULL && bus->kind == AP_BUS_SILENT)
     {
         n = snprintf(out, cap, "vehicle bus silent");
+    }
+    else if (bus != NULL && bus->kind == AP_BUS_UNREADABLE)
+    {
+        /* allowed all the same: SAE J1850 and the K-line are other pins,
+           and a CAN definition of the user's own (B, C) is not judged. A
+           car on the K-line behind a body bus read "vehicle bus not probed"
+           here until 2026-11-27 */
+        n = snprintf(out, cap, "vehicle bus traffic could not be read; "
+                               "protocol %c %s", proto,
+                     (proto >= '1' && proto <= '5') ? "is asked on other pins"
+                                                    : "is not judged");
     }
     else
     {

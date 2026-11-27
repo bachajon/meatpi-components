@@ -181,7 +181,7 @@ static int cmd_autopid(int argc, char **argv)
                    st.paused_voltage ? " (voltage pause)" : "",
                    st.paused_client ? " (yielding to an OBD app)" : "",
                    st.paused_diag ? " (paused for a diagnostic tool)" : "",
-                   st.paused_bus ? " (bus guard: nothing is transmitted)"
+                   st.paused_bus ? " (bus guard: nothing is sent on CAN)"
                                  : "",
                    st.paused_chip_fw ? " (the OBD chip's firmware is being "
                                        "updated)" : "");

@@ -20,6 +20,9 @@ void run_vehicle_tests(void);
 void run_vehicle_index_tests(void);
 /* test_bus_guard.c: may the chip transmit, given what is on the bus */
 void run_bus_guard_tests(void);
+/* test_other_pins.c: a park for the CAN pins leaves SAE J1850 and the K-line
+   open (GitHub issue #1022) */
+void run_other_pins_tests(void);
 /* test_dialect.c: OBD dialects (obd2 / uds) and the chip's 29-bit print */
 void run_dialect_tests(void);
 /* test_dtc_report.c: the DTC report's per-ECU items and lamps */
@@ -2151,6 +2154,7 @@ void app_main(void)
     run_vehicle_tests();
     run_vehicle_index_tests();
     run_bus_guard_tests();
+    run_other_pins_tests();
     run_dialect_tests();
     run_dtc_report_tests();
     run_names_tests();

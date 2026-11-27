@@ -129,7 +129,7 @@ void test_guard_a_fixed_nodes_unreadable_names_its_setting(void)
 
     TEST_ASSERT_EQUAL_STRING("the vehicle bus carries traffic that WiCAN's "
                              "CAN controller, set to 500 kbit/s, cannot "
-                             "read: nothing is transmitted (set the CAN bit "
+                             "read: nothing is sent on CAN (set the CAN bit "
                              "rate to Automatic)", s);
     TEST_ASSERT_EQUAL_UINT(strlen(s), n);
     TEST_ASSERT_NULL(strstr(s, "not 250"));

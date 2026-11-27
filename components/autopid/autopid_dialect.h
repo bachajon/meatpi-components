@@ -233,6 +233,19 @@ bool ap_guard_candidate_ok(char proto);
 /** Is anybody ELSE talking on the CAN pins right now? For a caller that has
  *  the chip and keeps it quiet meanwhile (about a third of a second). */
 bool ap_guard_others_on_can(void);
+/** ap_guard_job_ok() for the detection job, which walks the protocols
+ *  itself. Also true when the chip is parked for the CAN pins while SAE J1850
+ *  and the K-line stay open (ap_guard_other_pins_open): @p other_pins_only
+ *  then, and the job asks on those alone. false = nothing may be asked
+ *  anywhere; @p reason says why. */
+bool ap_guard_detect_ok(char *reason, size_t cap, bool *other_pins_only);
+
+/** The detection's result into the vehicle store (autopid_scan_store.c,
+ *  scan task): the car's entry and its rows, stored off, with the profile
+ *  the wizard named for a new car; @p root (the result document) is stamped
+ *  with the car it landed on (`key`, `known`, `name`). */
+void ap_scan_store(cJSON *root, const cJSON *supported, ap_veh_seen_t *seen,
+                   uint16_t found);
 #endif /* !AUTOPID_HOST_TEST */
 
 /** The walk's rows as a config.json document (a new car's tables:

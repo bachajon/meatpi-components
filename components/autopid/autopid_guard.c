@@ -390,8 +390,16 @@ bool ap_guard_pin_ok(char proto)
     return ap_guard_pin_allowed(proto, s_ok_proto);
 }
 
-bool ap_guard_job_ok(char *reason, size_t cap)
+/** A chip job's verdict (ap_guard_job_ok). @p other_pins (may be NULL): the
+ *  job is parked for the CAN pins while SAE J1850 and the K-line stay open
+ *  to it (ap_guard_other_pins_open). */
+static bool job_verdict(char *reason, size_t cap, bool *other_pins)
 {
+    if (other_pins != NULL)
+    {
+        *other_pins = false;
+    }
+
     if (s_lock == NULL)
     {
         return true;
@@ -425,6 +433,10 @@ bool ap_guard_job_ok(char *reason, size_t cap)
     {
         chip_talks(proto); /* the job transmits next */
     }
+    else if (other_pins != NULL)
+    {
+        *other_pins = ap_guard_other_pins_open(&s_bus, proto, pinned);
+    }
 
     if (reason != NULL && cap > 0)
     {
@@ -433,6 +445,27 @@ bool ap_guard_job_ok(char *reason, size_t cap)
 
     xSemaphoreGive(s_lock);
     return v != AP_GUARD_PARK;
+}
+
+bool ap_guard_job_ok(char *reason, size_t cap)
+{
+    return job_verdict(reason, cap, NULL);
+}
+
+bool ap_guard_detect_ok(char *reason, size_t cap, bool *other_pins_only)
+{
+    bool open = false;
+    bool ok = job_verdict(reason, cap, &open);
+
+    /* the detection walks the protocols itself: parked for CAN, it still has
+       SAE J1850 and the K-line to ask on (2026-11-27, GitHub issue #1022:
+       refused here, it never reached the K-line a car answered on) */
+    if (other_pins_only != NULL)
+    {
+        *other_pins_only = !ok && open;
+    }
+
+    return ok || open;
 }
 
 void ap_guard_bus(ap_bus_t *out)

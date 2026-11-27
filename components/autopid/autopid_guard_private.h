@@ -64,7 +64,7 @@ typedef enum
 {
     AP_GUARD_ALLOW = 0,   /* send on the protocol asked for                 */
     AP_GUARD_SEARCH,      /* not on that one: the chip's search (ATTP0)     */
-    AP_GUARD_PARK,        /* nothing is transmitted                         */
+    AP_GUARD_PARK,        /* nothing is sent on the CAN pins                */
 } ap_guard_verdict_t;
 
 /** kbit/s the chip transmits at on CAN protocol @p proto ('6'..'9', 'A');
@@ -126,6 +126,21 @@ void ap_guard_after_quiet(ap_bus_t *bus, uint8_t sent, ap_heard_t heard);
  *  word), not the vehicle store (ours, which may give way to the search). */
 ap_guard_verdict_t ap_guard_decide(const ap_bus_t *bus, char proto,
                                    bool pinned);
+
+/** Parked for the CAN pins, and nobody named a protocol: may the car still
+ *  be looked for on SAE J1850 and the K-line? Those are other pins: the
+ *  traffic on the CAN pins says nothing about them, and a request there
+ *  disturbs nothing. True for a park the `std_protocol` setting did not ask
+ *  for (the chip's search, a stored CAN protocol: only traffic that cannot
+ *  be read parks those). False when the setting pins a CAN protocol (the
+ *  user's word: nothing is looked for elsewhere), and whenever the verdict is
+ *  no park. Asked by the detection job alone (ap_guard_detect_ok): GitHub
+ *  issue #1022, a 2008 Fiat Ducato, a body bus at 50 kbit/s on pins 6 and 14
+ *  and the engine ECU on the K-line; "Detect my vehicle" was refused at its
+ *  door and never reached its own walk over these protocols. The poller and
+ *  first contact stay parked on such a bus (Ali, 2026-11-27: the detection
+ *  only). */
+bool ap_guard_other_pins_open(const ap_bus_t *bus, char proto, bool pinned);
 
 /** May a prelude pin @p proto now? @p ruled = the protocol the last positive
  *  verdict was taken for ('0' = the search, '\0' = none stands). A verdict

@@ -15,6 +15,7 @@ idf_component_register(
          "test_vehicle.c"
          "test_vehicle_index.c"
          "test_bus_guard.c"
+         "test_other_pins.c"
          "test_dialect.c"
          "test_dtc_report.c"
          "test_resp_lines.c"

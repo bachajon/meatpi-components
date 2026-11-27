@@ -39,7 +39,12 @@
  *             (ATTP0), which asks `0100` only: it cannot find a
  *             UDS-dialect vehicle and takes 9.3 s to give up. A pinned
  *             `std_protocol` is asked in both dialects. What first contact
- *             just found (a hint) is tried before any of that;
+ *             just found (a hint) is tried before any of that. Behind the
+ *             CAN protocols SAE J1850 and the K-line are asked (`0100`):
+ *             other pins, whatever the CAN pins carry. When the bus guard
+ *             keeps the chip off the CAN pins (traffic there that cannot
+ *             be read) the job asks on those alone (2026-11-27, GitHub
+ *             issue #1022: it was refused before its walk until then);
  *   vin       the responder set and the VIN, in the car's dialect
  *             (autopid_identify.c);
  *   pids      the support bitmap walk mapped onto the SAE table
@@ -115,6 +120,11 @@ static uint16_t s_no_way_kbps;  /* scan task: the bus bitrate that left the
                                    job no protocol to ask on (0 = asked)  */
 static volatile char s_trying;  /* the protocol the job pinned last (the
                                    status's `trying` while it looks)      */
+static bool s_can_closed;       /* this job may ask on SAE J1850 and the
+                                   K-line alone: the bus guard keeps the chip
+                                   off the CAN pins (ap_guard_detect_ok).
+                                   Written by the starter before the task
+                                   exists, read by the task                */
 
 const char *autopid_std_scan_path(void)
 {
@@ -226,7 +236,8 @@ static bool scan_contact(char *proto, ap_dialect_t *dialect)
     s_hint_proto = '\0';
 
     if (hint != '\0' && ap_dialect_has_requests(hint_dialect) &&
-        (!pinned || hint == setting[0]))
+        (!pinned || hint == setting[0]) &&
+        (!s_can_closed || ap_proto_precan(hint)))
     {
         scan_send_prelude(ap_veh_prelude_for(hint));
 
@@ -247,13 +258,14 @@ static bool scan_contact(char *proto, ap_dialect_t *dialect)
 
     /* nobody named a protocol: the ISO 15765-4 protocols this bus
        allows, both dialects on each. The guard looks at the bus again
-       before each of them. */
+       before each of them. None when the job was let in for the other pins
+       alone, whatever a later look at sparse traffic says. */
     char cand[AP_DIALECT_CAND_LEN];
     ap_bus_t bus;
 
     ap_guard_bus(&bus);
 
-    int n = ap_dialect_can_candidates(&bus, cand);
+    int n = s_can_closed ? 0 : ap_dialect_can_candidates(&bus, cand);
 
     if (n == 0 && bus.kind == AP_BUS_LIVE)
     {
@@ -306,85 +318,6 @@ static void scan_uds_protocol_id(cJSON *root)
 
 /* ---- the job ------------------------------------------------------------------------ */
 
-/** Hand the result to the vehicle store and stamp the result document
- *  with the car it landed on (`key`, `known`, `name`). */
-static void scan_store(cJSON *root, const cJSON *supported,
-                       ap_veh_seen_t *seen, uint16_t found)
-{
-    static ap_veh_entry_t entry EXT_RAM_BSS_ATTR; /* scan task only     */
-    bool known = false;
-    /* whatever the table says, no parameter name twice in what is stored
-       (the result document and the car's rows alike) */
-    int renamed = ap_names_dedupe((cJSON *)supported);
-    /* a new car's rows are stored OFF: nothing is read until the user
-       ticks the ones they want (Ali, 2026-10-09) */
-    char *tables = ap_scan_rows_config(supported);
-    esp_err_t err = ESP_ERR_NO_MEM;
-
-    if (renamed > 0)
-    {
-        ESP_LOGW(TAG, "detection: %d repeated parameter name%s made unique",
-                 renamed, renamed == 1 ? "" : "s");
-    }
-
-    seen->std_supported = found;
-
-    if (tables != NULL)
-    {
-        err = autopid_vehicle_detected(seen, tables, strlen(tables), &entry,
-                                       &known);
-        free(tables);
-    }
-
-    if (err == ESP_OK)
-    {
-        cJSON_AddStringToObject(root, "key", entry.key);
-        cJSON_AddBoolToObject(root, "known", known);
-        cJSON_AddStringToObject(root, "name", entry.name);
-
-        if (!known && found > 0)
-        {
-            ESP_LOGI(TAG, "detection: the %u rows of %s are stored off: "
-                          "tick the ones to read under Automate > Parameters "
-                          "or in the Quick Setup", (unsigned)found,
-                     entry.key);
-        }
-
-        /* the wizard named the car before the probe (2026-10-26): a new
-           entry is stored under that name with the profile attached (its
-           init applies live when the car is current); a known car keeps
-           what it has until Finish */
-        const ap_scan_probe_t *probe = ap_scan_probe();
-
-        if (!known && probe->armed && probe->profile[0] != '\0')
-        {
-            esp_err_t u = autopid_vehicle_update(
-                entry.key, probe->name[0] != '\0' ? probe->name : NULL,
-                probe->profile, probe->init[0] != '\0' ? probe->init : NULL);
-
-            if (u == ESP_OK)
-            {
-                cJSON_ReplaceItemInObject(root, "name", cJSON_CreateString(
-                    probe->name[0] != '\0' ? probe->name : entry.name));
-            }
-            else
-            {
-                ESP_LOGW(TAG, "detection: profile %s not attached to %s (%s)",
-                         probe->profile, entry.key, esp_err_to_name(u));
-            }
-        }
-    }
-    else
-    {
-        /* a car without VIN or responders cannot be stored: the table
-           still is (the user can merge it by hand) */
-        ESP_LOGW(TAG, "detection: not stored (%s)", esp_err_to_name(err));
-        cJSON_AddStringToObject(root, "key", "");
-        cJSON_AddBoolToObject(root, "known", false);
-        cJSON_AddStringToObject(root, "name", "");
-    }
-}
-
 static void scan_task(void *arg)
 {
     (void)arg;
@@ -404,6 +337,12 @@ static void scan_task(void *arg)
 
     memset(&seen, 0, sizeof(seen));
     s_no_way_kbps = 0;
+
+    if (s_can_closed)
+    {
+        ESP_LOGI(TAG, "detection: nothing can be asked on the CAN pins, "
+                      "asking on SAE J1850 and the K-line");
+    }
 
     s_scan_phase = PHASE_PROTOCOL;
 
@@ -536,11 +475,24 @@ static void scan_task(void *arg)
     {
         snprintf(s_scan_err, sizeof(s_scan_err), "out of memory");
     }
+    else if (!any_response && s_can_closed)
+    {
+        /* the other pins were asked, so "ignition on?" stands; the first
+           half says why nothing was asked on CAN (and why a profile's own
+           requests, which live there, were not sent either) */
+        snprintf(s_scan_err, sizeof(s_scan_err),
+                 "nothing could be asked on CAN (traffic at a bitrate that "
+                 "could not be read); SAE J1850 and the K-line were asked: "
+                 "no ECU response (ignition on?)");
+    }
     else if (!any_response && s_no_way_kbps != 0)
     {
+        /* "so nothing was sent" until 2026-11-27, which the walk on the
+           other pins had made untrue on 2026-11-13 */
         snprintf(s_scan_err, sizeof(s_scan_err),
-                 "the vehicle bus runs at %u kbit/s; OBD is asked at 250 or "
-                 "500, so nothing was sent", (unsigned)s_no_way_kbps);
+                 "the vehicle bus runs at %u kbit/s, OBD on CAN is asked at "
+                 "250 or 500; SAE J1850 and the K-line were asked: no ECU "
+                 "response (ignition on?)", (unsigned)s_no_way_kbps);
     }
     else if (!any_response && probe_refused)
     {
@@ -561,7 +513,7 @@ static void scan_task(void *arg)
 
         /* the store first (entry, tables, switch, chip protocol), then
            the result document */
-        scan_store(root, supported, &seen, found);
+        ap_scan_store(root, supported, &seen, found);
 
         char *body = cJSON_PrintUnformatted(root);
 
@@ -608,8 +560,12 @@ esp_err_t autopid_std_scan_start(void)
     }
 
     /* bus guard: a detection on a pinned protocol, or on a bus nothing
-       here can read, would transmit at the wrong bitrate */
-    if (!ap_guard_job_ok(s_scan_err, sizeof(s_scan_err)))
+       here can read, would transmit at the wrong bitrate. On CAN: a park
+       nobody asked for with a pinned CAN protocol leaves the job SAE J1850
+       and the K-line to ask on */
+    bool can_closed = false;
+
+    if (!ap_guard_detect_ok(s_scan_err, sizeof(s_scan_err), &can_closed))
     {
         s_scan_state = SCAN_FAILED;
         return ESP_ERR_NOT_SUPPORTED;
@@ -621,6 +577,7 @@ esp_err_t autopid_std_scan_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    s_can_closed = can_closed;  /* ours now: no job reads it but this one */
     s_scan_state = SCAN_RUNNING;
     s_scan_phase = PHASE_IDLE;
     s_scan_found = 0;
