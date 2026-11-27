@@ -1578,8 +1578,14 @@ and carries `"max": "1000000"`. Reproduced with that row and
 every second with the bounds as strings, dropped with the same bounds as
 numbers; 4.52p's code drops it too (`autopid_prepare_parameter_value()`,
 its "above max" warning). When that ECU of the car answers `FF FF FF` is
-not known (no capture of the car); the device's part is that it showed
-the answer.
+not known: the Car Scanner logs of the same model that users sent never
+ask `22F0D0`. They do show the habit behind it: `18DAF1DB` answers an
+identifier it holds no data for with FF bytes, not with a refusal
+(`22F190`: 17 bytes of FF every complete time, 5 of 5, while three other
+ECUs answer the same request with their data). Every request in those
+logs went out on the functional id, so whether the ECU answers the same
+when it is addressed directly is not on record. The device's part is that
+it showed the answer.
 
 Now `get_bound()` (autopid_config.c) reads a number, or a string that is
 one number whole (`strtod`, blanks around it allowed: `"1000000"`,
