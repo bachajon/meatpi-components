@@ -555,8 +555,31 @@ esp_err_t test_post_handler(httpd_req_t *req)
                 cJSON_IsString(rxh) ? rxh->valuestring : NULL);
         }
 
-        have_payload = (ap_resp_frames(s_raw, s_frames, sizeof(s_frames),
-                                       &n) == ESP_OK);
+        /* the ECU a poll of this row reads when several answered: the
+           lowest id for a standard row (and for a shot that names no
+           type), the first one that answers the request for a custom or
+           vehicle row; a raw row (ATCAF0 in its chains) is compared on the
+           request behind its length byte, as the poller does. Nobody
+           answered = the first ECU's bytes, shown as they are */
+        const char *type_init = (tidx >= 0 && bus == AP_BUS_OBD)
+                                    ? ap_runner_type_init(tidx) : NULL;
+        const char *row_init = cJSON_IsString(init) ? init->valuestring
+                                                    : NULL;
+        const char *request = cmd->valuestring;
+        bool answered = false;
+
+        if ((ap_chain_moved(ap_chain_moved(0, type_init), row_init) &
+             AP_SETS_RAW) != 0)
+        {
+            request = ap_raw_cmd_request(cmd->valuestring);
+        }
+
+        have_payload = (ap_resp_row_frames(
+                            s_raw, request,
+                            (tidx >= 0) ? ap_resp_pick_for((ap_pid_type_t)tidx)
+                                        : AP_RESP_PICK_LOWEST,
+                            s_frames, sizeof(s_frames), &n,
+                            &answered) == ESP_OK);
         payload = s_frames;
     }
 

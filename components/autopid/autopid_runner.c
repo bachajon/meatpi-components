@@ -478,9 +478,6 @@ static bool row_ask(const ap_pid_t *pid, const ap_param_t *params)
         ap_bus_reply(pid->bus, resp); /* CAN ERROR in a row rests the bus */
     }
 
-    uint8_t payload[AP_PAYLOAD_MAX];
-    size_t payload_len = 0;
-
     if (pid->bus != AP_BUS_OBD)
     {
         ap_resp_set_id29_hint(0, false); /* the slots are 11-bit */
@@ -506,35 +503,32 @@ static bool row_ask(const ap_pid_t *pid, const ap_param_t *params)
         request = ap_raw_cmd_request(pid->cmd);
     }
 
-    if (request != NULL)
-    {
-        if (ap_resp_to_payload(resp, payload, sizeof(payload), &payload_len)
-                != ESP_OK)
-        {
-            ESP_LOGD(TAG, "%s: no payload in response", pid->name);
-            return false;
-        }
-
-        /* cross-talk guard: another chip master's response (WS-OBD
-           bridge, CLI) can land in our request window, never cache it
-           (Phase 1b) */
-        if (!ap_payload_matches_cmd(request, payload, payload_len))
-        {
-            ESP_LOGD(TAG, "%s: response echo mismatch (cross-talk?)",
-                     pid->name);
-            return false;
-        }
-    }
-
     /* the bytes the row's expressions index: the reply as the chip
        printed it, headers on (the legacy frame of reference, the published
-       profiles'; 2026-10-24, issue #1014). Poller-task only. */
+       profiles'; 2026-10-24, issue #1014), from the ECU the row reads when
+       several answered: the lowest id for a standard row, the first one
+       that answers the request for a custom or vehicle row (2026-11-27:
+       the legacy firmware read every line in arrival order; with the
+       lowest id for every row, an ECU with a lower id that answered
+       `FF FF FF` behind the real one became the row's value). Poller-task
+       only. */
     static uint8_t s_frames[AP_FRAMES_MAX] EXT_RAM_BSS_ATTR;
     size_t n_frames = 0;
+    bool answered = false;
 
-    if (ap_resp_frames(resp, s_frames, sizeof(s_frames), &n_frames) != ESP_OK)
+    if (ap_resp_row_frames(resp, request, ap_resp_pick_for(pid->type),
+                           s_frames, sizeof(s_frames), &n_frames,
+                           &answered) != ESP_OK)
     {
         ESP_LOGD(TAG, "%s: no frames in response", pid->name);
+        return false;
+    }
+
+    /* cross-talk guard: another chip master's response (WS-OBD bridge,
+       CLI) can land in our request window, never cache it (Phase 1b) */
+    if (!answered)
+    {
+        ESP_LOGD(TAG, "%s: response echo mismatch (cross-talk?)", pid->name);
         return false;
     }
 

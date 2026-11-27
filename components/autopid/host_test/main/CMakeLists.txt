@@ -42,6 +42,7 @@ idf_component_register(
          "${comp_dir}/autopid_chain.c"
          "${comp_dir}/autopid_bounds.c"
          "${comp_dir}/autopid_resp.c"
+         "${comp_dir}/autopid_resp_echo.c"
          "${comp_dir}/autopid_resp_lines.c"
          "${comp_dir}/autopid_resp_filter.c"
          "${comp_dir}/autopid_config.c"

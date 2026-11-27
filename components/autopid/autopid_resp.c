@@ -31,15 +31,29 @@
  *                         (B0 = 0x41 for a mode-01 response): what the
  *                         parsers (VIN, DTC, the detection) and the
  *                         cross-talk guard read.
- *   ap_resp_frames()      the reply AS THE CHIP PRINTS IT with headers on
+ *   ap_resp_row_frames()  the reply AS THE CHIP PRINTS IT with headers on
  *                         (every line's bytes after the CAN id, PCI and
- *                         extended address bytes included, the lowest
- *                         responder's lines in arrival order): what user
- *                         expressions index since 2026-10-24 (issue
- *                         #1014). The legacy firmware's
- *                         parse_elm327_response() read the same bytes, so
- *                         the published vehicle profiles count this way:
- *                         `04 41 0C 1A F8` is the RPM reply, `[B3:B4]/4`.
+ *                         extended address bytes included, ONE responder's
+ *                         lines in arrival order): what user expressions
+ *                         index since 2026-10-24 (issue #1014). The legacy
+ *                         firmware's parse_elm327_response() read the same
+ *                         bytes, so the published vehicle profiles count
+ *                         this way: `04 41 0C 1A F8` is the RPM reply,
+ *                         `[B3:B4]/4`. ap_resp_frames() is the same view
+ *                         of the lowest responder, with nothing compared.
+ *
+ * Which responder, when several ECUs answer one request (a row that sets no
+ * header of its own goes out on the functional id, and every ECU that knows
+ * the identifier replies): a STANDARD row reads the lowest id (7E8, the
+ * engine ECU: the legacy firmware's priority rule for its standard table); a
+ * CUSTOM or VEHICLE row reads the first ECU, in arrival order, whose reply
+ * answers the request (2026-11-27). The legacy firmware evaluated such a row
+ * over every line in arrival order, so a published expression counts into
+ * the answer that came first; until that day v6 read the lowest id for
+ * every row, and an odometer row (`222006`, `[B4:B6]`) answered by `7EC 06
+ * 62 20 06 01 E2 40` and then by `7EA 06 62 20 06 FF FF FF` (an ECU that
+ * holds no mileage) read 16777215 where 4.52p read 123456, and nothing at
+ * all when the lower id refused (`7E8 03 7F 22 31`).
  *
  * Accepted shapes (auto-detected per line):
  *   41 0C 1A F8                headers off, single frame
@@ -47,8 +61,9 @@
  *                              then indexed 8-byte rows; trimmed to length)
  *   7E8 06 41 00 BE 7F B8 13   headers on, single frame (PCI 0x0L)
  *   7E8 10 14 49 02 01 ..      headers on, ISO-TP first (0x1L LL) +
- *   7E8 21 ..                  consecutive (0x2N): reassembled from the
- *                              LOWEST responder ID only (legacy rule)
+ *   7E8 21 ..                  consecutive (0x2N): reassembled from ONE
+ *                              responder id only (the lowest, or the one a
+ *                              row picks: see above)
  *   607 F1 10 09 62 E5 CE ..   headers on, extended addressing: the target
  *                              address byte before the PCI (take_ea)
  *   18 DA F1 58 07 62 F4 00 .. headers on, 29-bit: the chip prints the id
@@ -72,8 +87,9 @@
  * with 0.., the Leaf ZE1's 28-row reply, bench 2026-10-21).
  *
  * The line tokenizer (one chip line -> bytes, header, row index) lives in
- * autopid_resp_lines.c since 2026-10-03 (700-line rule); this file
- * assembles its lines into payloads and holds the cross-talk guard.
+ * autopid_resp_lines.c since 2026-10-03 (700-line rule) and the cross-talk
+ * guard in autopid_resp_echo.c since 2026-11-27; this file assembles the
+ * lines into payloads and picks the responder a row reads.
  */
 #include "autopid_private.h"
 #include "autopid_resp_private.h"
@@ -113,119 +129,6 @@ static void lines_lock(void)
 static void lines_unlock(void)
 {
     xSemaphoreGive(s_lines_lock);
-}
-
-bool ap_payload_matches_cmd(const char *cmd, const uint8_t *payload,
-                            size_t payload_len)
-{
-    /* parse the leading hex byte pairs of the command ("010C", "22202A",
-       "03"; a trailing response-count hint digit like "010C1" is ignored
-       by pair alignment). Non-hex commands (AT/ST/VT) can't be checked. */
-    uint8_t want[3];
-    size_t n_want = 0;
-    const char *p = cmd;
-
-    while (n_want < 3)
-    {
-        while (*p == ' ')
-        {
-            p++;
-        }
-
-        if (!isxdigit((unsigned char)p[0]) ||
-            !isxdigit((unsigned char)p[1]))
-        {
-            break;
-        }
-
-        char pair[3] = { p[0], p[1], '\0' };
-
-        want[n_want++] = (uint8_t)strtol(pair, NULL, 16);
-        p += 2;
-    }
-
-    if (n_want == 0)
-    {
-        return true; /* AT/ST/VT: nothing to verify */
-    }
-
-    /* positive responses echo (service | 0x40) then the identifier */
-    if (payload_len < 1 || payload[0] != (uint8_t)(want[0] + 0x40))
-    {
-        return false;
-    }
-
-    if (n_want > 1 && payload_len > 1 && payload[1] != want[1])
-    {
-        return false;
-    }
-
-    /* ReadDataByIdentifier echoes a 2-byte identifier: both bytes count,
-       or `62 F4 0D` would pass as the answer to `22F40C` */
-    if (want[0] == 0x22 && n_want > 2 && payload_len > 2 &&
-        payload[2] != want[2])
-    {
-        return false;
-    }
-
-    return true;
-}
-
-const char *ap_raw_cmd_request(const char *cmd)
-{
-    /* the frame's bytes as the chip reads them: hex pairs, spaces ignored */
-    const char *p = cmd;
-    const char *service_at = NULL;
-    uint8_t pci = 0;
-    uint8_t service = 0;
-    size_t n_pairs = 0;
-
-    for (;;)
-    {
-        while (*p == ' ')
-        {
-            p++;
-        }
-
-        if (!isxdigit((unsigned char)p[0]) ||
-            !isxdigit((unsigned char)p[1]))
-        {
-            break;
-        }
-
-        char pair[3] = { p[0], p[1], '\0' };
-        uint8_t byte = (uint8_t)strtol(pair, NULL, 16);
-
-        if (n_pairs == 0)
-        {
-            pci = byte;
-        }
-        else if (n_pairs == 1)
-        {
-            service = byte;
-            service_at = p;
-        }
-
-        n_pairs++;
-        p += 2;
-    }
-
-    /* an ISO-TP single frame: length 1..7 in byte 0, that many bytes
-       after it. Anything else (a raw frame of another kind, an AT/ST
-       command) carries no service to compare */
-    if (pci < 0x01 || pci > 0x07 || n_pairs < (size_t)pci + 1)
-    {
-        return NULL;
-    }
-
-    /* GMLAN readDataByPacketIdentifier: the answers are UUDT frames that
-       start with the packet's number, no response service (GMW3110 $AA) */
-    if (service == 0xAA)
-    {
-        return NULL;
-    }
-
-    return service_at;
 }
 
 /** ISO-TP reassembly over the frames of ONE responder id (PCI in byte
@@ -490,15 +393,102 @@ static size_t frames_from_payload(const uint8_t *payload, size_t len,
     return n;
 }
 
-esp_err_t ap_resp_frames(const char *resp, uint8_t *out, size_t out_max,
-                         size_t *out_len)
+ap_resp_pick_t ap_resp_pick_for(ap_pid_type_t type)
 {
-    if (resp == NULL || out == NULL || out_len == NULL)
+    return (type == AP_PID_STD) ? AP_RESP_PICK_LOWEST : AP_RESP_PICK_FIRST;
+}
+
+/**
+ * Headers on, and more than one ECU may have answered: the id whose lines a
+ * row reads (ap_resp_pick_t), and whether that ECU's reply answers
+ * @p request (NULL = nothing to compare). Under the lines lock.
+ */
+static uint32_t pick_header(const ap_line_t *lines, int n_lines,
+                            const char *request, ap_resp_pick_t pick,
+                            bool *answered)
+{
+    static uint8_t s_try[AP_PAYLOAD_MAX] EXT_RAM_BSS_ATTR;
+    uint32_t first = 0;
+    uint32_t lowest = UINT32_MAX;
+    bool have_first = false;
+
+    for (int i = 0; i < n_lines; i++)
+    {
+        if (!lines[i].has_header)
+        {
+            continue;
+        }
+
+        if (!have_first)
+        {
+            first = lines[i].header;
+            have_first = true;
+        }
+
+        if (lines[i].header < lowest)
+        {
+            lowest = lines[i].header;
+        }
+    }
+
+    if (pick == AP_RESP_PICK_LOWEST || request == NULL)
+    {
+        uint32_t id = (pick == AP_RESP_PICK_LOWEST) ? lowest : first;
+        size_t n = assemble_header_frames(lines, n_lines, id, s_try,
+                                          sizeof(s_try));
+
+        *answered = (request == NULL) ||
+                    ap_payload_matches_cmd(request, s_try, n);
+        return id;
+    }
+
+    /* every id once, in the order of its first line: the first one whose
+       reply answers the request. An ECU that refuses (`7F 22 31`) or one
+       whose frame belongs to another request is passed over */
+    for (int i = 0; i < n_lines; i++)
+    {
+        if (!lines[i].has_header)
+        {
+            continue;
+        }
+
+        bool seen = false;
+
+        for (int k = 0; k < i && !seen; k++)
+        {
+            seen = lines[k].has_header && lines[k].header == lines[i].header;
+        }
+
+        if (seen)
+        {
+            continue;
+        }
+
+        size_t n = assemble_header_frames(lines, n_lines, lines[i].header,
+                                          s_try, sizeof(s_try));
+
+        if (ap_payload_matches_cmd(request, s_try, n))
+        {
+            *answered = true;
+            return lines[i].header;
+        }
+    }
+
+    *answered = false;
+    return first;   /* nobody answered it: what came first, for a test to show */
+}
+
+esp_err_t ap_resp_row_frames(const char *resp, const char *request,
+                             ap_resp_pick_t pick, uint8_t *out,
+                             size_t out_max, size_t *out_len, bool *answered)
+{
+    if (resp == NULL || out == NULL || out_len == NULL || answered == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
 
     *out_len = 0;
+    *answered = false;
 
     lines_lock();
 
@@ -520,27 +510,23 @@ esp_err_t ap_resp_frames(const char *resp, uint8_t *out, size_t out_max,
                             AP_RESP_ECUS_MAX) > 0)
     {
         /* a pre-CAN protocol: the lowest ECU's data as the frame a CAN ECU
-           would have sent it in */
+           would have sent it in (its ECUs are known by address, not by
+           arrival: the lowest address is the row's, whatever the pick) */
         n = frames_from_payload(s_precan[0].payload, s_precan[0].len, out,
                                 out_max);
+        *answered = (request == NULL) ||
+                    ap_payload_matches_cmd(request, s_precan[0].payload,
+                                           s_precan[0].len);
     }
     else if (lines[0].has_header)
     {
-        /* headers on: the LOWEST responder's lines, verbatim (PCI and
+        /* headers on: the picked responder's lines, verbatim (PCI and
            extended address bytes included), in arrival order */
-        uint32_t lowest = UINT32_MAX;
+        uint32_t id = pick_header(lines, n_lines, request, pick, answered);
 
         for (int i = 0; i < n_lines; i++)
         {
-            if (lines[i].has_header && lines[i].header < lowest)
-            {
-                lowest = lines[i].header;
-            }
-        }
-
-        for (int i = 0; i < n_lines; i++)
-        {
-            if (lines[i].has_header && lines[i].header == lowest)
+            if (lines[i].has_header && lines[i].header == id)
             {
                 n = frames_put(out, out_max, n, lines[i].bytes, lines[i].n);
             }
@@ -556,17 +542,29 @@ esp_err_t ap_resp_frames(const char *resp, uint8_t *out, size_t out_max,
                                           sizeof(s_flat));
 
         n = frames_from_payload(s_flat, flat, out, out_max);
+        *answered = (request == NULL) ||
+                    ap_payload_matches_cmd(request, s_flat, flat);
     }
 
     lines_unlock();
 
     if (n == 0)
     {
+        *answered = false;
         return ESP_ERR_NOT_FOUND;
     }
 
     *out_len = n;
     return ESP_OK;
+}
+
+esp_err_t ap_resp_frames(const char *resp, uint8_t *out, size_t out_max,
+                         size_t *out_len)
+{
+    bool answered;
+
+    return ap_resp_row_frames(resp, NULL, AP_RESP_PICK_LOWEST, out, out_max,
+                              out_len, &answered);
 }
 
 int ap_resp_to_payloads(const char *resp, ap_resp_ecu_t *out,

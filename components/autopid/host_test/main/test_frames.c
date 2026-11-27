@@ -304,8 +304,9 @@ void test_frames_headers_off_rebuilt(void)
 void test_frames_lowest_responder(void)
 {
     /* two ECUs answer a functional request: the lowest id's frame alone,
-       as the framing-free payload does (the legacy firmware's rule once
-       more than two frames came from different ids) */
+       as the framing-free payload does (the legacy firmware's rule for its
+       standard table once more than two frames came from different ids; a
+       custom or vehicle row reads the first answer instead, below) */
     uint8_t f[AP_FRAMES_MAX];
     const uint8_t ecm[] = { 0x06, 0x41, 0x00, 0xBE, 0x3F, 0xA8, 0x13 };
     size_t n = frames("7E9 06 41 00 80 00 00 01 \r"
@@ -328,6 +329,192 @@ void test_frames_lowest_responder(void)
                                                &m));
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, ap_resp_frames("\r", f, sizeof(f),
                                                         &m));
+}
+
+static size_t row(const char *resp, const char *request, ap_resp_pick_t pick,
+                  uint8_t *out, size_t cap, bool *answered)
+{
+    size_t n = 0;
+
+    TEST_ASSERT_EQUAL_MESSAGE(ESP_OK,
+                              ap_resp_row_frames(resp, request, pick, out,
+                                                 cap, &n, answered),
+                              resp);
+    return n;
+}
+
+void test_frames_row_reads_the_first_answer(void)
+{
+    /* a row that sets no header of its own goes out on the functional id
+       and every ECU that knows the identifier answers. The chip's own
+       print from the bench, 2026-11-27 (two ECUs played on the PCAN, the
+       Renault odometer row 222006 `[B4:B6]`): the real value first, then
+       an ECU with a lower id that holds no mileage. The legacy firmware
+       read every line in arrival order (123456 on 4.52p's own parser);
+       v6 read the lowest id until that day: 16777215, the number of the
+       field report */
+    const char *two = "7EC 06 62 20 06 01 E2 40 \r"
+                      "7EA 06 62 20 06 FF FF FF \r";
+    const uint8_t real[] = { 0x06, 0x62, 0x20, 0x06, 0x01, 0xE2, 0x40 };
+    const uint8_t none[] = { 0x06, 0x62, 0x20, 0x06, 0xFF, 0xFF, 0xFF };
+    uint8_t f[AP_FRAMES_MAX];
+    bool answered = false;
+    size_t n;
+
+    TEST_ASSERT_EQUAL(AP_RESP_PICK_LOWEST, ap_resp_pick_for(AP_PID_STD));
+    TEST_ASSERT_EQUAL(AP_RESP_PICK_FIRST, ap_resp_pick_for(AP_PID_CUSTOM));
+    TEST_ASSERT_EQUAL(AP_RESP_PICK_FIRST, ap_resp_pick_for(AP_PID_SPECIFIC));
+
+    n = row(two, "222006", AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(sizeof(real), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+    TEST_ASSERT_EQUAL_DOUBLE(123456.0, eval("[B4:B6]", f, n));
+
+    /* a standard row keeps the lowest id, and so does ap_resp_frames() */
+    n = row(two, "222006", AP_RESP_PICK_LOWEST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(none, f, sizeof(none));
+    TEST_ASSERT_EQUAL_DOUBLE(16777215.0, eval("[B4:B6]", f, n));
+    n = frames(two, f, sizeof(f));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(none, f, sizeof(none));
+
+    /* the other way round: what came first is the row's, as the legacy
+       firmware read it */
+    n = row("7EA 06 62 20 06 FF FF FF \r7EC 06 62 20 06 01 E2 40 \r",
+            "222006", AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(none, f, sizeof(none));
+
+    /* an ECU that refuses is passed over, behind the answer (the bench's
+       print: the simulator's 7E8) and ahead of it; the lowest id alone
+       gave the refusal, which answers nothing */
+    n = row("7EC 06 62 20 06 01 E2 40 \r7E8 03 7F 22 31 \r", "222006",
+            AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+
+    n = row("7E8 03 7F 22 31 \r7EC 06 62 20 06 01 E2 40 \r", "222006",
+            AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(sizeof(real), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+
+    n = row("7E8 03 7F 22 31 \r7EC 06 62 20 06 01 E2 40 \r", "222006",
+            AP_RESP_PICK_LOWEST, f, sizeof(f), &answered);
+    TEST_ASSERT_FALSE(answered);
+    TEST_ASSERT_EQUAL_size_t(4, n);
+    TEST_ASSERT_EQUAL_HEX8(0x7F, f[1]);
+
+    /* the answer to another identifier is not the row's either (an ECU's
+       late answer to the request before): the next ECU's is */
+    n = row("7EA 06 62 20 05 00 00 2A \r7EC 06 62 20 06 01 E2 40 \r",
+            "222006", AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+
+    /* nobody answers the request: the first ECU's lines, marked so (a poll
+       drops them, a test shows them) */
+    n = row("7E9 03 7F 22 31 \r7E8 03 7F 22 11 \r", "222006",
+            AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_FALSE(answered);
+    TEST_ASSERT_EQUAL_size_t(4, n);
+    TEST_ASSERT_EQUAL_HEX8(0x31, f[3]);
+
+    /* nothing to compare (a raw frame without a service): what came first */
+    n = row(two, NULL, AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+
+    /* a raw row (ATCAF0) is compared on the request behind its length */
+    n = row("7E8 03 7F 22 31 \r7EC 06 62 20 06 01 E2 40 \r",
+            ap_raw_cmd_request("03222006"), AP_RESP_PICK_FIRST, f, sizeof(f),
+            &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(real, f, sizeof(real));
+}
+
+void test_frames_row_keeps_one_ecus_frames(void)
+{
+    uint8_t f[AP_FRAMES_MAX];
+    bool answered = false;
+    size_t n;
+
+    /* two long replies with their frames mixed on the bus: the row reads
+       the frames of the ECU that answered first, and only those (the legacy
+       firmware counted through both) */
+    const char *mixed = "7EC 10 0A 62 20 06 01 E2 40 \r"
+                        "7EA 10 0A 62 20 06 FF FF FF \r"
+                        "7EC 21 11 22 33 44 AA AA AA \r"
+                        "7EA 21 55 66 77 88 AA AA AA \r";
+    const uint8_t want[] =
+    {
+        0x10, 0x0A, 0x62, 0x20, 0x06, 0x01, 0xE2, 0x40,
+        0x21, 0x11, 0x22, 0x33, 0x44, 0xAA, 0xAA, 0xAA,
+    };
+
+    n = row(mixed, "222006", AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(sizeof(want), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(want, f, sizeof(want));
+    TEST_ASSERT_EQUAL_DOUBLE(123456.0, eval("[B5:B7]", f, n));
+    TEST_ASSERT_EQUAL_DOUBLE((double)0x11223344, eval("[B9:B12]", f, n));
+
+    /* 29-bit ids as the chip prints them (four byte tokens): the same pick.
+       The functional 18DB33F1 is answered on 18DAF1xx */
+    const char *ext = "18 DA F1 DA 06 62 20 06 01 E2 40 \r"
+                      "18 DA F1 0A 06 62 20 06 FF FF FF \r";
+
+    ap_resp_set_id29_hint(0, true);
+    n = row(ext, "222006", AP_RESP_PICK_FIRST, f, sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(7, n);
+    TEST_ASSERT_EQUAL_DOUBLE(123456.0, eval("[B4:B6]", f, n));
+    n = row(ext, "222006", AP_RESP_PICK_LOWEST, f, sizeof(f), &answered);
+    TEST_ASSERT_EQUAL_DOUBLE(16777215.0, eval("[B4:B6]", f, n));
+    ap_resp_set_id29_hint(0, false);
+
+    /* a reply without CAN ids has one view, whatever the pick: headers off */
+    const uint8_t flat[] = { 0x06, 0x62, 0x20, 0x06, 0x01, 0xE2, 0x40 };
+
+    n = row("62 20 06 01 E2 40 \r", "222006", AP_RESP_PICK_FIRST, f,
+            sizeof(f), &answered);
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(sizeof(flat), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(flat, f, sizeof(flat));
+    n = row("62 20 06 01 E2 40 \r", "222005", AP_RESP_PICK_FIRST, f,
+            sizeof(f), &answered);
+    TEST_ASSERT_FALSE(answered);
+
+    /* and a pre-CAN protocol, whose ECUs are known by address: the lowest
+       one, though the transmission answered first */
+    const uint8_t engine[] = { 0x06, 0x41, 0x00, 0x18, 0x3F, 0x80, 0x03 };
+
+    ap_resp_set_proto_hint('3');
+    n = row("48 6B 18 41 00 80 00 00 00 8C \r"
+            "48 6B 10 41 00 18 3F 80 03 DE \r", "0100", AP_RESP_PICK_FIRST,
+            f, sizeof(f), &answered);
+    ap_resp_set_proto_hint('\0');
+    TEST_ASSERT_TRUE(answered);
+    TEST_ASSERT_EQUAL_size_t(sizeof(engine), n);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(engine, f, sizeof(engine));
+
+    /* an error line is an error, an empty reply nothing, as before */
+    size_t m = 7;
+
+    answered = true;
+    TEST_ASSERT_EQUAL(ESP_FAIL,
+                      ap_resp_row_frames("NO DATA\r", "222006",
+                                         AP_RESP_PICK_FIRST, f, sizeof(f),
+                                         &m, &answered));
+    TEST_ASSERT_FALSE(answered);
+    TEST_ASSERT_EQUAL_size_t(0, m);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+                      ap_resp_row_frames("\r", "222006", AP_RESP_PICK_FIRST,
+                                         f, sizeof(f), &m, &answered));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                      ap_resp_row_frames("\r", "222006", AP_RESP_PICK_FIRST,
+                                         f, sizeof(f), &m, NULL));
 }
 
 void test_chain_strip_print_and_cra(void)
@@ -453,6 +640,8 @@ void run_frames_tests(void)
     RUN_TEST(test_frames_29bit_id_with_hint);
     RUN_TEST(test_frames_headers_off_rebuilt);
     RUN_TEST(test_frames_lowest_responder);
+    RUN_TEST(test_frames_row_reads_the_first_answer);
+    RUN_TEST(test_frames_row_keeps_one_ecus_frames);
     RUN_TEST(test_chain_strip_print_and_cra);
     RUN_TEST(test_frames_std_table_numbering);
 }

@@ -64,6 +64,39 @@ esp_err_t ap_resp_to_payload(const char *resp, uint8_t *payload,
 esp_err_t ap_resp_frames(const char *resp, uint8_t *out, size_t out_max,
                          size_t *out_len);
 
+/** Which ECU's lines a row reads when several answer one request (headers
+ *  on; a row that sets no header of its own asks on the functional id). */
+typedef enum
+{
+    AP_RESP_PICK_LOWEST = 0,    /* the lowest id: a standard row (7E8, the
+                                   engine ECU; the legacy firmware's priority
+                                   rule for its standard table)              */
+    AP_RESP_PICK_FIRST,         /* the first ECU, in arrival order, whose
+                                   reply answers the request: a custom or
+                                   vehicle row (the legacy firmware read
+                                   every line in arrival order, so a
+                                   published expression counts into the
+                                   answer that came first)                   */
+} ap_resp_pick_t;
+
+/** The pick of a row of @p type: AP_PID_STD the lowest id, any other type
+ *  the first answer. PURE. */
+ap_resp_pick_t ap_resp_pick_for(ap_pid_type_t type);
+
+/** A row's reply: the frames its expressions index (the layout of
+ *  ap_resp_frames) from the responder @p pick names, and whether that
+ *  reply answers @p request (ap_payload_matches_cmd; NULL = nothing to
+ *  compare, @p answered comes back true). With AP_RESP_PICK_FIRST an ECU
+ *  that refuses (`7F 22 31`) or answers something else is passed over;
+ *  when nobody answers the request the first ECU's lines come back with
+ *  @p answered false (a poll drops them, a test shows them). A reply
+ *  without CAN ids (headers off, a pre-CAN protocol) has one view: the
+ *  pick changes nothing there. PURE.
+ *  @return as ap_resp_frames. */
+esp_err_t ap_resp_row_frames(const char *resp, const char *request,
+                             ap_resp_pick_t pick, uint8_t *out,
+                             size_t out_max, size_t *out_len, bool *answered);
+
 /** How the tokenizer reads a 29-bit id printed as four byte tokens: the
  *  legislated `18 DA F1 xx` is always taken (take_id29); with this hint a
  *  row's own receive filter id (`ATCRA17FE007B`, the MEB profile) is taken
