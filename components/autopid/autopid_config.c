@@ -38,6 +38,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -79,6 +80,56 @@ static bool get_bool(const cJSON *obj, const char *key, bool dflt)
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
 
     return cJSON_IsBool(v) ? cJSON_IsTrue(v) : dflt;
+}
+
+/**
+ * A parameter's `min` / `max`: a JSON number, or a string that is one
+ * ("1000000", "-40", "0.5"). Every published vehicle profile writes its
+ * bounds as strings, the web page's import stores a profile's parameter as
+ * it is, and the legacy firmware read both. v6 read numbers alone until
+ * 2026-11-27, so no bound of a vehicle profile was ever applied. A field
+ * report: an odometer whose ECU answers `FF FF FF` in some state of the car
+ * read 16777215 km against a max of "1000000", where 4.5x dropped it.
+ *
+ * A string that is no number ("", "none", "12abc") is no bound, like a
+ * missing key (NAN). The legacy firmware's atof() made 0 or 12 of those; a
+ * bound nobody wrote would drop every reading beyond it.
+ */
+static double get_bound(const cJSON *obj, const char *key)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+
+    if (cJSON_IsNumber(v))
+    {
+        return v->valuedouble;
+    }
+
+    if (!cJSON_IsString(v) || v->valuestring == NULL)
+    {
+        return NAN;
+    }
+
+    const char *s = v->valuestring;
+    char *end = NULL;
+
+    while (isspace((unsigned char)*s))
+    {
+        s++;
+    }
+
+    double d = strtod(s, &end);
+
+    if (end == s)
+    {
+        return NAN; /* empty, or no number at its start */
+    }
+
+    while (isspace((unsigned char)*end))
+    {
+        end++;
+    }
+
+    return (*end == '\0' && isfinite(d)) ? d : NAN;
 }
 
 void ap_init_sanitize(char *str)
@@ -151,8 +202,8 @@ static bool parse_params(ap_config_t *cfg, const cJSON *arr,
         copy_str(out->unit, sizeof(out->unit), p, "unit");
         copy_str(out->class, sizeof(out->class), p, "class");
         out->enabled = get_bool(p, "enabled", true);
-        out->min = (float)get_num(p, "min", NAN);
-        out->max = (float)get_num(p, "max", NAN);
+        out->min = (float)get_bound(p, "min");
+        out->max = (float)get_bound(p, "max");
         out->mux_val = (float)get_num(p, "mux_val", 0);
 
         if (out->name[0] == '\0')

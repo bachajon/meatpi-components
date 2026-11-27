@@ -229,10 +229,87 @@ void test_bounds_whole_table_inside_its_range(void)
     TEST_ASSERT_TRUE(checked > 100); /* 135 ranged rows on 2026-10-20 */
 }
 
+/* A bound written as a string. Every published vehicle profile writes
+   `min` / `max` as strings (2740 of them in 90 cars on 2026-11-27, not one
+   as a number), the web page's import stores a profile's parameter as it is,
+   and the legacy firmware read both forms. v6 read JSON numbers alone, so no
+   bound of a vehicle profile was ever applied. A field report (2026-11-24, a
+   Mitsubishi Outlander PHEV): the odometer read FFFFFF = 16777215 km about
+   half of the time on v6 and never on 4.5x; its row carries a max of
+   "1000000", and one ECU answers `FF FF FF` in some state of the car. */
+void test_bounds_a_profile_writes_them_as_strings(void)
+{
+    /* the reporter's own row as the page stored it, and a row of the forms a
+       hand-written profile may hold */
+    const char *json =
+        "{\"pids\":[{\"name\":\"Odometer\",\"type\":\"specific\","
+        "\"cmd\":\"22F0D0\",\"init\":\"ATCRA18DAF1DB;\",\"parameters\":["
+        "{\"name\":\"Odometer\",\"expression\":\"[B4:B6]\",\"unit\":\"km\","
+        "\"class\":\"battery\",\"min\":\"0\",\"max\":\"1000000\"}]},"
+        "{\"name\":\"forms\",\"type\":\"custom\",\"cmd\":\"2101\","
+        "\"parameters\":["
+        "{\"name\":\"spaced\",\"expression\":\"B4\",\"min\":\" -40 \","
+        "\"max\":\"215.5\"},"
+        "{\"name\":\"empty\",\"expression\":\"B4\",\"min\":\"\","
+        "\"max\":\"none\"},"
+        "{\"name\":\"half\",\"expression\":\"B4\",\"min\":\"12abc\","
+        "\"max\":\"1e3\"},"
+        "{\"name\":\"numbers\",\"expression\":\"B4\",\"min\":0,\"max\":100},"
+        "{\"name\":\"endless\",\"expression\":\"B4\",\"min\":\"-inf\","
+        "\"max\":\"nan\"},"
+        "{\"name\":\"other\",\"expression\":\"B4\",\"min\":true,"
+        "\"max\":null},"
+        "{\"name\":\"missing\",\"expression\":\"B4\"}]}]}";
+    static ap_config_t cfg; /* static: a megabyte, never on the stack */
+    char err[96] = "";
+
+    TEST_ASSERT_EQUAL_MESSAGE(ESP_OK,
+                              ap_config_parse(json, &cfg, err, sizeof(err)),
+                              err);
+    TEST_ASSERT_EQUAL(8, cfg.n_params);
+
+    const ap_param_t *odo = &cfg.params[0];
+
+    TEST_ASSERT_EQUAL_STRING("Odometer", odo->name);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, odo->min);
+    TEST_ASSERT_EQUAL_FLOAT(1000000.0f, odo->max);
+
+    /* FF FF FF through [B4:B6] against that max: dropped, as on 4.5x (a
+       specific row's bounds are a filter). The mileage itself is kept */
+    apply(16777215.0, odo->min, odo->max, false, AP_BOUNDS_DROPPED);
+    TEST_ASSERT_EQUAL_DOUBLE(123456.0, apply(123456.0, odo->min, odo->max,
+                                             false, AP_BOUNDS_KEPT));
+
+    /* spaces around a number, a sign, a fraction */
+    TEST_ASSERT_EQUAL_FLOAT(-40.0f, cfg.params[1].min);
+    TEST_ASSERT_EQUAL_FLOAT(215.5f, cfg.params[1].max);
+
+    /* a string that is no number is no bound, like a missing key: not the
+       0 or the 12 the legacy firmware's atof() made of it, which would drop
+       every reading beyond a bound nobody wrote */
+    TEST_ASSERT_TRUE(isnan(cfg.params[2].min));
+    TEST_ASSERT_TRUE(isnan(cfg.params[2].max));
+    TEST_ASSERT_TRUE(isnan(cfg.params[3].min));
+    TEST_ASSERT_EQUAL_FLOAT(1000.0f, cfg.params[3].max); /* "1e3" is one */
+
+    /* numbers as before */
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, cfg.params[4].min);
+    TEST_ASSERT_EQUAL_FLOAT(100.0f, cfg.params[4].max);
+
+    /* no bound at infinity, none from a value of another kind */
+    TEST_ASSERT_TRUE(isnan(cfg.params[5].min));
+    TEST_ASSERT_TRUE(isnan(cfg.params[5].max));
+    TEST_ASSERT_TRUE(isnan(cfg.params[6].min));
+    TEST_ASSERT_TRUE(isnan(cfg.params[6].max));
+    TEST_ASSERT_TRUE(isnan(cfg.params[7].min));
+    TEST_ASSERT_TRUE(isnan(cfg.params[7].max));
+}
+
 void run_bounds_tests(void)
 {
     RUN_TEST(test_bounds_the_report);
     RUN_TEST(test_bounds_rule);
     RUN_TEST(test_bounds_exact_full_scale_literal);
     RUN_TEST(test_bounds_whole_table_inside_its_range);
+    RUN_TEST(test_bounds_a_profile_writes_them_as_strings);
 }
