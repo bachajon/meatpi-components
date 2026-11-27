@@ -307,9 +307,11 @@ esp_err_t can_manager_send(uint32_t id, bool ext, bool rtr,
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* asked here too, so a gated sender learns why (core says only BUSY) */
+    /* asked here too, so a gated sender learns why (core says only BUSY);
+       counted here, as the core never sees these */
     if (s_send_gate != NULL && !s_send_gate())
     {
+        s_bus.stats.tx_gated++;
         return ESP_ERR_NOT_ALLOWED;
     }
 

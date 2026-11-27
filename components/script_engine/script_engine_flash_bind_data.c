@@ -134,7 +134,7 @@ int se_fb_crc(bvm *vm)
     const uint8_t *d = se_fl_bytes(vm, 1, &n);
     se_crc_spec_t spec =
     {
-        .width  = (uint8_t)se_fl_int(vm, 2, 32),
+        .width  = (uint8_t)se_fl_range(vm, 2, 32, 32, "width is 1..32"),
         .poly   = se_fl_int(vm, 3, 0x04C11DB7),
         .init   = se_fl_int(vm, 4, 0xFFFFFFFF),
         .refin  = be_top(vm) >= 5 ? be_tobool(vm, 5) : true,

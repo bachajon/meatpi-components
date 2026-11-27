@@ -21,13 +21,16 @@
  * @file script_engine_http_flash.c
  * @brief The web side of long runs and ECU flashing:
  *          POST /api/scripts/run {..., "async": true[, "params": {}]}
- *               -> 202 {ok, async}; the run goes on without the request
+ *               -> 202 {ok, async, run}; the run goes on without the
+ *               request. 400 no or bad source, 404 no such script, 413
+ *               over 64 KB, 503 no SD card, 409 busy or disabled
  *          GET  /api/scripts/status[?since=n]
  *               -> lock, running, phase, progress, ecu_state, prompt,
  *                  result, log lines after n, next, output
  *          POST /api/scripts/answer {"value": "..."} -> the open prompt
  *          POST /api/scripts/release {"ack": true}
- *               -> leave a failed (or restart-interrupted) flash's lock
+ *               -> leave a failed (or restart-interrupted) flash's lock;
+ *               409 nothing held, 500 the record was not cleared (held)
  */
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +169,7 @@ esp_err_t se_http_run_async(void *vreq, cJSON *root)
     const cJSON *path = cJSON_GetObjectItemCaseSensitive(root, "path");
     char *code = NULL;
     esp_err_t err = ESP_ERR_INVALID_ARG;
+    bool have = true;
 
     if (cJSON_IsString(src) && src->valuestring[0] != '\0')
     {
@@ -179,13 +183,17 @@ esp_err_t se_http_run_async(void *vreq, cJSON *root)
             memcpy(code, src->valuestring, n + 1);
         }
     }
-    else if (cJSON_IsString(name))
+    else if (cJSON_IsString(name) && name->valuestring[0] != '\0')
     {
         err = se_load_stored(name->valuestring, &code);
     }
-    else if (cJSON_IsString(path))
+    else if (cJSON_IsString(path) && path->valuestring[0] != '\0')
     {
         err = load_sd(path->valuestring, &code);
+    }
+    else
+    {
+        have = false;
     }
 
     cJSON *params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
@@ -196,8 +204,30 @@ esp_err_t se_http_run_async(void *vreq, cJSON *root)
     {
         cJSON_Delete(params);
         free(code);
-        return fail(req, "404 Not Found",
-                    "need \"src\", a stored \"name\" or an SD \"path\" (/sd/...be)");
+
+        if (!have)
+        {
+            return fail(req, "400 Bad Request",
+                        "need \"src\", a stored \"name\" or an SD \"path\"");
+        }
+
+        switch (err)
+        {
+            case ESP_ERR_INVALID_ARG:
+                return fail(req, "400 Bad Request",
+                            "bad name, or a path outside /sd/ (no \"..\")");
+            case ESP_ERR_NOT_FOUND:
+                return fail(req, "404 Not Found", "no such script");
+            case ESP_ERR_INVALID_SIZE:
+                return fail(req, "413 Payload Too Large",
+                            "the script is empty or over 64 KB");
+            case ESP_ERR_INVALID_STATE:
+                return fail(req, "503 Service Unavailable", "no SD card mounted");
+            case ESP_ERR_NO_MEM:
+                return fail(req, "500 Internal Server Error", "oom");
+            default:
+                return fail(req, "500 Internal Server Error", esp_err_to_name(err));
+        }
     }
 
     if (params != NULL && !cJSON_IsObject(params))
@@ -206,7 +236,9 @@ esp_err_t se_http_run_async(void *vreq, cJSON *root)
         params = NULL;
     }
 
-    err = script_engine_run_async(code, params); /* takes both */
+    uint32_t run = 0;
+
+    err = script_engine_run_async(code, params, &run); /* takes both */
 
     if (err != ESP_OK)
     {
@@ -217,6 +249,7 @@ esp_err_t se_http_run_async(void *vreq, cJSON *root)
 
     cJSON_AddBoolToObject(o, "ok", true);
     cJSON_AddBoolToObject(o, "async", true);
+    cJSON_AddNumberToObject(o, "run", run);
     return reply(req, "202 Accepted", o);
 }
 
@@ -287,10 +320,18 @@ static esp_err_t release_handler(httpd_req_t *req)
                     "{\"ack\": true} confirms the ECU may not start");
     }
 
-    if (se_flash_release() != ESP_OK)
+    esp_err_t err = se_flash_release();
+
+    if (err == ESP_ERR_INVALID_STATE)
     {
         return fail(req, "409 Conflict",
                     "nothing to release (a running flash is never released)");
+    }
+
+    if (err != ESP_OK)
+    {
+        return fail(req, "500 Internal Server Error",
+                    "the record was not cleared: still locked");
     }
 
     cJSON *o = cJSON_CreateObject();

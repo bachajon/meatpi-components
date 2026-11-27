@@ -37,6 +37,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
+#include "script_engine_obd.h"
 #include "script_engine_private.h"
 
 #define FL_ERR        "flash_error"
@@ -63,10 +64,32 @@ const uint8_t *se_fl_bytes(bvm *vm, int idx, size_t *len)
     return be_tobytes(vm, idx, len);
 }
 
+uint32_t se_fl_range(bvm *vm, int idx, uint32_t def, uint32_t max,
+                     const char *what)
+{
+    if (be_top(vm) < idx || be_isnil(vm, idx))
+    {
+        return def;
+    }
+
+    if (!be_isint(vm, idx) || be_toint(vm, idx) < 0 ||
+        be_toint(vm, idx) > (bint)max)
+    {
+        be_raise(vm, FL_ERR, what);
+    }
+
+    return (uint32_t)be_toint(vm, idx);
+}
+
 uint32_t se_fl_int(bvm *vm, int idx, uint32_t def)
 {
-    return (be_top(vm) >= idx && be_isint(vm, idx)) ? (uint32_t)be_toint(vm, idx)
-                                                    : def;
+    return se_fl_range(vm, idx, def, UINT32_MAX, "expected an int 0..2^32-1");
+}
+
+/* a wait in ms: 0 (look once) .. 1 h */
+static uint32_t ms_arg(bvm *vm, int idx, uint32_t def)
+{
+    return se_fl_range(vm, idx, def, 3600000, "a timeout is 0..3600000 ms");
 }
 
 const char *se_fl_str(bvm *vm, int idx, const char *what)
@@ -80,67 +103,139 @@ const char *se_fl_str(bvm *vm, int idx, const char *what)
 }
 
 /* opts[key] from a map at @p idx (0: none), as an int; @p def if absent. */
-static bint opt_int(bvm *vm, int idx, const char *key, bint def)
+typedef enum
+{
+    OPT_ABSENT = 0,
+    OPT_INT,
+    OPT_BOOL,
+} opt_kind_t;
+
+/* opts[key] from the map at @p idx (absent or nil: no options). An int or
+   a bool comes back in *v (a bool as 0/1); any other value raises. */
+static opt_kind_t opt_get(bvm *vm, int idx, const char *key, bint *v)
+{
+    if (be_top(vm) < idx || be_isnil(vm, idx))
+    {
+        return OPT_ABSENT;
+    }
+
+    if (!be_ismapinstance(vm, idx))
+    {
+        be_raise(vm, FL_ERR, "options are a map, e.g. {'pad': 0xAA}");
+    }
+
+    be_getmember(vm, idx, ".p");
+    be_pushstring(vm, key);
+    be_getindex(vm, -2);
+
+    opt_kind_t kind = OPT_ABSENT;
+
+    if (be_isint(vm, -1))
+    {
+        kind = OPT_INT;
+        *v = be_toint(vm, -1);
+    }
+    else if (be_isbool(vm, -1))
+    {
+        kind = OPT_BOOL;
+        *v = be_tobool(vm, -1) ? 1 : 0;
+    }
+    else if (!be_isnil(vm, -1))
+    {
+        be_pop(vm, 3);
+        be_raise(vm, FL_ERR, key); /* names the option of the wrong type */
+    }
+
+    be_pop(vm, 3);
+    return kind;
+}
+
+/* An int option in min..max, @p def when absent; a bool or a value out of
+   range raises with @p what. */
+static bint opt_int(bvm *vm, int idx, const char *key, bint def, bint min,
+                    bint max, const char *what)
 {
     bint v = def;
+    opt_kind_t k = opt_get(vm, idx, key, &v);
 
-    if (idx > 0 && be_top(vm) >= idx && be_ismapinstance(vm, idx))
+    if (k == OPT_ABSENT)
     {
-        be_getmember(vm, idx, ".p");
-        be_pushstring(vm, key);
-        be_getindex(vm, -2);
+        return def;
+    }
 
-        if (be_isint(vm, -1))
-        {
-            v = be_toint(vm, -1);
-        }
-        else if (be_isbool(vm, -1))
-        {
-            v = be_tobool(vm, -1) ? 1 : 0;
-        }
-
-        be_pop(vm, 3);
+    if (k != OPT_INT || v < min || v > max)
+    {
+        be_raise(vm, FL_ERR, what);
     }
 
     return v;
 }
 
-/* A list of CAN ids at @p idx into @p ids; returns the count. */
+/* A yes/no option: a bool, or an int (0 = no). */
+static bool opt_flag(bvm *vm, int idx, const char *key)
+{
+    bint v = 0;
+
+    return opt_get(vm, idx, key, &v) != OPT_ABSENT && v != 0;
+}
+
+/* The CAN ids at @p idx: absent or nil = every id (returns 0), one int =
+   that id, a list = 1..cap ints. Anything else raises: a filter that
+   silently became "every id" would read the wrong frames. */
 static size_t ids_arg(bvm *vm, int idx, uint32_t *ids, size_t cap)
 {
-    size_t n = 0;
-
-    if (be_top(vm) < idx || !be_islistinstance(vm, idx))
+    if (be_top(vm) < idx || be_isnil(vm, idx))
     {
         return 0;
+    }
+
+    if (be_isint(vm, idx))
+    {
+        ids[0] = (uint32_t)be_toint(vm, idx);
+        return 1;
+    }
+
+    if (!be_islistinstance(vm, idx))
+    {
+        be_raise(vm, FL_ERR, "ids: an int or a list of ints");
     }
 
     be_getmember(vm, idx, ".p");
 
     int size = be_data_size(vm, -1);
 
-    for (int i = 0; i < size && n < cap; i++)
+    if (size < 1 || (size_t)size > cap)
+    {
+        be_pop(vm, 1);
+        be_raise(vm, FL_ERR, "ids: 1..16 entries");
+    }
+
+    for (int i = 0; i < size; i++)
     {
         be_pushint(vm, i);
         be_getindex(vm, -2);
 
-        if (be_isint(vm, -1))
+        if (!be_isint(vm, -1) || be_toint(vm, -1) < 0 ||
+            be_toint(vm, -1) > 0x1FFFFFFF)
         {
-            ids[n++] = (uint32_t)be_toint(vm, -1);
+            be_pop(vm, 2);
+            be_raise(vm, FL_ERR, "ids: ints 0..0x1FFFFFFF only");
         }
 
-        be_pop(vm, 2);
+        ids[i] = (uint32_t)be_toint(vm, -1);
+        be_pop(vm, 1);
     }
 
     be_pop(vm, 1);
-    return n;
+    return (size_t)size;
 }
 
 static int handle_arg(bvm *vm)
 {
-    if (be_top(vm) < 1 || !be_isint(vm, 1))
+    if (be_top(vm) < 1 || !be_isint(vm, 1) || be_toint(vm, 1) < 0 ||
+        be_toint(vm, 1) >= SE_TP_SESSIONS)
     {
-        be_raise(vm, FL_ERR, "expected a session handle");
+        be_raise(vm, FL_ERR, "expected a session handle from flash_isotp()");
     }
 
     return (int)be_toint(vm, 1);
@@ -158,22 +253,51 @@ static int b_isotp(bvm *vm)
         be_raise(vm, FL_ERR, "flash_isotp(tx_id, rx_id[, opts])");
     }
 
+    bool ext = opt_flag(vm, 3, "ext");
+    bint max_id = ext ? 0x1FFFFFFF : 0x7FF;
+
+    if (be_toint(vm, 1) < 0 || be_toint(vm, 1) > max_id ||
+        be_toint(vm, 2) < 0 || be_toint(vm, 2) > max_id)
+    {
+        be_raise(vm, FL_ERR, "an id is 0..0x7FF, or 0..0x1FFFFFFF with ext");
+    }
+
     se_tp_opts_t o;
 
     se_tp_opts_default(&o);
 
-    bint pad = opt_int(vm, 3, "pad", 0);
+    /* pad: a byte, -1 or false = no padding, true = padded with 0x00 */
+    bint pad = 0;
+    opt_kind_t pk = opt_get(vm, 3, "pad", &pad);
 
-    o.ae_tx = (int16_t)opt_int(vm, 3, "ae_tx", -1);
-    o.ae_rx = (int16_t)opt_int(vm, 3, "ae_rx", -1);
+    if (pk == OPT_BOOL)
+    {
+        pad = pad ? 0 : -1;
+    }
+    else if (pk == OPT_INT && (pad < -1 || pad > 0xFF))
+    {
+        be_raise(vm, FL_ERR, "pad is a byte, -1 (or false) for none");
+    }
+
+    bint stmin = opt_int(vm, 3, "stmin", 0, 0, 0xF9, "stmin is 0..0x7F or 0xF1..0xF9");
+
+    if (stmin > 0x7F && stmin < 0xF1)
+    {
+        be_raise(vm, FL_ERR, "stmin is 0..0x7F or 0xF1..0xF9");
+    }
+
+    o.ae_tx = (int16_t)opt_int(vm, 3, "ae_tx", -1, -1, 0xFF, "ae_tx is -1..0xFF");
+    o.ae_rx = (int16_t)opt_int(vm, 3, "ae_rx", -1, -1, 0xFF, "ae_rx is -1..0xFF");
     o.pad = pad >= 0;
     o.pad_byte = (uint8_t)((pad >= 0) ? pad : 0);
-    o.bs = (uint8_t)opt_int(vm, 3, "bs", 0);
-    o.stmin = (uint8_t)opt_int(vm, 3, "stmin", 0);
+    o.bs = (uint8_t)opt_int(vm, 3, "bs", 0, 0, 0xFF, "bs is 0..255");
+    o.stmin = (uint8_t)stmin;
 
+    /* a gap is a minimum between our CFs; 127 ms is ISO 15765-2's ceiling */
+    uint32_t gap = (uint32_t)opt_int(vm, 3, "gap_us", 0, 0, 127000,
+                                     "gap_us is 0..127000");
     int h = se_tp_open((uint32_t)be_toint(vm, 1), (uint32_t)be_toint(vm, 2),
-                       opt_int(vm, 3, "ext", 0) != 0, &o,
-                       (uint32_t)opt_int(vm, 3, "gap_us", 0));
+                       ext, &o, gap);
 
     if (h < 0)
     {
@@ -198,7 +322,7 @@ static int b_send(bvm *vm)
     int h = handle_arg(vm);
     size_t n = 0;
     const uint8_t *d = se_fl_bytes(vm, 2, &n);
-    esp_err_t err = se_tp_send(h, d, n, se_fl_int(vm, 3, 1000));
+    esp_err_t err = se_tp_send(h, d, n, ms_arg(vm, 3, 1000));
 
     if (err != ESP_OK)
     {
@@ -217,7 +341,7 @@ static int b_recv(bvm *vm)
     int h = handle_arg(vm);
     const uint8_t *d = NULL;
     size_t n = 0;
-    esp_err_t err = se_tp_recv(h, &d, &n, se_fl_int(vm, 2, 1000));
+    esp_err_t err = se_tp_recv(h, &d, &n, ms_arg(vm, 2, 1000));
 
     if (err == ESP_ERR_TIMEOUT)
     {
@@ -243,13 +367,15 @@ static int b_request(bvm *vm)
     int h = handle_arg(vm);
     size_t n = 0;
     const uint8_t *d = se_fl_bytes(vm, 2, &n);
-    uint32_t timeout = se_fl_int(vm, 3, 1000);
-    uint32_t pending = (uint32_t)opt_int(vm, 4, "pending_ms", 5000);
-    int retries = (int)opt_int(vm, 4, "retries", 0);
-    bool raw = opt_int(vm, 4, "raw", 0) != 0;
+    uint32_t timeout = ms_arg(vm, 3, 1000);
+    uint32_t pending = (uint32_t)opt_int(vm, 4, "pending_ms", 5000, 0, 600000,
+                                         "pending_ms is 0..600000");
+    int retries = (int)opt_int(vm, 4, "retries", 0, 0, 16, "retries is 0..16");
+    bool raw = opt_flag(vm, 4, "raw");
 
     for (int attempt = 0; attempt <= retries; attempt++)
     {
+        se_check_budget(vm); /* Stop and the budget, before every attempt */
         se_tp_flush(h);
 
         esp_err_t err = se_tp_send(h, d, n, timeout);
@@ -316,6 +442,11 @@ static int b_can_send(bvm *vm)
         be_raise(vm, FL_ERR, "a frame carries 8 bytes at most");
     }
 
+    if (be_toint(vm, 1) < 0 || be_toint(vm, 1) > (ext ? 0x1FFFFFFF : 0x7FF))
+    {
+        be_raise(vm, FL_ERR, "an id is 0..0x7FF, or 0..0x1FFFFFFF with ext");
+    }
+
     esp_err_t err = se_raw_send((uint32_t)be_toint(vm, 1), ext, d, (uint8_t)n);
 
     if (err != ESP_OK)
@@ -336,7 +467,7 @@ static int b_can_recv(bvm *vm)
     size_t n = ids_arg(vm, 2, ids, 16);
     can_core_frame_t f;
 
-    if (se_raw_recv(ids, n, se_fl_int(vm, 1, 1000), &f) != ESP_OK)
+    if (se_raw_recv(ids, n, ms_arg(vm, 1, 1000), &f) != ESP_OK)
     {
         be_return_nil(vm);
     }
@@ -360,8 +491,8 @@ static int b_can_quiet(bvm *vm)
     uint32_t ids[16];
     size_t n = ids_arg(vm, 3, ids, 16);
 
-    be_pushbool(vm, se_raw_quiet(ids, n, se_fl_int(vm, 1, 1000),
-                                 se_fl_int(vm, 2, 10000)));
+    be_pushbool(vm, se_raw_quiet(ids, n, ms_arg(vm, 1, 1000),
+                                 ms_arg(vm, 2, 10000)));
     be_return(vm);
 }
 
@@ -371,118 +502,40 @@ static int b_commit(bvm *vm)
 {
     need_reflash(vm);
 
+    /* past the commit only the runner may transmit: a claimed obd_*
+       conversation (its frames go out from the transport's own task and
+       its tester present from a timer) would break half-way */
+    if (se_obd_claimed())
+    {
+        be_raise(vm, FL_ERR, "obd_release() before flash_commit(): only "
+                 "flash_* bindings reach the bus after it");
+    }
+
     const char *label = (be_top(vm) >= 1 && be_isstring(vm, 1))
                             ? be_tostring(vm, 1) : "flash";
+    esp_err_t err = se_flash_commit(label);
 
-    if (se_flash_commit(label) != ESP_OK)
+    switch (err)
     {
-        be_raise(vm, FL_ERR, "the commit could not be recorded: stop here");
+        case ESP_OK:
+            break;
+        case ESP_ERR_NOT_SUPPORTED:
+            be_raise(vm, FL_ERR, "flash_commit needs an async run "
+                     "(POST /api/scripts/run with \"async\": true)");
+            break;
+        case ESP_ERR_INVALID_STATE:
+            be_raise(vm, FL_ERR, "a firmware update of the WiCAN or its OBD "
+                     "chip is running: not committed");
+            break;
+        case ESP_ERR_NOT_ALLOWED:
+            be_raise(vm, "killed", "Stop was pressed: not committed");
+            break;
+        default:
+            be_raise(vm, FL_ERR, "the commit could not be recorded: stop here");
+            break;
     }
 
     be_pushbool(vm, true);
-    be_return(vm);
-}
-
-static int b_abort_requested(bvm *vm)
-{
-    be_pushbool(vm, se_flash_abort_requested());
-    be_return(vm);
-}
-
-static int b_state(bvm *vm)
-{
-    const char *s = se_fl_str(vm, 1, "flash_state(\"untouched\"|\"loader\"|\"unknown\")");
-
-    if (strcmp(s, "untouched") != 0 && strcmp(s, "loader") != 0 &&
-        strcmp(s, "unknown") != 0)
-    {
-        be_raise(vm, FL_ERR, "state is untouched, loader or unknown");
-    }
-
-    se_flash_set_ecu_state(s);
-    be_return_nil(vm);
-}
-
-static int b_phase(bvm *vm)
-{
-    se_check_budget(vm);
-    se_flash_set_phase(se_fl_str(vm, 1, "flash_phase(name)"));
-    be_return_nil(vm);
-}
-
-static int b_progress(bvm *vm)
-{
-    se_check_budget(vm);
-    se_flash_set_progress(se_fl_int(vm, 1, 0), se_fl_int(vm, 2, 0));
-    be_return_nil(vm);
-}
-
-static int b_log(bvm *vm)
-{
-    se_flash_log(se_fl_str(vm, 1, "flash_log(msg)"));
-    be_return_nil(vm);
-}
-
-typedef struct
-{
-    bvm *vm;
-} ask_ctx_t;
-
-static bool ask_alive(void *ctx)
-{
-    (void)ctx;
-    return !se_flash_abort_requested() && !se_run_killed();
-}
-
-static int b_ask(bvm *vm)
-{
-    se_check_budget(vm);
-
-    const char *text = se_fl_str(vm, 1, "flash_ask(text[, choices])");
-    const char *choices = (be_top(vm) >= 2 && be_isstring(vm, 2))
-                              ? be_tostring(vm, 2) : "";
-    char answer[96];
-    ask_ctx_t ctx = { vm };
-
-    if (se_flash_ask(text, choices, ask_alive, &ctx, answer,
-                     sizeof(answer)) != ESP_OK)
-    {
-        se_check_budget(vm); /* raises when killed */
-        be_raise(vm, FL_ERR, "prompt abandoned: the run was asked to stop");
-    }
-
-    be_pushstring(vm, answer);
-    be_return(vm);
-}
-
-static int b_param(bvm *vm)
-{
-    const char *name = se_fl_str(vm, 1, "flash_param(name)");
-    const cJSON *v = cJSON_GetObjectItemCaseSensitive(se_flash_params(), name);
-
-    if (cJSON_IsString(v))
-    {
-        be_pushstring(vm, v->valuestring);
-    }
-    else if (cJSON_IsBool(v))
-    {
-        be_pushbool(vm, cJSON_IsTrue(v));
-    }
-    else if (cJSON_IsNumber(v))
-    {
-        be_pushint(vm, (bint)v->valuedouble);
-    }
-    else
-    {
-        be_pushnil(vm);
-    }
-
-    be_return(vm);
-}
-
-static int b_micros(bvm *vm)
-{
-    be_pushint(vm, (bint)esp_timer_get_time());
     be_return(vm);
 }
 
@@ -503,14 +556,14 @@ static const struct
     { "flash_can_recv",        b_can_recv },
     { "flash_can_quiet",       b_can_quiet },
     { "flash_commit",          b_commit },
-    { "flash_abort_requested", b_abort_requested },
-    { "flash_state",           b_state },
-    { "flash_phase",           b_phase },
-    { "flash_progress",        b_progress },
-    { "flash_log",             b_log },
-    { "flash_ask",             b_ask },
-    { "flash_param",           b_param },
-    { "flash_micros",          b_micros },
+    { "flash_abort_requested", se_fr_abort_requested },
+    { "flash_state",           se_fr_state },
+    { "flash_phase",           se_fr_phase },
+    { "flash_progress",        se_fr_progress },
+    { "flash_log",             se_fr_log },
+    { "flash_ask",             se_fr_ask },
+    { "flash_param",           se_fr_param },
+    { "flash_micros",          se_fr_micros },
     { "flash_file_size",       se_fb_file_size },
     { "flash_file_read",       se_fb_file_read },
     { "flash_file_write",      se_fb_file_write },

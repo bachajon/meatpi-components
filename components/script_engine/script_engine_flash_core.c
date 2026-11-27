@@ -49,14 +49,14 @@ se_lock_state_t se_lock_on_commit(se_lock_state_t s)
     return SE_LOCK_COMMITTED;
 }
 
-se_lock_state_t se_lock_on_run_end(se_lock_state_t s, bool ok)
+se_lock_state_t se_lock_on_run_end(se_lock_state_t s, bool ok, bool aborted)
 {
     if (s != SE_LOCK_COMMITTED)
     {
         return s; /* a run that never committed leaves the lock as it was */
     }
 
-    return ok ? SE_LOCK_IDLE : SE_LOCK_FAILED;
+    return (ok && !aborted) ? SE_LOCK_IDLE : SE_LOCK_FAILED;
 }
 
 se_lock_state_t se_lock_on_release(se_lock_state_t s)

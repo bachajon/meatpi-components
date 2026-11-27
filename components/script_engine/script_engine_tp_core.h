@@ -95,6 +95,7 @@ typedef struct
     size_t   len;     /**< announced length                               */
     size_t   got;
     uint8_t  next_sn;
+    uint8_t  blk;     /**< CFs taken since our last flow control          */
     bool     active;  /**< a first frame was seen, CFs outstanding        */
 } se_tp_rx_t;
 
@@ -102,7 +103,8 @@ typedef enum
 {
     SE_TP_RX_IGNORED = 0, /**< not ours (AE mismatch, a flow control)     */
     SE_TP_RX_MORE,        /**< a CF was taken, more to come               */
-    SE_TP_RX_NEED_FC,     /**< a first frame: send our flow control       */
+    SE_TP_RX_NEED_FC,     /**< a first frame, or the end of a block of
+                               o->bs CFs: send our flow control           */
     SE_TP_RX_DONE,        /**< buf[0..len) holds a whole message          */
     SE_TP_RX_ERROR,       /**< bad PCI, sequence, or over cap: state reset */
 } se_tp_rx_status_t;

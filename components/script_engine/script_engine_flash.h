@@ -54,16 +54,20 @@ esp_err_t se_tp_send(int h, const uint8_t *msg, size_t len,
                      uint32_t timeout_ms);
 
 /** Receive one PDU; *out points into the session's buffer until the next
- *  call. ESP_ERR_TIMEOUT: nothing complete in time. */
+ *  call. @p timeout_ms runs until the first frame, then between frames
+ *  (0 looks once). ESP_ERR_TIMEOUT: nothing complete in time. */
 esp_err_t se_tp_recv(int h, const uint8_t **out, size_t *len,
                      uint32_t timeout_ms);
 
 /** Drop whatever the session has queued (a stale reply). */
 void se_tp_flush(int h);
 
+/** One raw frame. Opens the raw subscription first and drops the frames
+ *  it queued before the send. */
 esp_err_t se_raw_send(uint32_t id, bool ext, const uint8_t *d, uint8_t dlc);
 
-/** The next frame whose id is in @p ids (all when n_ids is 0). */
+/** The next frame whose id is in @p ids (all when n_ids is 0). A timeout
+ *  of 0 looks at the queue once. */
 esp_err_t se_raw_recv(const uint32_t *ids, size_t n_ids, uint32_t timeout_ms,
                       can_core_frame_t *out);
 
@@ -74,6 +78,8 @@ bool se_raw_quiet(const uint32_t *ids, size_t n_ids, uint32_t window_ms,
 
 /** After every run: close every session and the raw subscription. */
 void se_tp_epilogue(void);
+/** Before the script stops the bus: the same, while the slots are ours. */
+void se_tp_bus_down(void);
 
 /* ---- SD files (script_engine_flash_file.c) --------------------------------- */
 
@@ -97,6 +103,9 @@ size_t      se_flash_binding_count(void);
 /* argument helpers shared by the flash_* binding files (raise on misuse) */
 const uint8_t *se_fl_bytes(bvm *vm, int idx, size_t *len);
 uint32_t       se_fl_int(bvm *vm, int idx, uint32_t def);
+/* an int in 0..max at idx, @p def when absent or nil, else raises @p what */
+uint32_t       se_fl_range(bvm *vm, int idx, uint32_t def, uint32_t max,
+                           const char *what);
 const char    *se_fl_str(bvm *vm, int idx, const char *what);
 /* the data bindings (script_engine_flash_bind_data.c) */
 int se_fb_file_size(bvm *vm);
@@ -107,10 +116,24 @@ int se_fb_crc(bvm *vm);
 int se_fb_adler32(bvm *vm);
 int se_fb_sum(bvm *vm);
 int se_fb_sha256(bvm *vm);
+/* the run bindings (script_engine_flash_bind_run.c) */
+int se_fr_abort_requested(bvm *vm);
+int se_fr_state(bvm *vm);
+int se_fr_phase(bvm *vm);
+int se_fr_progress(bvm *vm);
+int se_fr_log(bvm *vm);
+int se_fr_ask(bvm *vm);
+int se_fr_param(bvm *vm);
+int se_fr_micros(bvm *vm);
 const char *se_flash_binding_name(size_t i);
 
-/** A run begins: params (taken; may be NULL) and whether it is async. */
-void se_flash_run_begin(cJSON *params, bool async);
+/** A run id for an async run (allocated when it is started). */
+uint32_t se_flash_next_run_id(void);
+
+/** A run begins: params (taken; may be NULL), whether it is async and its
+ *  id. Only an async run resets and fills the status (phase, progress,
+ *  result, params); every run counts as running for the lock. */
+void se_flash_run_begin(cJSON *params, bool async, uint32_t run_id);
 
 /** A run ended: the lock follows its outcome; sessions are closed. */
 void se_flash_run_end(bool ok, const char *error);
@@ -119,6 +142,10 @@ void se_flash_run_end(bool ok, const char *error);
 void se_flash_boot(void);
 
 se_lock_state_t se_flash_lock_state(void);
+/** The lock holds (committed, failed or recovery). */
+bool se_flash_lock_held(void);
+/** The run in flight was started async (POST /api/scripts/run async). */
+bool se_flash_run_is_async(void);
 
 /** Stop pressed: before commit the run is killed, after it the script is
  *  asked (flash_abort_requested). Returns true when it became a request. */
@@ -141,7 +168,11 @@ esp_err_t se_flash_release(void);
 bool se_flash_budget_exempt(void);
 
 /* what the bindings change, on the runner */
-esp_err_t    se_flash_commit(const char *label); /* NVS first, then lock */
+/* NVS first, then lock. ESP_ERR_NOT_SUPPORTED: not an async run;
+   ESP_ERR_INVALID_STATE: a firmware update of the WiCAN or its OBD chip
+   runs; ESP_ERR_NOT_ALLOWED: Stop was pressed (record erased again);
+   other: the NVS write failed. In every error case nothing is locked. */
+esp_err_t    se_flash_commit(const char *label);
 void         se_flash_set_phase(const char *phase);
 void         se_flash_set_progress(uint32_t done, uint32_t total);
 void         se_flash_set_ecu_state(const char *state);
@@ -152,11 +183,11 @@ esp_err_t    se_flash_ask(const char *text, const char *choices,
                           bool (*alive)(void *), void *ctx,
                           char *answer, size_t cap);
 
-/* ---- the gates (script_engine_flash.c), wired by script_engine_start ------ */
+/* ---- the gates (script_engine_flash.c), wired by script_engine_init ------- */
 
 /** can_manager's TX gate: while the lock holds, only the runner sends. */
 bool script_engine_tx_allowed(void);
 /** http_server_manager's lock gate: 423 for changes while it holds. */
 bool script_engine_http_allowed(bool read_only, const char *uri);
-/** sleep_manager's busy check: "ecu_flash" while a committed run runs. */
-const char *script_engine_busy_reason(void);
+/* script_engine_busy_reason() is public (include/script_engine.h): the
+   sleep check here, the restart hold in main */

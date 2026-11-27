@@ -17,6 +17,7 @@ idf_component_register(
          "script_engine_flash.c"
          "script_engine_flash_bind.c"
          "script_engine_flash_bind_data.c"
+         "script_engine_flash_bind_run.c"
          "script_engine_flash_file.c"
          "script_engine_doc_flash.c"
          "script_engine_http_flash.c"
@@ -32,4 +33,6 @@ idf_component_register(
                   # ECU flashing (2026-11-27): the lock's NVS record, SHA-256,
                   # SD files, the sleep check, µs pacing
                   nvs_flash mbedtls external_storage sleep_manager esp_rom
+                  # the commit waits for no firmware update (2026-11-27)
+                  ota_manager obd_chip
 )

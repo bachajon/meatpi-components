@@ -219,6 +219,12 @@ static void hold_for_update(uint32_t now, const char *why)
         return; /* nothing counts: nothing to hold */
     }
 
+    if (why == SM_WHY_ECU_FLASH)
+    {
+        /* past the cap too, for the ladder only (sm_ladder_push) */
+        sm_ladder_push(&s_policy, s_run, now + SM_ACTIVITY_HOLD_MS);
+    }
+
     s_activity_why = why;
 
     if (!s_update_hold_logged)

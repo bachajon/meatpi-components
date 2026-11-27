@@ -20,12 +20,13 @@
 /**
  * @file script_engine_flash_file.c
  * @brief SD file access for the flash bindings. Every operation runs on
- *        an internal-RAM stack through flash_jobs_run(), never on the
- *        runner's PSRAM stack: a run that read an SD file through
- *        obd_file_read on the runner stack crashed a WiCAN Pro with a
- *        cache error (2026-11-27, firmware 6.0.0-beta.12). The bytes are
- *        bounced through an internal buffer, so the caller's buffer may be
- *        in PSRAM.
+ *        an internal-RAM stack through flash_jobs_run(), not on the
+ *        runner's PSRAM stack, as a precaution: one run that read an SD
+ *        file through obd_file_read on the runner stack ended in a "Cache
+ *        error" reset (2026-11-27, firmware 6.0.0-beta.12) whose cause is
+ *        not established (SD is cache-safe by design; the backtrace was
+ *        never symbolized). The bytes are bounced through an internal
+ *        buffer, so the caller's buffer may be in PSRAM.
  */
 #include "script_engine_flash.h"
 

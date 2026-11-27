@@ -236,6 +236,7 @@ se_tp_rx_status_t se_tp_rx_feed(se_tp_rx_t *rx, const se_tp_opts_t *o,
         rx->len = n;
         rx->got = first;
         rx->next_sn = 1;
+        rx->blk = 0;
         rx->active = true;
         return SE_TP_RX_NEED_FC;
     }
@@ -267,6 +268,13 @@ se_tp_rx_status_t se_tp_rx_feed(se_tp_rx_t *rx, const se_tp_opts_t *o,
         {
             rx->active = false;
             return SE_TP_RX_DONE;
+        }
+
+        /* a block of o->bs CFs: the sender waits for our next FC */
+        if (o->bs > 0 && ++rx->blk >= o->bs)
+        {
+            rx->blk = 0;
+            return SE_TP_RX_NEED_FC;
         }
 
         return SE_TP_RX_MORE;

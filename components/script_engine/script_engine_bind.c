@@ -173,9 +173,23 @@ void se_bus_hold_release(void)
     obd_gate_diag_hold(&s_bus_token, false);
 }
 
+/* While an ECU flash holds the lock only the flash_* bindings reach the
+ * bus: these go out through other tasks (the ISO-TP transport, the OBD
+ * chip, a tester-present timer), which the lock refuses, so they would
+ * fail half-way instead of up front. */
+void se_refuse_when_locked(bvm *vm)
+{
+    if (se_flash_lock_held())
+    {
+        be_raise(vm, "obd_error", "an ECU flash holds the lock: only the "
+                 "flash_* bindings reach the bus");
+    }
+}
+
 static int uds_common(bvm *vm, bool ext)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 3 || !be_isstring(vm, 3))
     {
@@ -230,6 +244,7 @@ static int b_uds_ext(bvm *vm)  { return uds_common(vm, true); }
 static int b_can_tx(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 3 || !be_isstring(vm, 3))
     {
@@ -283,6 +298,7 @@ static int b_emit(bvm *vm)
 static int b_dtc_scan(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (autopid_dtc_scan_start() != ESP_OK)
     {
@@ -324,6 +340,7 @@ static int b_dtc_scan(bvm *vm)
 static int b_dtc_clear(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     const char *codes = (be_top(vm) >= 1 && be_isstring(vm, 1))
                             ? be_tostring(vm, 1) : NULL;
@@ -504,6 +521,7 @@ static void obd_set_outcome_globals(bvm *vm, int ok,
 static int b_obd_claim(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 2)
     {
@@ -540,6 +558,7 @@ static int b_obd_release(bvm *vm)
 static int b_obd_request(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 1 || !be_isstring(vm, 1))
     {
@@ -587,6 +606,7 @@ static int b_obd_request(bvm *vm)
 static int b_obd_isotp_tx(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 1 || !be_isstring(vm, 1))
     {
@@ -621,6 +641,7 @@ static int b_obd_isotp_tx(bvm *vm)
 static int b_obd_isotp_rx(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     uint32_t timeout = (be_top(vm) >= 1 && be_isint(vm, 1))
                            ? (uint32_t)be_toint(vm, 1) : 500;
@@ -721,6 +742,7 @@ static int b_obd_file_read(bvm *vm)
 static int b_obd_transfer_file(bvm *vm)
 {
     se_check_budget(vm);
+    se_refuse_when_locked(vm);
 
     if (be_top(vm) < 4 || !be_isstring(vm, 1) || !be_isint(vm, 2) ||
         !be_isint(vm, 3) || !be_isint(vm, 4) ||

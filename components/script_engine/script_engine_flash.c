@@ -44,6 +44,9 @@
 #include "nvs.h"
 
 #include "flash_jobs.h"
+#include "obd_chip.h"
+#include "obd_gate.h"
+#include "ota_manager.h"
 
 #include "script_engine.h"
 #include "script_engine_private.h"
@@ -52,6 +55,7 @@ static const char *TAG = "script_engine";
 
 #define SE_LOG_LINES   96
 #define SE_LOG_LEN     120
+#define SE_LABEL_MAX   64  /* commit label: stored, read back, shown      */
 #define SE_NVS_NS      "se_flash"
 #define SE_NVS_KEY     "commit"
 
@@ -63,20 +67,25 @@ typedef struct
 } se_log_line_t;
 
 static SemaphoreHandle_t s_mx;
-static StaticSemaphore_t s_mx_buf;
+static StaticSemaphore_t s_mx_buf;          /* internal: FreeRTOS object */
 static SemaphoreHandle_t s_answer_sem;
-static StaticSemaphore_t s_answer_buf;
+static StaticSemaphore_t s_answer_buf;      /* internal: FreeRTOS object */
 
 static se_lock_state_t s_lock;
+static bool            s_lock_effects;     /* bus lock + diag hold applied */
 static bool            s_run_active;
-static bool            s_async;
-static uint32_t        s_run_id;
+static bool            s_async;            /* the run in flight is async   */
+static bool            s_kill_pending;     /* Stop before the commit       */
+static uint32_t        s_run_id;           /* the last async run           */
+static uint32_t        s_next_run_id;
 static void           *s_runner;
+static const int       s_lock_token;       /* obd_gate diag-hold owner     */
 
-/* the run's state, guarded by s_mx (the runner writes, httpd reads) */
+/* the last async run's state, guarded by s_mx (runner writes, httpd reads);
+   a sync, rule or console run changes none of it */
 EXT_RAM_BSS_ATTR static char s_phase[48];
 EXT_RAM_BSS_ATTR static char s_ecu_state[16];
-EXT_RAM_BSS_ATTR static char s_commit_label[64];
+EXT_RAM_BSS_ATTR static char s_commit_label[SE_LABEL_MAX];
 EXT_RAM_BSS_ATTR static char s_prompt[200];
 EXT_RAM_BSS_ATTR static char s_choices[120];
 EXT_RAM_BSS_ATTR static char s_answer[96];
@@ -112,13 +121,30 @@ static void copy(char *dst, size_t cap, const char *src)
     snprintf(dst, cap, "%s", (src != NULL) ? src : "");
 }
 
+/* While the lock holds, the OBD chip sends nothing (obd_gate's bus lock)
+ * and AutoPID's pollers stay off (a diag hold of the lock's own, apart
+ * from the run's exclusive hold). Applied on every change of s_lock. */
+static void apply_lock_effects(void)
+{
+    bool held = se_lock_held(s_lock);
+
+    if (held == s_lock_effects)
+    {
+        return;
+    }
+
+    s_lock_effects = held;
+    obd_gate_set_bus_lock(held);
+    obd_gate_diag_hold(&s_lock_token, held);
+}
+
 /* ---- the NVS record (internal stack: flash_jobs) -------------------------- */
 
 typedef struct
 {
-    const char *label; /* NULL: erase                                       */
-    bool        found; /* read                                              */
-    char        read[64];
+    const char *label; /* write: the label; NULL: erase                     */
+    bool        found; /* read: a record is (or may be) there               */
+    char        read[SE_LABEL_MAX];
 } se_nvs_job_t;
 
 static esp_err_t nvs_write_job(void *arg)
@@ -151,27 +177,53 @@ static esp_err_t nvs_write_job(void *arg)
     return err;
 }
 
+/* Fails closed: only "no namespace" or "no key" mean no record. Anything
+   else (a label that does not fit, NVS not initialised, corruption) is
+   taken as a record, so a restart mid-flash can never come back unlocked. */
 static esp_err_t nvs_read_job(void *arg)
 {
     se_nvs_job_t *j = arg;
     nvs_handle_t h;
     size_t len = sizeof(j->read);
+    esp_err_t err = nvs_open(SE_NVS_NS, NVS_READONLY, &h);
 
-    if (nvs_open(SE_NVS_NS, NVS_READONLY, &h) != ESP_OK)
+    if (err == ESP_ERR_NVS_NOT_FOUND)
     {
-        return ESP_OK; /* no namespace: no record */
+        return ESP_OK; /* the namespace was never written */
     }
 
-    j->found = nvs_get_str(h, SE_NVS_KEY, j->read, &len) == ESP_OK;
-    nvs_close(h);
-    return ESP_OK;
+    if (err == ESP_OK)
+    {
+        err = nvs_get_str(h, SE_NVS_KEY, j->read, &len);
+        nvs_close(h);
+
+        if (err == ESP_ERR_NVS_NOT_FOUND)
+        {
+            return ESP_OK;
+        }
+    }
+
+    j->found = true;
+
+    if (err != ESP_OK)
+    {
+        copy(j->read, sizeof(j->read), "unreadable");
+    }
+
+    return err;
 }
 
 void se_flash_boot(void)
 {
     se_nvs_job_t j = { 0 };
+    esp_err_t err = flash_jobs_run(nvs_read_job, &j);
 
-    (void)flash_jobs_run(nvs_read_job, &j);
+    if (err != ESP_OK && !j.found)
+    {
+        j.found = true; /* the read itself failed: fail closed */
+        copy(j.read, sizeof(j.read), "unreadable");
+    }
+
     lock_mx();
     s_lock = se_lock_on_boot(j.found);
 
@@ -182,11 +234,14 @@ void se_flash_boot(void)
     }
 
     unlock_mx();
+    apply_lock_effects();
 
     if (j.found)
     {
-        ESP_LOGW(TAG, "restarted during an ECU flash (\"%s\"): locked until a "
-                 "recovery script finishes or the lock is released", j.read);
+        ESP_LOGW(TAG, "restarted during an ECU flash (\"%s\"%s%s): locked "
+                 "until a recovery run finishes or the lock is released",
+                 j.read, (err != ESP_OK) ? ", " : "",
+                 (err != ESP_OK) ? esp_err_to_name(err) : "");
     }
 }
 
@@ -197,28 +252,45 @@ void se_flash_set_runner(void *task_handle)
     s_runner = task_handle;
 }
 
-void se_flash_run_begin(cJSON *params, bool async)
+uint32_t se_flash_next_run_id(void)
 {
     lock_mx();
-    cJSON_Delete(s_params);
-    s_params = params;
+
+    uint32_t id = ++s_next_run_id;
+
+    unlock_mx();
+    return id;
+}
+
+void se_flash_run_begin(cJSON *params, bool async, uint32_t run_id)
+{
+    lock_mx();
     s_run_active = true;
     s_async = async;
-    s_run_id++;
-    s_phase[0] = '\0';
-    s_done = 0;
-    s_total = 0;
     s_abort = false;
+    s_kill_pending = false;
     s_prompt_open = false;
-    s_have_result = false;
-    s_error[0] = '\0';
 
-    if (s_lock == SE_LOCK_IDLE)
+    if (async)
     {
-        copy(s_ecu_state, sizeof(s_ecu_state), "untouched");
+        cJSON_Delete(s_params);
+        s_params = params;
+        params = NULL;
+        s_run_id = run_id;
+        s_phase[0] = '\0';
+        s_done = 0;
+        s_total = 0;
+        s_have_result = false;
+        s_error[0] = '\0';
+
+        if (s_lock == SE_LOCK_IDLE)
+        {
+            copy(s_ecu_state, sizeof(s_ecu_state), "untouched");
+        }
     }
 
     unlock_mx();
+    cJSON_Delete(params); /* a sync run has no params to keep */
     xSemaphoreTake(s_answer_sem, 0); /* no stale answer */
 }
 
@@ -228,14 +300,22 @@ void se_flash_run_end(bool ok, const char *error)
     lock_mx();
 
     se_lock_state_t was = s_lock;
+    bool aborted = (was == SE_LOCK_COMMITTED) && s_abort;
 
-    s_lock = se_lock_on_run_end(s_lock, ok);
+    s_lock = se_lock_on_run_end(s_lock, ok, s_abort);
     s_run_active = false;
     s_prompt_open = false;
-    s_have_result = true;
-    s_result_ok = ok;
-    copy(s_error, sizeof(s_error), ok ? "" : error);
+
+    if (s_async)
+    {
+        s_have_result = true;
+        s_result_ok = ok && !aborted;
+        copy(s_error, sizeof(s_error),
+             !ok ? error : aborted ? "aborted after flash_commit()" : "");
+    }
+
     unlock_mx();
+    apply_lock_effects();
 
     if (was == SE_LOCK_COMMITTED && s_lock == SE_LOCK_IDLE)
     {
@@ -248,15 +328,26 @@ void se_flash_run_end(bool ok, const char *error)
 
         ESP_LOGI(TAG, "ECU flash run finished");
     }
-    else if (s_lock == SE_LOCK_FAILED && was == SE_LOCK_COMMITTED)
+    else if (was == SE_LOCK_COMMITTED)
     {
-        ESP_LOGW(TAG, "ECU flash run failed after its commit: locked");
+        ESP_LOGW(TAG, "ECU flash run %s after its commit: locked",
+                 aborted && ok ? "aborted" : "failed");
     }
 }
 
 se_lock_state_t se_flash_lock_state(void)
 {
     return s_lock;
+}
+
+bool se_flash_lock_held(void)
+{
+    return se_lock_held(s_lock);
+}
+
+bool se_flash_run_is_async(void)
+{
+    return s_run_active && s_async;
 }
 
 bool se_flash_budget_exempt(void)
@@ -273,6 +364,10 @@ bool se_flash_stop(void)
     if (request)
     {
         s_abort = true;
+    }
+    else if (s_run_active)
+    {
+        s_kill_pending = true; /* a commit under way refuses to complete */
     }
 
     unlock_mx();
@@ -291,14 +386,31 @@ esp_err_t se_flash_release(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_lock = se_lock_on_release(was);
-    unlock_mx();
-
+    /* the record first, under the mutex (the flash_jobs worker never takes
+       it): no run can start between the erase and the state change, and a
+       failed erase leaves the lock as it was */
     se_nvs_job_t j = { .label = NULL };
     esp_err_t err = flash_jobs_run(nvs_write_job, &j);
 
-    ESP_LOGW(TAG, "flash lock released by the operator (was %s)",
-             se_lock_state_str(was));
+    if (err == ESP_OK)
+    {
+        s_lock = se_lock_on_release(was);
+    }
+
+    unlock_mx();
+    apply_lock_effects();
+
+    if (err == ESP_OK)
+    {
+        ESP_LOGW(TAG, "flash lock released by the operator (was %s)",
+                 se_lock_state_str(was));
+    }
+    else
+    {
+        ESP_LOGW(TAG, "flash lock kept: the record was not cleared (%s)",
+                 esp_err_to_name(err));
+    }
+
     return err;
 }
 
@@ -306,7 +418,22 @@ esp_err_t se_flash_release(void)
 
 esp_err_t se_flash_commit(const char *label)
 {
-    se_nvs_job_t j = { .label = (label != NULL && label[0]) ? label : "flash" };
+    char stored[SE_LABEL_MAX]; /* what NVS keeps is what the boot reads */
+
+    copy(stored, sizeof(stored), (label != NULL && label[0]) ? label : "flash");
+
+    if (!se_flash_run_is_async())
+    {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (ota_manager_busy() || obd_chip_update_in_progress() ||
+        obd_chip_kept_for_update())
+    {
+        return ESP_ERR_INVALID_STATE; /* it would restart or reset the chip */
+    }
+
+    se_nvs_job_t j = { .label = stored };
     esp_err_t err = flash_jobs_run(nvs_write_job, &j);
 
     if (err != ESP_OK)
@@ -315,26 +442,46 @@ esp_err_t se_flash_commit(const char *label)
     }
 
     lock_mx();
+
+    if (s_kill_pending)
+    {
+        /* Stop came while the record was written: never commit */
+        unlock_mx();
+        j.label = NULL;
+        (void)flash_jobs_run(nvs_write_job, &j);
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
     s_lock = se_lock_on_commit(s_lock);
-    copy(s_commit_label, sizeof(s_commit_label), j.label);
+    copy(s_commit_label, sizeof(s_commit_label), stored);
     unlock_mx();
-    ESP_LOGI(TAG, "ECU flash committed (\"%s\"): the device is locked",
-             j.label);
+    apply_lock_effects();
+    ESP_LOGI(TAG, "ECU flash committed (\"%s\"): the device is locked", stored);
     return ESP_OK;
 }
 
 void se_flash_set_phase(const char *phase)
 {
     lock_mx();
-    copy(s_phase, sizeof(s_phase), phase);
+
+    if (s_async)
+    {
+        copy(s_phase, sizeof(s_phase), phase);
+    }
+
     unlock_mx();
 }
 
 void se_flash_set_progress(uint32_t done, uint32_t total)
 {
     lock_mx();
-    s_done = done;
-    s_total = total;
+
+    if (s_async)
+    {
+        s_done = done;
+        s_total = total;
+    }
+
     unlock_mx();
 }
 
@@ -368,13 +515,14 @@ const cJSON *se_flash_params(void)
     return s_params; /* written only between runs */
 }
 
-/* Open a prompt and wait for its answer (polling @p alive every 200 ms:
+/* Open a prompt and wait for its one answer (polling @p alive every 200 ms:
    false ends the wait with ESP_ERR_INVALID_STATE). */
 esp_err_t se_flash_ask(const char *text, const char *choices,
                        bool (*alive)(void *), void *ctx,
                        char *answer, size_t cap)
 {
     lock_mx();
+    xSemaphoreTake(s_answer_sem, 0); /* nothing left from an earlier prompt */
     copy(s_prompt, sizeof(s_prompt), text);
     copy(s_choices, sizeof(s_choices), choices);
     s_prompt_open = true;
@@ -393,7 +541,6 @@ esp_err_t se_flash_ask(const char *text, const char *choices,
 
     lock_mx();
     copy(answer, cap, s_answer);
-    s_prompt_open = false;
     unlock_mx();
     return ESP_OK;
 }
@@ -406,21 +553,17 @@ esp_err_t se_flash_answer(const char *value)
 
     if (open)
     {
+        /* one answer per prompt: a second one finds it closed (409) */
         copy(s_answer, sizeof(s_answer), value);
+        s_prompt_open = false;
+        xSemaphoreGive(s_answer_sem);
     }
 
     unlock_mx();
-
-    if (!open)
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    xSemaphoreGive(s_answer_sem);
-    return ESP_OK;
+    return open ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
-/* ---- the gates (wired at start) -------------------------------------------- */
+/* ---- the gates (wired at init) ---------------------------------------------- */
 
 bool script_engine_tx_allowed(void)
 {
@@ -436,9 +579,12 @@ bool script_engine_http_allowed(bool read_only, const char *uri)
 
 const char *script_engine_busy_reason(void)
 {
-    /* a committed run is writing an ECU: no sleep entry under it (a failed
-       or recovering lock persists in NVS, so sleeping then loses nothing) */
-    return (s_run_active && s_lock == SE_LOCK_COMMITTED) ? "ecu_flash" : NULL;
+    /* a committed run is writing an ECU: no sleep entry and no planned
+       restart under it (a failed or recovering lock persists in NVS, so
+       sleeping or restarting then loses nothing) */
+    return (s_run_active && s_lock == SE_LOCK_COMMITTED)
+               ? "an ECU is being flashed"
+               : NULL;
 }
 
 /* ---- the status document ---------------------------------------------------- */
@@ -455,7 +601,7 @@ cJSON *se_flash_status(uint32_t since)
     lock_mx();
     cJSON_AddStringToObject(o, "lock", se_lock_state_str(s_lock));
     cJSON_AddBoolToObject(o, "running", s_run_active);
-    cJSON_AddBoolToObject(o, "async", s_async);
+    cJSON_AddBoolToObject(o, "async", s_run_active && s_async);
     cJSON_AddNumberToObject(o, "run", s_run_id);
     cJSON_AddStringToObject(o, "phase", s_phase);
     cJSON_AddStringToObject(o, "ecu_state", s_ecu_state);
@@ -479,8 +625,15 @@ cJSON *se_flash_status(uint32_t since)
     {
         cJSON *r = cJSON_AddObjectToObject(o, "result");
 
+        cJSON_AddNumberToObject(r, "run", s_run_id);
         cJSON_AddBoolToObject(r, "ok", s_result_ok);
         cJSON_AddStringToObject(r, "error", s_error);
+    }
+
+    /* a cursor past the end means the device restarted since: start over */
+    if (since >= s_log_next)
+    {
+        since = 0;
     }
 
     cJSON *log = cJSON_AddArrayToObject(o, "log");

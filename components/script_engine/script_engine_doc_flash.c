@@ -29,8 +29,9 @@ static const se_bind_doc_t FLASH_DOCS[] =
 {
     { "flash_isotp", "flash_isotp(tx_id, rx_id[, opts])", "flash", "session handle",
       "Open an ISO-TP session on any IDs. opts: ext, ae_tx/ae_rx (extended "
-      "address bytes), pad (byte, or -1 for none), bs, stmin, gap_us (least "
-      "time between our consecutive frames). Four at most. Needs Allow ECU "
+      "address bytes, -1 for none), pad (a byte; -1 or false for none), bs, "
+      "stmin, gap_us (least time between our consecutive frames, up to "
+      "127000). Four at most; can_stop() closes them. Needs Allow ECU "
       "flashing.",
       "var ldr = flash_isotp(0x001, 0x002, {'pad': 0xAA, 'gap_us': 300})" },
     { "flash_send", "flash_send(h, bytes[, timeout_ms])", "flash", "true",
@@ -38,7 +39,8 @@ static const se_bind_doc_t FLASH_DOCS[] =
       "never comes.",
       "flash_send(ldr, bytes('76'))" },
     { "flash_recv", "flash_recv(h[, timeout_ms])", "flash", "bytes, or nil",
-      "Receive the next PDU on a session (up to 4095 bytes).",
+      "Receive the next PDU on a session (up to 4095 bytes). The timeout runs "
+      "until the first frame, then between frames; 0 looks once.",
       "var ack = flash_recv(ldr, 1000)" },
     { "flash_request", "flash_request(h, bytes[, timeout_ms[, opts]])", "flash",
       "the reply bytes, or nil",
@@ -50,11 +52,14 @@ static const se_bind_doc_t FLASH_DOCS[] =
       "Close a session (every session also closes when the run ends).",
       "flash_close(ldr)" },
     { "flash_can_send", "flash_can_send(id, bytes[, ext])", "flash", "true",
-      "Send one raw frame of up to 8 bytes. Needs Allow ECU flashing.",
+      "Send one raw frame of up to 8 bytes. Frames queued for flash_can_recv "
+      "before it are dropped, so a recv reads its answer. Needs Allow ECU "
+      "flashing.",
       "flash_can_send(0x750, bytes('5F022751'))" },
     { "flash_can_recv", "flash_can_recv(timeout_ms[, ids])", "flash",
       "[id, bytes], or nil",
-      "The next frame on the bus, or the next one with an id in the list.",
+      "The next frame on the bus, or the next one with that id (an int) or "
+      "an id in the list (1 to 16 ints). 0 ms looks once.",
       "var f = flash_can_recv(600, [0x758])" },
     { "flash_can_quiet", "flash_can_quiet(window_ms, timeout_ms[, ids])", "flash",
       "bool",
@@ -62,14 +67,17 @@ static const se_bind_doc_t FLASH_DOCS[] =
       "false when timeout_ms ran out first.",
       "flash_can_quiet(1200, 5000, [0x1C4])" },
     { "flash_commit", "flash_commit([label])", "flash", "true",
-      "The point of no return, called just before the first erase. Records "
-      "it in NVS, then locks the device until the run ends well or an "
-      "operator releases it. max_runtime_ms stops counting; Stop becomes a "
-      "request the script reads with flash_abort_requested().",
+      "The point of no return, just before the first erase; async runs only. "
+      "Records it in NVS, then locks the device: only flash_* bindings reach "
+      "the bus, the OBD chip sends nothing, max_runtime_ms stops counting "
+      "and Stop becomes flash_abort_requested(). Refused during a firmware "
+      "update or with an obd_claim() open. A run that ends without an error "
+      "and was not asked to abort opens the lock; any other end keeps it.",
       "flash_commit('erase')" },
     { "flash_abort_requested", "flash_abort_requested()", "flash", "bool",
       "True once Stop was pressed after the commit: finish the current step "
-      "and leave the ECU recoverable.",
+      "and leave the ECU recoverable. The run then ends failed and the lock "
+      "stays, however it returns.",
       "if flash_abort_requested() return end" },
     { "flash_state", "flash_state(state)", "flash", "nil",
       "Tell the status what the ECU holds now: 'untouched', 'loader' or "
@@ -85,7 +93,8 @@ static const se_bind_doc_t FLASH_DOCS[] =
       "Add a numbered line to the status log (GET /api/scripts/status?since=n).",
       "flash_log('erase acknowledged')" },
     { "flash_ask", "flash_ask(text[, choices])", "flash", "the answer string",
-      "Show the operator a prompt and wait for POST /api/scripts/answer.",
+      "Show the operator a prompt and wait for POST /api/scripts/answer "
+      "(one answer per prompt). Async runs only.",
       "flash_ask('Turn the ignition off, then on', 'done')" },
     { "flash_param", "flash_param(name)", "flash", "value, or nil",
       "A parameter the run was started with (\"params\" of POST /api/scripts/run).",

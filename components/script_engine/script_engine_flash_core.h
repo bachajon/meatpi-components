@@ -28,7 +28,7 @@
  *
  *   IDLE ──flash_commit()──▶ COMMITTED ──run ends ok──▶ IDLE
  *                               │
- *                    run ends with an error
+ *               run ends with an error, or after an abort request
  *                               ▼
  *                            FAILED ──release (acknowledged)──▶ IDLE
  *   boot with the NVS record ⇒ RECOVERY (like FAILED)
@@ -62,7 +62,9 @@ const char *se_lock_state_str(se_lock_state_t s);
 bool se_lock_held(se_lock_state_t s);
 
 se_lock_state_t se_lock_on_commit(se_lock_state_t s);
-se_lock_state_t se_lock_on_run_end(se_lock_state_t s, bool ok);
+/** A committed run ends: IDLE only when it raised nothing AND was not
+ *  asked to abort (an aborted flash leaves a half-written ECU: FAILED). */
+se_lock_state_t se_lock_on_run_end(se_lock_state_t s, bool ok, bool aborted);
 /** Only FAILED and RECOVERY can be released; COMMITTED never. */
 se_lock_state_t se_lock_on_release(se_lock_state_t s);
 se_lock_state_t se_lock_on_boot(bool committed_record);

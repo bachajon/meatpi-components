@@ -190,6 +190,13 @@ static esp_err_t run_handler(httpd_req_t *req)
                                 "busy or script_engine disabled");
         httpd_resp_set_status(req, "409 Conflict");
     }
+    else if (err == ESP_ERR_NOT_ALLOWED)
+    {
+        cJSON_AddBoolToObject(o, "ok", false);
+        cJSON_AddStringToObject(o, "error", "an ECU flash holds the lock: a "
+                                "recovery run is async (\"async\": true)");
+        httpd_resp_set_status(req, "423 Locked");
+    }
     else
     {
         cJSON_AddBoolToObject(o, "ok", err == ESP_OK);

@@ -22,7 +22,9 @@
  * @brief ISO-TP sessions and raw frames for the flash bindings, on the
  *        script runner task. Each session owns one can_manager queue
  *        subscription on its reply ID; the raw path owns one more, opened
- *        at the first flash_can_recv/quiet. All are closed after every run.
+ *        at the first flash_can_send/recv/quiet. All are closed after every
+ *        run, and when the script stops the bus (can_stop wipes the
+ *        subscriber table, so sessions opened before it are gone).
  *
  * Pacing: consecutive frames go out no closer than max(the ECU's STmin,
  * the session's gap_us), measured from each frame's hand-off to the
@@ -66,10 +68,10 @@ EXT_RAM_BSS_ATTR static se_tp_session_t s_tp[SE_TP_SESSIONS];
 EXT_RAM_BSS_ATTR static uint8_t s_tp_buf[SE_TP_SESSIONS][SE_TP_MAX];
 EXT_RAM_BSS_ATTR static uint8_t s_tp_qstore[SE_TP_SESSIONS]
                                            [SE_TP_QLEN * sizeof(can_core_frame_t)];
-static StaticQueue_t s_tp_qobj[SE_TP_SESSIONS];
+static StaticQueue_t s_tp_qobj[SE_TP_SESSIONS]; /* internal: FreeRTOS object */
 
 EXT_RAM_BSS_ATTR static uint8_t s_raw_qstore[SE_RAW_QLEN * sizeof(can_core_frame_t)];
-static StaticQueue_t s_raw_qobj;
+static StaticQueue_t s_raw_qobj;                /* internal: FreeRTOS object */
 static QueueHandle_t s_raw_q;
 static int s_raw_sub = -1;
 
@@ -206,9 +208,8 @@ static esp_err_t await_fc(se_tp_session_t *s, int64_t deadline,
 
     while (true)
     {
-        uint32_t left = ms_left(deadline);
-
-        if (left == 0 || xQueueReceive(s->q, &f, ms_ticks(left)) != pdTRUE)
+        /* a deadline that passed still looks at the queue once */
+        if (xQueueReceive(s->q, &f, ms_ticks(ms_left(deadline))) != pdTRUE)
         {
             return ESP_ERR_TIMEOUT;
         }
@@ -308,9 +309,8 @@ esp_err_t se_tp_recv(int h, const uint8_t **out, size_t *len,
 
     while (true)
     {
-        uint32_t left = ms_left(deadline);
-
-        if (left == 0 || xQueueReceive(s->q, &f, ms_ticks(left)) != pdTRUE)
+        /* a deadline that passed (or 0 ms) still looks at the queue once */
+        if (xQueueReceive(s->q, &f, ms_ticks(ms_left(deadline))) != pdTRUE)
         {
             return ESP_ERR_TIMEOUT;
         }
@@ -328,7 +328,13 @@ esp_err_t se_tp_recv(int h, const uint8_t **out, size_t *len,
                 return err;
             }
 
-            /* a multi-frame reply gets the CF gap allowance on top */
+            /* a multi-frame reply: the timeout applies again per block */
+            deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+        }
+        else if (st == SE_TP_RX_MORE)
+        {
+            /* N_Cr: the timeout runs between consecutive frames, not over
+               the whole message (a 4 KiB reply is 585 of them) */
             deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
         }
         else if (st == SE_TP_RX_DONE)
@@ -345,16 +351,6 @@ esp_err_t se_tp_recv(int h, const uint8_t **out, size_t *len,
 }
 
 /* ---- raw frames ------------------------------------------------------------ */
-
-esp_err_t se_raw_send(uint32_t id, bool ext, const uint8_t *d, uint8_t dlc)
-{
-    if (dlc > 8)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    return put(id, ext, d, dlc);
-}
 
 static esp_err_t raw_open(void)
 {
@@ -382,6 +378,27 @@ static esp_err_t raw_open(void)
 
     (void)can_manager_subscriber_name(s_raw_sub, "script flash raw");
     return ESP_OK;
+}
+
+/* The raw subscription exists before the frame goes out, so a fast reply
+   is never missed; frames queued before the send are dropped, so a recv
+   after it reads what came after it (flash_request does the same). */
+esp_err_t se_raw_send(uint32_t id, bool ext, const uint8_t *d, uint8_t dlc)
+{
+    if (dlc > 8)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = raw_open();
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    xQueueReset(s_raw_q);
+    return put(id, ext, d, dlc);
 }
 
 static bool id_match(const uint32_t *ids, size_t n, uint32_t id)
@@ -416,9 +433,7 @@ esp_err_t se_raw_recv(const uint32_t *ids, size_t n_ids, uint32_t timeout_ms,
 
     while (true)
     {
-        uint32_t left = ms_left(deadline);
-
-        if (left == 0 || xQueueReceive(s_raw_q, out, ms_ticks(left)) != pdTRUE)
+        if (xQueueReceive(s_raw_q, out, ms_ticks(ms_left(deadline))) != pdTRUE)
         {
             return ESP_ERR_TIMEOUT;
         }
@@ -466,6 +481,14 @@ bool se_raw_quiet(const uint32_t *ids, size_t n_ids, uint32_t window_ms,
             quiet_until = esp_timer_get_time() + (int64_t)window_ms * 1000;
         }
     }
+}
+
+void se_tp_bus_down(void)
+{
+    /* the subscriber table is wiped when the bus stops: let go of the
+       slots while they are still ours, so a later close cannot unsubscribe
+       whoever takes them after the restart */
+    se_tp_epilogue();
 }
 
 void se_tp_epilogue(void)

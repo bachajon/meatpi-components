@@ -49,6 +49,7 @@ void test_tp_extended_address_round_trip(void);
 void test_tp_sequence_error_and_overflow(void);
 void test_tp_flow_control_parse(void);
 void test_tp_rejects_bad_lengths(void);
+void test_tp_block_size_flow_control(void);
 void test_lock_lifecycle(void);
 void test_lock_tx_gate(void);
 void test_lock_http_gate(void);
@@ -177,6 +178,7 @@ void app_main(void)
     RUN_TEST(test_tp_sequence_error_and_overflow);
     RUN_TEST(test_tp_flow_control_parse);
     RUN_TEST(test_tp_rejects_bad_lengths);
+    RUN_TEST(test_tp_block_size_flow_control);
     RUN_TEST(test_lock_lifecycle);
     RUN_TEST(test_lock_tx_gate);
     RUN_TEST(test_lock_http_gate);

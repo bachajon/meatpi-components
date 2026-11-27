@@ -88,6 +88,7 @@ static const char *s_run_src;
 static volatile bool s_async_run;
 static char *s_async_src;
 static cJSON *s_run_params;
+static uint32_t s_async_run_id;
 EXT_RAM_BSS_ATTR static char s_async_out[SE_OUT_MAX];
 static char *s_run_out;
 static size_t s_run_out_cap;
@@ -138,7 +139,8 @@ static void do_run(void)
 
     if (!s_run_check)
     {
-        se_flash_run_begin(s_run_params, s_async_run);
+        se_flash_run_begin(s_run_params, s_async_run,
+                           s_async_run ? s_async_run_id : 0);
         s_run_params = NULL;
     }
 
@@ -269,6 +271,15 @@ static esp_err_t run_common(const char *src, char *out, size_t cap, bool check)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* an ECU flash holds the lock: no rule, console or synchronous run may
+       transmit as the runner; a recovery run is async, started over HTTP
+       (the lock gate admits it). A syntax check runs nothing. */
+    if (!check && se_flash_lock_held())
+    {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
     s_busy = true;
     s_kill = false;
     s_run_check = check;
@@ -286,7 +297,7 @@ static esp_err_t run_common(const char *src, char *out, size_t cap, bool check)
 
     if (xSemaphoreTake(s_done, wait) != pdTRUE)
     {
-        s_kill = true;                    /* ask it to unwind */
+        script_engine_kill();             /* ask it to unwind */
         xSemaphoreTake(s_done, portMAX_DELAY);
     }
 
@@ -321,7 +332,7 @@ bool se_run_killed(void)
 
 /* ---- async runs ------------------------------------------------------------ */
 
-esp_err_t script_engine_run_async(char *src, cJSON *params)
+esp_err_t script_engine_run_async(char *src, cJSON *params, uint32_t *run_id)
 {
     if (!s_started || !se_settings_enabled() || s_runner == NULL)
     {
@@ -349,11 +360,18 @@ esp_err_t script_engine_run_async(char *src, cJSON *params)
     s_kill = false;
     s_run_check = false;
     s_async_run = true;
+    s_async_run_id = se_flash_next_run_id();
+
+    if (run_id != NULL)
+    {
+        *run_id = s_async_run_id;
+    }
+
     s_run_start_ms = esp_log_timestamp();
     s_async_src = src;
     s_run_src = src;
     s_run_params = params;
-    s_async_out[0] = '\0';
+    memset(s_async_out, 0, sizeof(s_async_out)); /* no tail of a past run */
     s_run_out = s_async_out;
     s_run_out_cap = sizeof(s_async_out);
     s_run_result = ESP_FAIL;
@@ -365,12 +383,6 @@ esp_err_t script_engine_run_async(char *src, cJSON *params)
 const char *se_async_output(void)
 {
     return s_async_out;
-}
-
-void se_set_run_params(cJSON *params)
-{
-    cJSON_Delete(s_run_params);
-    s_run_params = params;
 }
 
 /* the lock gate for http_server_manager */
@@ -508,6 +520,18 @@ esp_err_t script_engine_init(void)
         s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
     }
 
+    /* ECU flashing, at init so no start of another component can come
+       first: a restart in the middle comes back locked (the NVS record,
+       read through flash_jobs: NVS and flash_jobs are up before this);
+       while the lock holds only the runner transmits, the OBD chip sends
+       nothing, HTTP changes are refused (423) and no sleep entry starts
+       under a committed run. Independent of the settings: a degraded
+       script engine still keeps a half-written ECU locked. */
+    se_flash_boot();
+    can_manager_set_tx_gate(script_engine_tx_allowed);
+    (void)http_server_manager_set_lock_gate(http_lock_gate);
+    sleep_manager_set_busy_check(script_engine_busy_reason);
+
     return se_settings_register();
 }
 
@@ -532,14 +556,7 @@ esp_err_t script_engine_start(void)
                                      s_runner_stack, &s_runner_tcb);
     }
 
-    /* ECU flashing: a restart in the middle comes back locked; while a
-       flash holds the lock only the runner transmits, HTTP changes are
-       refused (423) and no sleep entry starts under a committed run */
-    se_flash_set_runner(s_runner);
-    se_flash_boot();
-    can_manager_set_tx_gate(script_engine_tx_allowed);
-    (void)http_server_manager_set_lock_gate(http_lock_gate);
-    sleep_manager_set_busy_check(script_engine_busy_reason);
+    se_flash_set_runner(s_runner); /* the one sender the TX gate admits */
 
     s_started = true;
     ESP_LOGI(TAG, "started (%s, max_runtime %lu ms)",

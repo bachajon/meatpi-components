@@ -216,6 +216,44 @@ void test_tp_flow_control_parse(void)
     TEST_ASSERT_EQUAL_HEX8(0x01, fc[2]);
 }
 
+void test_tp_block_size_flow_control(void)
+{
+    /* we advertise BS 2: after every 2 CFs the sender waits for our FC */
+    se_tp_opts_t o;
+    uint8_t msg[30];
+    uint8_t back[64];
+    uint8_t fr[8];
+    size_t off = 0;
+    se_tp_rx_t rx;
+
+    for (size_t i = 0; i < sizeof(msg); i++)
+    {
+        msg[i] = (uint8_t)(0x40 + i);
+    }
+
+    se_tp_opts_default(&o);
+    o.bs = 2;
+    se_tp_rx_init(&rx, back, sizeof(back));
+
+    se_tp_first(&o, msg, sizeof(msg), fr, &off);
+    TEST_ASSERT_EQUAL(SE_TP_RX_NEED_FC, se_tp_rx_feed(&rx, &o, fr, 8));
+
+    const se_tp_rx_status_t want[4] =
+    {
+        SE_TP_RX_MORE, SE_TP_RX_NEED_FC, SE_TP_RX_MORE, SE_TP_RX_DONE,
+    };
+    uint8_t sn = 1;
+
+    for (int i = 0; i < 4; i++)
+    {
+        uint8_t dlc = se_tp_consecutive(&o, msg, sizeof(msg), &off, sn++, fr);
+
+        TEST_ASSERT_EQUAL(want[i], se_tp_rx_feed(&rx, &o, fr, dlc));
+    }
+
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(msg, back, sizeof(msg));
+}
+
 void test_tp_rejects_bad_lengths(void)
 {
     se_tp_opts_t o;
@@ -241,16 +279,18 @@ void test_lock_lifecycle(void)
     TEST_ASSERT_FALSE(se_lock_held(s));
 
     /* a run that never commits leaves it idle, well or not */
-    TEST_ASSERT_EQUAL(SE_LOCK_IDLE, se_lock_on_run_end(s, false));
+    TEST_ASSERT_EQUAL(SE_LOCK_IDLE, se_lock_on_run_end(s, false, false));
 
     s = se_lock_on_commit(s);
     TEST_ASSERT_EQUAL(SE_LOCK_COMMITTED, s);
     TEST_ASSERT_TRUE(se_lock_held(s));
     /* a running job is never released */
     TEST_ASSERT_EQUAL(SE_LOCK_COMMITTED, se_lock_on_release(s));
-    TEST_ASSERT_EQUAL(SE_LOCK_IDLE, se_lock_on_run_end(s, true));
+    TEST_ASSERT_EQUAL(SE_LOCK_IDLE, se_lock_on_run_end(s, true, false));
+    /* a run that returned after an abort request left a half-written ECU */
+    TEST_ASSERT_EQUAL(SE_LOCK_FAILED, se_lock_on_run_end(s, true, true));
 
-    s = se_lock_on_run_end(SE_LOCK_COMMITTED, false);
+    s = se_lock_on_run_end(SE_LOCK_COMMITTED, false, false);
     TEST_ASSERT_EQUAL(SE_LOCK_FAILED, s);
     /* a recovery run commits again and can end the lock */
     TEST_ASSERT_EQUAL(SE_LOCK_COMMITTED, se_lock_on_commit(s));

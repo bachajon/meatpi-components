@@ -179,6 +179,13 @@ typedef struct
     uint32_t until;       /* where the last read pushed to          */
 } sm_activity_t;
 
+/* An ECU being flashed (2026-11-27): the ladder's countdown is pushed out
+ * to @p until_ms where that is later, with NO cap: a flash that stops
+ * half-way leaves an ECU that does not start, worse than a battery that
+ * drains a little further. The critical floor is not touched here: its
+ * deadline keeps the activity cap, so it stays the battery's last word. */
+void sm_ladder_push(sm_policy_t *p, bool ladder_on, uint32_t until_ms);
+
 void sm_activity_init(sm_activity_t *a);
 bool sm_activity_apply(sm_policy_t *p, bool ladder_on, sm_critical_t *c,
                        sm_activity_t *a, uint32_t now_ms, uint32_t hold_ms,
