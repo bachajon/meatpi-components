@@ -246,6 +246,7 @@ void sm_nap_verify_chip(uint32_t nap, uint32_t *resleeps);
 extern const char SM_WHY_LOG[];         /* "log": a log read                  */
 extern const char SM_WHY_CHIP_UPDATE[]; /* "chip_update": the OBD chip's      */
 extern const char SM_WHY_FW_UPDATE[];   /* "fw_update": the device's own image */
+extern const char SM_WHY_ECU_FLASH[];   /* "ecu_flash": a script writing an ECU */
 
 /** The update running now (one of the two SM_WHY_ words), or NULL. */
 const char *sm_update_busy(void);

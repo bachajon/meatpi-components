@@ -87,6 +87,7 @@ static sm_activity_t s_activity;
 const char SM_WHY_LOG[] = "log";
 const char SM_WHY_CHIP_UPDATE[] = "chip_update";
 const char SM_WHY_FW_UPDATE[] = "fw_update";
+const char SM_WHY_ECU_FLASH[] = "ecu_flash";
 static const char *s_activity_why = "";
 static bool        s_update_hold_logged;
 

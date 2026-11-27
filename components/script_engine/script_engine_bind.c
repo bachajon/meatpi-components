@@ -65,6 +65,7 @@
 
 #include "script_engine_doc.h"
 #include "script_engine_obd.h"
+#include "script_engine_flash.h"
 #include "script_engine_private.h"
 
 /* ---- helpers --------------------------------------------------------------- */
@@ -149,7 +150,7 @@ static int b_millis(bvm *vm)
 static const int s_bus_token;
 static bool s_bus_held;
 
-static void se_bus_hold(void)
+void se_bus_hold(void)
 {
     if (s_bus_held || !se_settings_exclusive())
     {
@@ -928,6 +929,16 @@ bool se_bindings_selfcheck(void)
         }
     }
 
+    for (size_t i = 0; i < se_flash_binding_count(); i++)
+    {
+        if (se_bind_doc_find(se_flash_binding_name(i)) == NULL)
+        {
+            ESP_LOGE("script_engine", "binding '%s' has no reference entry",
+                     se_flash_binding_name(i));
+            ok = false;
+        }
+    }
+
     for (size_t i = 0; i < se_bind_doc_count(); i++)
     {
         const char *name = se_bind_doc(i)->name;
@@ -936,6 +947,11 @@ bool se_bindings_selfcheck(void)
         for (size_t j = 0; j < N_BINDINGS && !found; j++)
         {
             found = strcmp(BINDINGS[j].name, name) == 0;
+        }
+
+        for (size_t j = 0; j < se_flash_binding_count() && !found; j++)
+        {
+            found = strcmp(se_flash_binding_name(j), name) == 0;
         }
 
         if (!found)
@@ -976,4 +992,5 @@ void se_bindings_register(bvm *vm)
     be_setglobal(vm, "uds_xfer_blocks");
     be_pop(vm, 1);
     se_bind_can_globals(vm);
+    se_flash_bindings_register(vm);
 }

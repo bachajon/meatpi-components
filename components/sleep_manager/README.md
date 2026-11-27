@@ -187,6 +187,15 @@ uploadconfirm` leg U5. The store-and-forward bench
 (`tools/testbench/ha/ha_history_backfill_bench.py`) holds the device at
 12.5 V while the integration pulls and reads the deadline move.
 
+**An ECU being flashed holds the same way since 2026-11-27:**
+`sleep_manager_set_busy_check(fn)` takes one more writer's check, asked by
+`sm_update_busy()` before the chip and the image; the script engine wires
+it to `script_engine_busy_reason()`, true while a run past `flash_commit()`
+writes an ECU. `activity_why` is then `ecu_flash`, the log line says "ECU
+flash", and the same bounds apply (the activity cap, the entry's 180 s
+wait): an ECU read of ~17 min outlasts them, which is an open question for
+the design issue.
+
 ## Bench safety (meatpi 2026-07-07, mandatory)
 
 - The state task arms only after a **15 s boot grace**: a bootloop

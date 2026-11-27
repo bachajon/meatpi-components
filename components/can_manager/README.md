@@ -192,6 +192,18 @@ stopped are counted in `tx_lost` as well, so at rest `tx` = `tx_done` +
 `tx_lost`. The bench: the firmware repo's `tools/testbench/can/
 can_busoff_slots_bench.py` (`CAN BUSOFF SLOTS PASS`), 18 real bus-offs.
 
+## A transmit gate: one sender holds the bus (2026-11-27)
+
+`can_manager_set_tx_gate(bool (*gate)(void))` installs a process-wide
+gate at the one place every frame passes, `can_core_transmit()`: while it
+returns false the frame is refused (`ELM327_ERR_BUSY`, counted in
+`tx_gated`), and `can_manager_send()` answers `ESP_ERR_NOT_ALLOWED`. The
+gate is called in the sender's context, so it can tell senders apart by
+their task. The script engine sets it for its ECU flash lock: after a
+script's `flash_commit()` only the script runner may transmit, and SLCAN,
+J2534, GVRET, RealDash, AutoPID, MQTT and every other binding are refused
+until the flash ends or is released. NULL removes it; one gate.
+
 ## Receive-error storms and the interrupt watchdog (`rx_storms`, 2026-10-03)
 
 A controller listening at a bitrate CLOSE to the bus's (83.3 against 95.2
